@@ -110,8 +110,7 @@ class AKShareClient:
         quotes = quotes.copy()
         quotes["code_6"] = quotes["代码"].astype(str).str[-6:]
         selected = quotes[quotes["code_6"].isin(normalized_codes)].copy()
-        selected.insert(0, "代码", selected.pop("code_6"))
-
+        selected["代码"] = selected.pop("code_6")
         if selected.empty:
             raise LookupError("未能获取到对应股票的实时行情，请检查代码是否正确")
 

@@ -10,3 +10,28 @@ Traceback (most recent call last):
   File "D:\PythonProjects25-12\AShare\dbn_trading_auto\Lib\site-packages\pandas\core\frame.py", line 5180, in insert
     raise ValueError(f"cannot insert {column}, already exists")
 ValueError: cannot insert 代码, already exists
+2025-12-08 15:44:54,463 [ERROR] 未预期的错误：Can not decode value starting with character '<'
+Traceback (most recent call last):
+  File "D:\PythonProjects25-12\AShare\start.py", line 84, in run
+    realtime_path = fetch_and_save_realtime(client, DEFAULT_STOCK_CODES)
+  File "D:\PythonProjects25-12\AShare\start.py", line 64, in fetch_and_save_realtime
+    realtime_df = client.fetch_realtime_quotes(codes)
+  File "D:\PythonProjects25-12\AShare\src\akshare_client.py", line 102, in fetch_realtime_quotes
+    quotes = self._run_with_proxy_fallback(
+        action=ak.stock_zh_a_spot,
+    ...<3 lines>...
+        ),
+    )
+  File "D:\PythonProjects25-12\AShare\src\akshare_client.py", line 57, in _run_with_proxy_fallback
+    return action()
+  File "D:\PythonProjects25-12\AShare\dbn_trading_auto\Lib\site-packages\akshare\stock\stock_zh_a_sina.py", line 61, in stock_zh_a_spot
+    data_json = demjson.decode(r.text)
+  File "D:\PythonProjects25-12\AShare\dbn_trading_auto\Lib\site-packages\akshare\utils\demjson.py", line 6320, in decode
+    result = j.decode(
+        txt,
+    ...<2 lines>...
+        return_stats=(return_stats or write_stats),
+    )
+  File "D:\PythonProjects25-12\AShare\dbn_trading_auto\Lib\site-packages\akshare\utils\demjson.py", line 5501, in decode
+    raise errors[0]
+akshare.utils.demjson.JSONDecodeError: Can not decode value starting with character '<'
