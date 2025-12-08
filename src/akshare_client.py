@@ -72,6 +72,18 @@ class AKShareClient:
         digits = "".join(ch for ch in str(code) if ch.isdigit())
         return digits[-6:].zfill(6)
 
+    @staticmethod
+    def _to_sina_symbol(code: str) -> str:
+        """Convert normalized 6-digit code to Sina symbol."""
+
+        return f"sh{code}" if code.startswith("6") else f"sz{code}"
+
+    @staticmethod
+    def _normalize_adjust(adjust: str | None) -> str:
+        """Normalize adjust flag for Sina endpoints."""
+
+        return "" if adjust is None else adjust
+
     def fetch_realtime_quotes(self, codes: List[str]) -> pd.DataFrame:
         """Retrieve real-time quotes for the given stock codes.
 
@@ -90,8 +102,8 @@ class AKShareClient:
         quotes = self._run_with_proxy_fallback(
             action=ak.stock_zh_a_spot,
             error_message=(
-                "实时行情查询失败：连接数据接口时被远端中断，可能是网络不稳定、网站风控或"
-                "代理配置问题，请稍后重试"
+                "实时行情查询失败：连接新浪数据接口时被远端中断，可能是网络不稳定、"
+                "网站风控或代理配置问题，请稍后重试"
             ),
         )
 
@@ -122,14 +134,30 @@ class AKShareClient:
         selected = selected.set_index("code").loc[ordered].reset_index()
         return selected
 
+    def _fetch_sina_daily(
+        self, symbol: str, start_date: str, end_date: str, adjust: str
+    ) -> pd.DataFrame:
+        return self._run_with_proxy_fallback(
+            action=lambda: ak.stock_zh_a_daily(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust,
+            ),
+            error_message=(
+                "历史行情查询失败：连接新浪数据接口时被远端中断，可能是网络不稳定、网站风控"
+                "或代理配置问题，请稍后重试"
+            ),
+        )
+
     def fetch_history(
         self,
         code: str,
         start_date: str,
         end_date: Optional[str] = None,
-        adjust: str = "qfq",
+        adjust: str | None = "qfq",
     ) -> pd.DataFrame:
-        """Retrieve historical data for a single stock.
+        """Retrieve Sina historical data for a single stock.
 
         Args:
             code: Stock code such as "600000".
@@ -144,18 +172,15 @@ class AKShareClient:
             raise ValueError("股票代码不能为空")
 
         normalized_code = self._normalize_code(code)
-        history = self._run_with_proxy_fallback(
-            action=lambda: ak.stock_zh_a_hist(
-                symbol=normalized_code,
-                period="daily",
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust,
-            ),
-            error_message=(
-                "历史行情查询失败：连接数据接口时被远端中断，可能是网络不稳定、网站风控或"
-                "代理配置问题，请稍后重试"
-            ),
+        normalized_end = end_date or date.today().strftime("%Y%m%d")
+        adjust_flag = self._normalize_adjust(adjust)
+        symbol = self._to_sina_symbol(normalized_code)
+
+        history = self._fetch_sina_daily(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=normalized_end,
+            adjust=adjust_flag,
         )
 
         if history.empty:
@@ -180,21 +205,17 @@ class AKShareClient:
         start_date = (today - timedelta(days=n_days - 1)).strftime("%Y%m%d")
         end_date = today.strftime("%Y%m%d")
 
+        adjust_flag = self._normalize_adjust(adjust)
+
         records: list[pd.DataFrame] = []
         for code in codes:
             normalized_code = self._normalize_code(code)
-            history = self._run_with_proxy_fallback(
-                action=lambda c=normalized_code: ak.stock_zh_a_hist(
-                    symbol=c,
-                    period="daily",
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust=adjust,
-                ),
-                error_message=(
-                    "历史行情查询失败：连接数据接口时被远端中断，可能是网络不稳定、网站风控或"
-                    "代理配置问题，请稍后重试"
-                ),
+            symbol = self._to_sina_symbol(normalized_code)
+            history = self._fetch_sina_daily(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust=adjust_flag,
             )
 
             if history.empty:
