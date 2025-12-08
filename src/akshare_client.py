@@ -85,6 +85,15 @@ class AKShareClient:
         return digits[-6:].zfill(6)
 
     @staticmethod
+    def _find_first_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+        """从候选列名中找到第一个存在的列。"""
+
+        for column in candidates:
+            if column in df.columns:
+                return column
+        return None
+
+    @staticmethod
     def _to_sina_symbol(code: str) -> str:
         """Convert normalized 6-digit code to Sina symbol."""
 
@@ -144,6 +153,99 @@ class AKShareClient:
         ordered = pd.CategoricalIndex(normalized_codes, ordered=True)
         selected = selected.set_index("代码").loc[ordered].reset_index()
         return selected
+
+    def fetch_all_a_stocks(self) -> pd.DataFrame:
+        """获取全 A 股基础信息列表。"""
+
+        stocks = self._run_with_proxy_fallback(
+            action=ak.stock_info_a_code_name,
+            error_message="全 A 股列表查询失败",
+        )
+
+        stocks = stocks.copy()
+        code_column = self._find_first_column(
+            stocks, ["code", "代码", "股票代码", "证券代码"]
+        )
+        name_column = self._find_first_column(stocks, ["name", "名称", "股票简称"])
+        exchange_column = self._find_first_column(
+            stocks, ["exchange", "交易所", "市场类型", "市场"]
+        )
+        list_date_column = self._find_first_column(
+            stocks, ["list_date", "上市日期", "ipo_date", "上市时间"]
+        )
+
+        stocks["code"] = (
+            stocks[code_column].apply(
+                lambda value: self._normalize_code(value) if pd.notna(value) else pd.NA
+            )
+            if code_column
+            else pd.NA
+        )
+        stocks["name"] = stocks[name_column] if name_column else pd.NA
+        stocks["exchange"] = stocks[exchange_column] if exchange_column else pd.NA
+        if list_date_column:
+            stocks["list_date"] = (
+                pd.to_datetime(stocks[list_date_column], errors="coerce")
+                .dt.date.astype(str)
+            )
+        else:
+            stocks["list_date"] = pd.NA
+
+        return stocks[["code", "name", "exchange", "list_date"]]
+
+    def fetch_index_constituents(self, index_codes: list[str]) -> pd.DataFrame:
+        """获取多个指数的成分股列表。"""
+
+        if not index_codes:
+            raise ValueError("请至少提供一个指数代码进行查询")
+
+        records: list[dict[str, object]] = []
+        for index_code in index_codes:
+            normalized_index_code = self._normalize_code(index_code)
+            constituents = self._run_with_proxy_fallback(
+                action=lambda code=normalized_index_code: ak.index_stock_cons(symbol=code),
+                error_message=f"指数成分股查询失败：{normalized_index_code}",
+            )
+
+            if constituents.empty:
+                continue
+
+            stock_code_column = self._find_first_column(
+                constituents, ["品种代码", "成分券代码", "代码", "证券代码", "股票代码"]
+            )
+            stock_name_column = self._find_first_column(
+                constituents, ["品种简称", "名称", "证券简称", "股票简称", "stock_name"]
+            )
+            index_name_column = self._find_first_column(
+                constituents, ["指数名称", "名称", "品种名称", "指数简称", "index_name"]
+            )
+            index_name = (
+                str(constituents.iloc[0][index_name_column]).strip()
+                if index_name_column
+                else normalized_index_code
+            )
+
+            for _, row in constituents.iterrows():
+                stock_code = row[stock_code_column] if stock_code_column else None
+                stock_name = row[stock_name_column] if stock_name_column else None
+                if pd.isna(stock_code) and pd.isna(stock_name):
+                    continue
+
+                records.append(
+                    {
+                        "index_code": normalized_index_code,
+                        "index_name": index_name,
+                        "stock_code": self._normalize_code(stock_code)
+                        if stock_code is not None and pd.notna(stock_code)
+                        else pd.NA,
+                        "stock_name": stock_name if stock_name is not None else pd.NA,
+                    }
+                )
+
+        if not records:
+            raise LookupError("未能获取到任何指数成分股，请检查指数代码或网络连接")
+
+        return pd.DataFrame(records)
 
     def _fetch_sina_daily(
         self, symbol: str, start_date: str, end_date: str, adjust: str
@@ -207,6 +309,18 @@ class AKShareClient:
             error_message="行业列表查询失败",
         )
 
+    def fetch_industry_list(self) -> pd.DataFrame:
+        """获取行业板块列表，返回标准化列名。"""
+
+        industries = self.fetch_board_industries()
+        standardized = self._standardize_board_list(
+            industries, code_label="industry_code", name_label="industry_name"
+        )
+        if standardized.empty:
+            raise LookupError("未能获取到行业列表，请检查网络或数据源是否可用")
+
+        return standardized
+
     def fetch_board_industry_cons(self, symbol: str) -> pd.DataFrame:
         """获取同花顺行业成分股。"""
 
@@ -214,6 +328,24 @@ class AKShareClient:
             action=lambda: ak.stock_board_industry_cons_ths(symbol=symbol),
             error_message=f"行业成分股查询失败：{symbol}",
         )
+
+    def fetch_industry_members(self, industry_code: str) -> pd.DataFrame:
+        """获取指定行业的成分股列表。"""
+
+        if not industry_code:
+            raise ValueError("行业代码不能为空")
+
+        members = self.fetch_board_industry_cons(industry_code)
+        standardized = self._standardize_board_members(
+            members,
+            board_code=industry_code,
+            code_label="industry_code",
+            name_label="industry_name",
+        )
+        if standardized.empty:
+            raise LookupError("未能获取到行业成分股，请检查行业代码或网络")
+
+        return standardized
 
     def fetch_board_concepts(self) -> pd.DataFrame:
         """获取同花顺概念列表。"""
@@ -223,6 +355,18 @@ class AKShareClient:
             error_message="概念列表查询失败",
         )
 
+    def fetch_concept_list(self) -> pd.DataFrame:
+        """获取概念板块列表，返回标准化列名。"""
+
+        concepts = self.fetch_board_concepts()
+        standardized = self._standardize_board_list(
+            concepts, code_label="concept_code", name_label="concept_name"
+        )
+        if standardized.empty:
+            raise LookupError("未能获取到概念列表，请检查网络或数据源是否可用")
+
+        return standardized
+
     def fetch_board_concept_cons(self, symbol: str) -> pd.DataFrame:
         """获取同花顺概念成分股。"""
 
@@ -230,6 +374,24 @@ class AKShareClient:
             action=lambda: ak.stock_board_concept_cons_ths(symbol=symbol),
             error_message=f"概念成分股查询失败：{symbol}",
         )
+
+    def fetch_concept_members(self, concept_code: str) -> pd.DataFrame:
+        """获取指定概念的成分股列表。"""
+
+        if not concept_code:
+            raise ValueError("概念代码不能为空")
+
+        members = self.fetch_board_concept_cons(concept_code)
+        standardized = self._standardize_board_members(
+            members,
+            board_code=concept_code,
+            code_label="concept_code",
+            name_label="concept_name",
+        )
+        if standardized.empty:
+            raise LookupError("未能获取到概念成分股，请检查概念代码或网络")
+
+        return standardized
 
     def fetch_recent_history(
         self,
@@ -271,6 +433,88 @@ class AKShareClient:
             raise LookupError("未能获取到历史行情，请检查日期范围或股票代码")
 
         return pd.concat(records, ignore_index=True)
+
+    def _standardize_board_list(
+        self, boards: pd.DataFrame, code_label: str, name_label: str
+    ) -> pd.DataFrame:
+        boards = boards.copy()
+        code_column = self._find_first_column(
+            boards, ["代码", "code", "板块代码", "板块编号", "行业代码", "概念代码", "编号"]
+        )
+        name_column = self._find_first_column(
+            boards, ["名称", "name", "板块名称", "行业名称", "概念名称", "指数名称"]
+        )
+
+        boards[code_label] = boards[code_column] if code_column else pd.NA
+        boards[name_label] = boards[name_column] if name_column else pd.NA
+        boards[code_label] = boards[code_label].astype(str).str.strip()
+        boards[name_label] = boards[name_label].astype(str).str.strip()
+
+        boards = boards[[code_label, name_label]]
+        boards.dropna(how="all", inplace=True)
+        boards = boards[boards[name_label] != ""]
+        boards.reset_index(drop=True, inplace=True)
+        return boards
+
+    def _extract_board_name(self, members: pd.DataFrame) -> str:
+        name_column = self._find_first_column(
+            members, ["板块名称", "行业名称", "概念名称", "名称", "name"]
+        )
+        if name_column is None or members.empty:
+            return ""
+
+        valid_names = members[name_column].dropna()
+        if valid_names.empty:
+            return ""
+
+        return str(valid_names.iloc[0]).strip()
+
+    def _standardize_board_members(
+        self,
+        members: pd.DataFrame,
+        board_code: str,
+        code_label: str,
+        name_label: str,
+    ) -> pd.DataFrame:
+        members = members.copy()
+        stock_code_column = self._find_first_column(
+            members, ["代码", "code", "股票代码", "证券代码", "成分券代码"]
+        )
+        stock_name_column = self._find_first_column(
+            members, ["名称", "name", "股票简称", "证券简称", "股票名称"]
+        )
+
+        board_name = self._extract_board_name(members) or str(board_code).strip()
+        members[code_label] = str(board_code).strip()
+        members[name_label] = board_name
+
+        stock_codes = (
+            members[stock_code_column].apply(
+                lambda value: self._normalize_code(value) if pd.notna(value) else pd.NA
+            )
+            if stock_code_column
+            else pd.Series(pd.NA, index=members.index)
+        )
+        stock_names = (
+            members[stock_name_column]
+            if stock_name_column
+            else pd.Series(pd.NA, index=members.index)
+        )
+
+        standardized = pd.DataFrame(
+            {
+                code_label: members[code_label],
+                name_label: members[name_label],
+                "stock_code": stock_codes,
+                "stock_name": stock_names,
+            }
+        )
+
+        standardized = standardized[
+            (standardized["stock_code"].notna()) | (standardized["stock_name"].notna())
+        ]
+        standardized.reset_index(drop=True, inplace=True)
+        return standardized
 
     @staticmethod
     def _ensure_float_columns(history: pd.DataFrame, columns: list[str]) -> None:
