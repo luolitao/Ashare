@@ -1,0 +1,12 @@
+2025-12-08 15:41:17,884 [ERROR] 数据获取失败
+Traceback (most recent call last):
+  File "D:\PythonProjects25-12\AShare\start.py", line 84, in run
+    realtime_path = fetch_and_save_realtime(client, DEFAULT_STOCK_CODES)
+  File "D:\PythonProjects25-12\AShare\start.py", line 64, in fetch_and_save_realtime
+    realtime_df = client.fetch_realtime_quotes(codes)
+  File "D:\PythonProjects25-12\AShare\src\akshare_client.py", line 113, in fetch_realtime_quotes
+    selected.insert(0, "代码", selected.pop("code_6"))
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\PythonProjects25-12\AShare\dbn_trading_auto\Lib\site-packages\pandas\core\frame.py", line 5180, in insert
+    raise ValueError(f"cannot insert {column}, already exists")
+ValueError: cannot insert 代码, already exists
