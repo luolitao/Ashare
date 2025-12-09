@@ -1,80 +1,137 @@
-import sys
+"""
+核心 A 股交易接口连通性测试脚本（去掉不稳定的东财历史分钟线接口）
+
+用途：
+- 测试一批“目前在你机器上稳定可用”的 A 股核心接口；
+- 输出结果到控制台，并保存到 output/akshare_core_ashare_test_*.csv；
+- 失败/需要参数的接口会标记 status，方便后面做数据层设计。
+
+说明：
+- 已剔除：stock_zh_a_hist_min_em / stock_zh_a_hist_pre_min_em；
+- 现在的核心接口全部是你上一轮测试中 status=success 的那一批。
+"""
+
 import os
+import sys
 import traceback
+from datetime import datetime
+from pathlib import Path
 
 import akshare as ak
+import pandas as pd
 
-try:
-    import requests
-except ImportError:
-    requests = None
+
+# ===== 核心 A 股交易相关接口白名单（已去掉失败的接口） =====
+CORE_INTERFACES = [
+    # --- 实时行情 / 股票基础 ---
+    ("A 股全市场实时行情-新浪", "stock_zh_a_spot", lambda: ak.stock_zh_a_spot()),
+    ("科创板实时行情", "stock_zh_kcb_spot", lambda: ak.stock_zh_kcb_spot()),
+    ("A+H 股实时行情", "stock_zh_ah_spot", lambda: ak.stock_zh_ah_spot()),
+
+    # --- 历史行情（日线 / 当日分时 / 分笔） ---
+    ("A 股历史日线-新浪", "stock_zh_a_daily", lambda: ak.stock_zh_a_daily()),
+    ("A 股历史日线-腾讯", "stock_zh_a_hist_tx", lambda: ak.stock_zh_a_hist_tx()),
+    # 已移除：stock_zh_a_hist_min_em / stock_zh_a_hist_pre_min_em
+    ("A 股当日分时-新浪", "stock_zh_a_minute", lambda: ak.stock_zh_a_minute()),
+    ("A 股当日分笔-Tencent JS", "stock_zh_a_tick_tx_js", lambda: ak.stock_zh_a_tick_tx_js()),
+
+    # --- 股东结构 / 资金抱团相关 ---
+    ("A 股股东户数-整体", "stock_zh_a_gdhs", lambda: ak.stock_zh_a_gdhs()),
+    ("A 股股东户数-明细(东财)", "stock_zh_a_gdhs_detail_em", lambda: ak.stock_zh_a_gdhs_detail_em()),
+    ("A 股机构持股(股本结构)-东财", "stock_zh_a_gbjg_em", lambda: ak.stock_zh_a_gbjg_em()),
+
+    # --- 公告 / 信息披露 ---
+    ("巨潮资讯-公司信息披露-关系", "stock_zh_a_disclosure_relation_cninfo", lambda: ak.stock_zh_a_disclosure_relation_cninfo()),
+    ("巨潮资讯-公司信息披露-公告", "stock_zh_a_disclosure_report_cninfo", lambda: ak.stock_zh_a_disclosure_report_cninfo()),
+    ("科创板公告-东财", "stock_zh_kcb_report_em", lambda: ak.stock_zh_kcb_report_em()),
+
+    # --- 估值 / 财务横向比较 ---
+    ("成长性比较-东财", "stock_zh_growth_comparison_em", lambda: ak.stock_zh_growth_comparison_em()),
+    ("估值比较-东财", "stock_zh_valuation_comparison_em", lambda: ak.stock_zh_valuation_comparison_em()),
+    ("杜邦分析比较-东财", "stock_zh_dupont_comparison_em", lambda: ak.stock_zh_dupont_comparison_em()),
+    ("公司规模比较-东财", "stock_zh_scale_comparison_em", lambda: ak.stock_zh_scale_comparison_em()),
+    ("A 股整体估值-百度", "stock_zh_valuation_baidu", lambda: ak.stock_zh_valuation_baidu()),
+    ("涨跌投票-百度情绪", "stock_zh_vote_baidu", lambda: ak.stock_zh_vote_baidu()),
+
+    # --- A+H / CDR / 科创板 / B 股（扩展） ---
+    ("A+H 股列表字典", "stock_zh_ah_name", lambda: ak.stock_zh_ah_name()),
+    ("A+H 股历史日线", "stock_zh_ah_daily", lambda: ak.stock_zh_ah_daily()),
+    ("科创板历史日线", "stock_zh_kcb_daily", lambda: ak.stock_zh_kcb_daily()),
+    ("CDR 历史日线", "stock_zh_a_cdr_daily", lambda: ak.stock_zh_a_cdr_daily()),
+    ("B 股历史日线", "stock_zh_b_daily", lambda: ak.stock_zh_b_daily()),
+    ("B 股分钟线-新浪", "stock_zh_b_minute", lambda: ak.stock_zh_b_minute()),
+]
 
 
 def print_env_info():
     print("===== 环境信息 =====")
     print("Python 版本:", sys.version.replace("\n", " "))
     print("AkShare 版本:", getattr(ak, "__version__", "unknown"))
-    print("HTTP_PROXY :", os.environ.get("HTTP_PROXY"))
-    print("HTTPS_PROXY:", os.environ.get("HTTPS_PROXY"))
+    print("HTTP_PROXY :", os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy"))
+    print("HTTPS_PROXY:", os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"))
     print("====================\n")
 
 
-def test_akshare_spot():
-    print(">>> 测试 akshare.stock_zh_a_spot() 实时行情接口（新浪）")
-    try:
-        df = ak.stock_hk_spot()
-        print("调用成功！DataFrame 形状:", df.shape)
-        print("前 5 行预览：")
-        print(df.head())
-    except Exception as e:
-        print("调用失败！异常类型:", type(e).__name__)
-        print("异常内容:", repr(e))
-        print("详细堆栈：")
-        traceback.print_exc()
-    print("-" * 60 + "\n")
-
-
-def _test_url(url: str):
-    """简单测试某个 URL 能不能访问。"""
-    if requests is None:
-        print(f"无法测试 {url}：requests 未安装（pip install requests 后再试）")
-        return
-
-    print(f">>> 测试直连 URL: {url}")
-    try:
-        resp = requests.get(url, timeout=8)
-        print("状态码:", resp.status_code)
-        text = resp.text[:200].replace("\n", " ").replace("\r", " ")
-        print("返回内容前 200 字符预览:")
-        print(text)
-    except Exception as e:
-        print("请求失败！异常类型:", type(e).__name__)
-        print("异常内容:", repr(e))
-        print("详细堆栈：")
-        traceback.print_exc()
-    print("-" * 60 + "\n")
+def format_result(result):
+    """把返回结果压缩成一行描述字符串。"""
+    if isinstance(result, pd.DataFrame):
+        return f"DataFrame, shape={result.shape}"
+    if isinstance(result, pd.Series):
+        return f"Series, shape={result.shape}"
+    if isinstance(result, (list, tuple, set)):
+        return f"{type(result).__name__}, len={len(result)}"
+    if isinstance(result, dict):
+        return f"dict, keys={list(result.keys())[:10]}"
+    return f"{type(result).__name__}"
 
 
 def main():
     print_env_info()
 
-    # 1) 先测 akshare 自己的接口
-    test_akshare_spot()
+    records = []
+    total = len(CORE_INTERFACES)
+    print(f"准备测试核心接口数量: {total}")
+    print("-" * 60)
 
-    # 2) 再测几个关键网站是否能访问
-    print(">>> 开始测试几个关键网站是否能访问（纯网络连通性排查）\n")
+    for idx, (cn_desc, name, func) in enumerate(CORE_INTERFACES, start=1):
+        tag = f"[{idx:02d}/{total}] {name}"
+        print(f"{tag} ({cn_desc}) ... ", end="", flush=True)
 
-    # 新浪实时行情底层常用域名之一
-    _test_url("https://hq.sinajs.cn/list=sh000001")
+        try:
+            result = func()
+            status = "success"
+            detail = format_result(result)
+            print("success")
+        except TypeError as e:
+            status = "need_params"
+            detail = f"TypeError: {e}"
+            print("need_params")
+        except Exception as e:
+            status = "error"
+            detail = f"{type(e).__name__}: {e}"
+            print("error")
+            traceback.print_exc(limit=1)
 
-    # 新浪财经站点
-    _test_url("https://vip.stock.finance.sina.com.cn")
+        records.append(
+            {
+                "interface": name,
+                "cn_desc": cn_desc,
+                "status": status,
+                "detail": detail,
+            }
+        )
 
-    # 测一个百度，确认能不能访问国内站点
-    _test_url("https://www.baidu.com")
+    df = pd.DataFrame(records)
 
-    # 如有需要，也可以顺便测下东方财富（只是网络测试，不会影响你项目不用 em）
-    _test_url("https://push2.eastmoney.com/api/qt/stock/get?secid=1.600000&fields=f58,f43")
+    print("\n===== 汇总统计 =====")
+    print(df["status"].value_counts())
+
+    out_dir = Path("output")
+    out_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = out_dir / f"akshare_core_ashare_test_{ts}.csv"
+    df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    print(f"\n详细结果已保存到: {out_path}")
 
 
 if __name__ == "__main__":
