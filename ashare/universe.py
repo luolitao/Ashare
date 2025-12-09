@@ -19,11 +19,9 @@ class AshareUniverseBuilder:
     ) -> None:
         # 挑选成交额前多少名
         self.top_liquidity_count = top_liquidity_count
-        if fetcher is None:
-            raise ValueError("AshareUniverseBuilder 需要注入 AshareCoreFetcher 实例。")
-
-        self.fetcher = fetcher
-        # 缓存实时行情，避免多次请求
+        # 如果外部没传，就自己 new；AshareApp 会传，因此正常情况下共用实例
+        self.fetcher = fetcher or AshareCoreFetcher()
+        # 缓存实时行情，避免多次请求（这层缓存可以保留）
         self._spot_cache: pd.DataFrame | None = None
 
     # ======================== 核心底层方法 ========================
@@ -33,7 +31,7 @@ class AshareUniverseBuilder:
         if self._spot_cache is not None:
             return self._spot_cache
 
-        df = self.fetcher.get_realtime_all_a()
+        df = self.fetcher.get_realtime_all_a()  # 默认 use_cache=True
         if df.empty:
             raise RuntimeError(
                 "获取全市场实时行情失败：AshareCoreFetcher.get_realtime_all_a 返回空 DataFrame。"
