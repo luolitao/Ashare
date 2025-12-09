@@ -16,26 +16,35 @@ class AshareUniverseBuilder:
 
     def _fetch_spot(self) -> pd.DataFrame:
         try:
-            return ak.stock_zh_a_spot_em()
+            spot_df = ak.stock_zh_a_spot()
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("获取全市场实时行情失败, 请检查网络或数据源可用性。") from exc
+        if spot_df is None or spot_df.empty:
+            raise RuntimeError("实时行情数据为空, 请稍后重试或更换数据源。")
+        return spot_df
 
-    def _fetch_st_codes(self) -> Set[str]:
-        try:
-            st_df = ak.stock_zh_a_st_em()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("获取 ST 股票列表失败, 无法完成过滤。") from exc
-        return set(st_df.get("代码", []))
+    def _fetch_st_codes(self, spot_df: pd.DataFrame) -> Set[str]:
+        if "名称" not in spot_df.columns:
+            return set()
+        st_mask = spot_df["名称"].astype(str).str.contains("ST", case=False, na=False)
+        return set(spot_df.loc[st_mask, "代码"].tolist())
 
-    def _fetch_stop_codes(self) -> Set[str]:
-        try:
-            stop_df = ak.stock_zh_a_stop_em()
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("获取停牌股票列表失败, 无法完成过滤。") from exc
-        return set(stop_df.get("代码", []))
+    def _fetch_stop_codes(self, spot_df: pd.DataFrame) -> Set[str]:
+        code_column = "代码"
+        if code_column not in spot_df.columns:
+            return set()
+
+        if {"成交额", "成交量"}.issubset(spot_df.columns):
+            stop_mask = (spot_df["成交额"] == 0) & (spot_df["成交量"] == 0)
+        elif "成交量" in spot_df.columns:
+            stop_mask = spot_df["成交量"] == 0
+        else:
+            return set()
+
+        return set(spot_df.loc[stop_mask, code_column].tolist())
 
     def _fetch_new_stock_codes(self) -> Set[str]:
-        fetchers = (ak.stock_zh_a_new_em, ak.stock_zh_a_new_df, ak.stock_zh_a_new)
+        fetchers = (ak.stock_zh_a_new, ak.stock_zh_a_new_df, ak.stock_zh_a_new_em)
         for fetcher in fetchers:
             try:
                 new_df = fetcher()
@@ -48,8 +57,8 @@ class AshareUniverseBuilder:
         """生成剔除 ST 与停牌标的后的实时行情清单."""
 
         spot_df = self._fetch_spot()
-        st_codes = self._fetch_st_codes()
-        stop_codes = self._fetch_stop_codes()
+        st_codes = self._fetch_st_codes(spot_df)
+        stop_codes = self._fetch_stop_codes(spot_df)
         new_codes = self._fetch_new_stock_codes()
 
         bad_codes = st_codes | stop_codes
