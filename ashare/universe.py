@@ -15,8 +15,8 @@ class AshareUniverseBuilder:
     def __init__(
         self,
         top_liquidity_count: int = 100,
-        fetcher: AshareCoreFetcher,
-    ):
+            fetcher: AshareCoreFetcher | None = None,
+    ) -> None:
         # 挑选成交额前多少名
         self.top_liquidity_count = top_liquidity_count
         self.fetcher = fetcher
