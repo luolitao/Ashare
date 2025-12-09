@@ -6,6 +6,7 @@ from typing import Dict, List
 
 import akshare as ak
 import pandas as pd
+from requests.exceptions import RequestException
 
 from .dictionary import DataDictionaryFetcher
 
@@ -34,7 +35,12 @@ class AshareDataFetcher:
         """调用指定接口并返回 DataFrame."""
 
         interface = self._resolve_interface(interface_name)
-        return interface(**kwargs)
+        try:
+            return interface(**kwargs)
+        except RequestException as exc:
+            raise RuntimeError(
+                "网络请求失败, 请检查是否被代理或防火墙拦截。"
+            ) from exc
 
     def available_interfaces(self) -> List[str]:
         """列出数据字典中支持的全部 A 股接口."""
