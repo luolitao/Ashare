@@ -10,6 +10,7 @@ import re
 import warnings
 
 import requests
+from requests.exceptions import RequestException
 from urllib3.exceptions import InsecureRequestWarning
 
 A_SHARE_PATTERN = re.compile(r"stock_zh_[a-zA-Z0-9_]+")
@@ -44,10 +45,16 @@ class DataDictionaryFetcher:
         if not self.verify_ssl:
             warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
-        response = requests.get(
-            self.stock_doc_url, timeout=self.timeout, verify=self.verify_ssl
-        )
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                self.stock_doc_url, timeout=self.timeout, verify=self.verify_ssl
+            )
+            response.raise_for_status()
+        except RequestException as exc:
+            raise RuntimeError(
+                "无法获取 AKShare 数据字典页面, 请检查网络或代理配置。"
+            ) from exc
+
         self._cached_html = response.text
         return response.text
 

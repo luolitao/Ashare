@@ -38,10 +38,22 @@ class AshareApp:
         3. 使用首只股票下载近 30 天的历史行情并写入 CSV。
         """
 
-        interfaces = self.fetcher.available_interfaces()
+        try:
+            interfaces = self.fetcher.available_interfaces()
+        except RuntimeError as exc:
+            print(f"加载数据字典失败: {exc}")
+            print("无法校验接口列表, 请先解决网络问题后重试。")
+            return
+
         self._print_interfaces(interfaces)
 
-        symbols = self.fetcher.symbol_list().head(5)
+        try:
+            symbols = self.fetcher.symbol_list().head(5)
+        except RuntimeError as exc:
+            print(f"获取实时行情失败: {exc}")
+            print("请检查当前网络或代理配置, 重新运行脚本。")
+            return
+
         print("\n实时行情示例 (前 5 条):")
         print(symbols)
 
@@ -53,13 +65,18 @@ class AshareApp:
         end = date.today()
         start = end - timedelta(days=30)
 
-        history = self.fetcher.history_quotes(
-            symbol=sample_symbol,
-            start_date=start.strftime("%Y%m%d"),
-            end_date=end.strftime("%Y%m%d"),
-            period="daily",
-            adjust="qfq",
-        )
+        try:
+            history = self.fetcher.history_quotes(
+                symbol=sample_symbol,
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                period="daily",
+                adjust="qfq",
+            )
+        except RuntimeError as exc:
+            print(f"获取历史行情失败: {exc}")
+            print("请确认网络连通性或稍后重试。")
+            return
 
         output_path = self._save_sample(history, f"{sample_symbol}_history.csv")
         print(f"\n已将 {sample_symbol} 的近 30 天历史行情保存至 {output_path}")
