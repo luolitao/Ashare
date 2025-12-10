@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .baostock_core import BaostockDataFetcher
 from .baostock_session import BaostockSession
+from .config import ProxyConfig
 from .universe import AshareUniverseBuilder
 from .utils import setup_logger
 
@@ -23,14 +24,21 @@ class AshareApp:
         output_dir: str | Path = "output",
         top_liquidity_count: int = 100,
     ) -> None:
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = setup_logger(self.output_dir)
+
+        proxy_config = ProxyConfig.from_env()
+        proxy_config.apply_to_environment()
+        self.logger.info(
+            "代理配置: HTTP=%s, HTTPS=%s", proxy_config.http, proxy_config.https
+        )
+
         self.session = BaostockSession()
         self.fetcher = BaostockDataFetcher(self.session)
         self.universe_builder = AshareUniverseBuilder(
             top_liquidity_count=top_liquidity_count,
         )
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = setup_logger(self.output_dir)
 
     def _save_sample(self, df: pd.DataFrame, filename: str) -> Path:
         target = self.output_dir / filename
