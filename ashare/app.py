@@ -50,7 +50,7 @@ class AshareApp:
             raise RuntimeError("导出历史日线失败：股票列表为空或缺少 code 列。")
 
         end_day = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
-        start_day = (end_day - dt.timedelta(days=days * 3)).isoformat()
+        start_day = (end_day - dt.timedelta(days=days + 5)).isoformat()
 
         history_frames: list[pd.DataFrame] = []
         for code in stock_df["code"]:

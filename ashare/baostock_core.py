@@ -68,7 +68,7 @@ class BaostockDataFetcher:
         if df.empty:
             return df
 
-        prefixes = ("sh.60", "sz.00")
+        prefixes = ("sh.60", "sz.00","sz60","sh68")
         filtered = df[
             df["code"].str.startswith(prefixes) & (df["tradeStatus"] == "1")
         ].reset_index(drop=True)
