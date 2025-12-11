@@ -81,6 +81,13 @@ class MySQLWriter:
                 f"DataFrame 列名存在仅大小写不同的重复：{list(df.columns)}"
             )
 
+        allowed_if_exists = {"fail", "replace", "append"}
+        if if_exists not in allowed_if_exists:
+            raise ValueError(
+                "if_exists 仅支持 fail/replace/append，"
+                f"当前值为: {if_exists}"
+            )
+
         with self.engine.begin() as conn:
             df.to_sql(table_name, conn, if_exists=if_exists, index=False)
 

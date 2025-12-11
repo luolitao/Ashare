@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -23,13 +24,30 @@ class AshareApp:
     def __init__(
         self,
         output_dir: str | Path = "output",
-        top_liquidity_count: int = 100,
+        top_liquidity_count: int | None = None,
+        history_days: int | None = None,
     ) -> None:
         # 保持入口参数兼容性
         self.output_dir = Path(output_dir)
 
         # 日志改为写到项目根目录的 ashare.log，不再跟 output 绑在一起
         self.logger = setup_logger()
+
+        self.history_days = (
+            history_days
+            if history_days is not None
+            else self._read_int_from_env("ASHARE_HISTORY_DAYS", 30)
+        )
+        resolved_top_liquidity = (
+            top_liquidity_count
+            if top_liquidity_count is not None
+            else self._read_int_from_env("ASHARE_TOP_LIQUIDITY_COUNT", 100)
+        )
+        self.logger.info(
+            "参数配置：history_days=%s, top_liquidity_count=%s",
+            self.history_days,
+            resolved_top_liquidity,
+        )
 
         self.db_config = DatabaseConfig.from_env()
         self.db_writer = MySQLWriter(self.db_config)
@@ -43,20 +61,68 @@ class AshareApp:
         self.session = BaostockSession()
         self.fetcher = BaostockDataFetcher(self.session)
         self.universe_builder = AshareUniverseBuilder(
-            top_liquidity_count=top_liquidity_count,
+            top_liquidity_count=resolved_top_liquidity,
         )
 
     def _save_sample(self, df: pd.DataFrame, table_name: str) -> str:
         self.db_writer.write_dataframe(df, table_name)
         return table_name
 
-    @staticmethod
-    def _normalize_daily_numeric(df: pd.DataFrame) -> pd.DataFrame:
-        numeric_cols = ["amount", "volume", "close", "open", "high", "low"]
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
+    def _read_int_from_env(self, name: str, default: int) -> int:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+
+        try:
+            parsed = int(raw_value)
+            if parsed > 0:
+                return parsed
+            self.logger.warning("环境变量 %s 必须为正整数，已回退默认值 %s", name, default)
+        except ValueError:
+            self.logger.warning("环境变量 %s 解析失败，已回退默认值 %s", name, default)
+
+        return default
+
+    def _get_trading_days_between(
+        self, start_day: dt.date, end_day: dt.date
+    ) -> list[dt.date]:
+        calendar_df = self.fetcher.get_trade_calendar(
+            start_day.isoformat(), end_day.isoformat()
+        )
+        if calendar_df.empty:
+            return []
+
+        if "is_trading_day" in calendar_df.columns:
+            calendar_df = calendar_df[
+                calendar_df["is_trading_day"].astype(str) == "1"
+            ]
+
+        trading_days = (
+            pd.to_datetime(calendar_df["calendar_date"], errors="coerce")
+            .dt.date.dropna()
+            .tolist()
+        )
+        return sorted([day for day in trading_days if day <= end_day])
+
+    def _get_recent_trading_days(self, end_day: dt.date, days: int) -> list[dt.date]:
+        lookback = max(days * 3, days + 20)
+        max_lookback = 365
+
+        while True:
+            start_day = end_day - dt.timedelta(days=lookback)
+            trading_days = self._get_trading_days_between(start_day, end_day)
+
+            if len(trading_days) >= days or lookback >= max_lookback:
+                break
+
+            lookback = min(lookback + days, max_lookback)
+
+        if len(trading_days) < days:
+            raise RuntimeError(
+                f"在 {lookback} 天的回看范围内未能找到 {days} 个交易日。"
+            )
+
+        return trading_days[-days:]
 
     def _export_stock_list(self, trade_date: str) -> pd.DataFrame:
         stock_df = self.fetcher.get_stock_list(trade_date)
@@ -74,11 +140,21 @@ class AshareApp:
             raise RuntimeError("导出历史日线失败：股票列表为空或缺少 code 列。")
 
         end_day = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
-        start_day = (end_day - dt.timedelta(days=days + 5)).isoformat()
+        recent_trading_days = self._get_recent_trading_days(end_day, days)
+        start_day = recent_trading_days[0].isoformat()
 
         history_frames: list[pd.DataFrame] = []
         total = len(stock_df)
-        self.logger.info("开始导出 %s 只股票的 %s 日历史数据", total, days)
+        success_count = 0
+        empty_codes: list[str] = []
+        failed_codes: list[str] = []
+        self.logger.info(
+            "开始导出 %s 只股票的最近 %s 个交易日历史数据，窗口 [%s, %s]",
+            total,
+            days,
+            start_day,
+            end_date,
+        )
 
         for idx, code in enumerate(
             tqdm(stock_df["code"], desc="数据拉取进度"), start=1
@@ -93,18 +169,33 @@ class AshareApp:
                 )
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("股票 %s 数据拉取失败: %s", code, exc)
+                failed_codes.append(code)
                 continue
 
             if daily_df.empty:
+                empty_codes.append(code)
                 continue
 
-            history_frames.append(self._normalize_daily_numeric(daily_df))
+            history_frames.append(daily_df)
+            success_count += 1
 
             if idx % 500 == 0 or idx == total:
                 self.logger.info("已完成 %s/%s 支股票的数据拉取", idx, total)
 
         if not history_frames:
             raise RuntimeError("导出历史日线失败：全部股票均未返回数据。")
+
+        self.logger.info(
+            "日线拉取完成：成功 %s/%s，空数据 %s，失败 %s",
+            success_count,
+            total,
+            len(empty_codes),
+            len(failed_codes),
+        )
+        if empty_codes:
+            self.logger.debug("完全未返回数据的股票：%s", ", ".join(sorted(empty_codes)))
+        if failed_codes:
+            self.logger.debug("请求失败的股票：%s", ", ".join(sorted(failed_codes)))
 
         combined = pd.concat(history_frames, ignore_index=True)
         combined_table = self._save_sample(combined, f"history_recent_{days}_days")
@@ -174,44 +265,60 @@ class AshareApp:
                 end_date,
             )
         else:
-            start_day = (last_date_value + dt.timedelta(days=1)).isoformat()
+            trade_start = last_date_value + dt.timedelta(days=1)
+            new_trading_days = self._get_trading_days_between(trade_start, end_day)
+            if not new_trading_days:
+                self.logger.info(
+                    "最近交易日仍为 %s，暂无需要增量的交易日。",
+                    last_date_value.isoformat(),
+                )
+                new_trading_days = []
+
+            start_day = new_trading_days[0].isoformat() if new_trading_days else None
             self.logger.info(
                 "开始增量拉取 %s 至 %s 的日线数据（原有截至 %s）。",
-                start_day,
+                start_day or "无新增交易日",
                 end_date,
                 last_date_value.isoformat(),
             )
 
             history_frames: list[pd.DataFrame] = []
             total = len(stock_df)
+            success_count = 0
+            empty_codes: list[str] = []
+            failed_codes: list[str] = []
 
-            for idx, code in enumerate(
-                tqdm(stock_df["code"], desc="增量数据拉取进度"),
-                start=1,
-            ):
-                try:
-                    daily_df = self.fetcher.get_kline(
-                        code=code,
-                        start_date=start_day,
-                        end_date=end_date,
-                        freq="d",
-                        adjustflag="1",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.logger.warning("股票 %s 增量数据拉取失败: %s", code, exc)
-                    continue
+            if start_day is not None:
+                for idx, code in enumerate(
+                    tqdm(stock_df["code"], desc="增量数据拉取进度"),
+                    start=1,
+                ):
+                    try:
+                        daily_df = self.fetcher.get_kline(
+                            code=code,
+                            start_date=start_day,
+                            end_date=end_date,
+                            freq="d",
+                            adjustflag="1",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.logger.warning("股票 %s 增量数据拉取失败: %s", code, exc)
+                        failed_codes.append(code)
+                        continue
 
-                if daily_df.empty:
-                    continue
+                    if daily_df.empty:
+                        empty_codes.append(code)
+                        continue
 
-                history_frames.append(self._normalize_daily_numeric(daily_df))
+                    history_frames.append(daily_df)
+                    success_count += 1
 
-                if idx % 500 == 0 or idx == total:
-                    self.logger.info(
-                        "增量已完成 %s/%s 支股票的数据拉取",
-                        idx,
-                        total,
-                    )
+                    if idx % 500 == 0 or idx == total:
+                        self.logger.info(
+                            "增量已完成 %s/%s 支股票的数据拉取",
+                            idx,
+                            total,
+                        )
 
             if history_frames:
                 new_rows = pd.concat(history_frames, ignore_index=True)
@@ -220,11 +327,29 @@ class AshareApp:
                     base_table,
                     if_exists="append",
                 )
+                self.logger.info(
+                    "增量拉取完成：成功 %s/%s，空数据 %s，失败 %s",
+                    success_count,
+                    total,
+                    len(empty_codes),
+                    len(failed_codes),
+                )
+                if empty_codes:
+                    self.logger.debug(
+                        "增量阶段完全未返回数据的股票：%s",
+                        ", ".join(sorted(empty_codes)),
+                    )
+                if failed_codes:
+                    self.logger.debug(
+                        "增量阶段请求失败的股票：%s",
+                        ", ".join(sorted(failed_codes)),
+                    )
             else:
                 self.logger.info("本次没有任何新的日线数据可写入。")
 
-        cutoff_day = (end_day - dt.timedelta(days=window_days + 5)).isoformat()
-        query = f"SELECT * FROM `{base_table}` WHERE `date` >= '{cutoff_day}'"
+        window_trading_days = self._get_recent_trading_days(end_day, window_days)
+        window_start = window_trading_days[0].isoformat()
+        query = f"SELECT * FROM `{base_table}` WHERE `date` >= '{window_start}'"
 
         with self.db_writer.engine.begin() as conn:
             recent_df = pd.read_sql(query, conn)
@@ -239,10 +364,11 @@ class AshareApp:
                 f"表 {base_table} 缺少 date 列，无法进行时间窗口切片。"
             )
 
+        window_day_set = {day for day in window_trading_days}
         recent_df["date"] = pd.to_datetime(recent_df["date"])
-        max_date = recent_df["date"].max()
-        cutoff = max_date - pd.Timedelta(days=window_days + 5)
-        recent_df = recent_df[recent_df["date"] >= cutoff].copy()
+        recent_df = recent_df[
+            recent_df["date"].dt.date.isin(window_day_set)
+        ].copy()
 
         if recent_df.empty:
             raise RuntimeError(
@@ -282,16 +408,20 @@ class AshareApp:
                 self.logger.error("导出股票列表失败: %s", exc)
                 return
 
-            # 3) 导出最近 30 日历史日线（增量模式）
+            # 3) 导出最近 N 日历史日线（增量模式）
             try:
                 history_df, history_table = self._export_daily_history_incremental(
                     stock_df,
                     latest_trade_day,
                     base_table="history_daily_kline",
-                    window_days=30,
+                    window_days=self.history_days,
                 )
             except RuntimeError as exc:
-                self.logger.error("导出最近 30 个交易日的日线数据失败: %s", exc)
+                self.logger.error(
+                    "导出最近 %s 个交易日的日线数据失败: %s",
+                    self.history_days,
+                    exc,
+                )
                 return
 
             # 4) 构建候选池并挑选成交额前 N 名
