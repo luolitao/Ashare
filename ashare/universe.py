@@ -17,7 +17,7 @@ class AshareUniverseBuilder:
         self.top_liquidity_count = top_liquidity_count
 
     def _infer_st_codes(
-        self, stock_df: pd.DataFrame, history_df: pd.DataFrame
+        self, stock_df: pd.DataFrame, latest_kline: pd.DataFrame
     ) -> Set[str]:
         if "code" not in stock_df.columns or "code_name" not in stock_df.columns:
             return set()
@@ -32,19 +32,12 @@ class AshareUniverseBuilder:
 
         st_candidates = set(stock_df.loc[mask_name, "code"])
 
-        if history_df.empty:
+        if latest_kline.empty:
             return st_candidates
 
         required_cols = {"code", "date", "isST"}
-        if not required_cols.issubset(history_df.columns):
+        if not required_cols.issubset(latest_kline.columns):
             return st_candidates
-
-        latest_kline = (
-            history_df.sort_values("date")
-            .groupby("code", as_index=False)
-            .tail(1)
-            .reset_index(drop=True)
-        )
         mask_official = latest_kline["isST"].astype(str) == "1"
         st_candidates.update(set(latest_kline.loc[mask_official, "code"]))
 
@@ -77,7 +70,7 @@ class AshareUniverseBuilder:
             .reset_index(drop=True)
         )
 
-        st_codes = self._infer_st_codes(stock_df, history_df)
+        st_codes = self._infer_st_codes(stock_df, latest_rows)
         stop_codes = self._infer_stop_codes(latest_rows)
         bad_codes = st_codes | stop_codes
 
