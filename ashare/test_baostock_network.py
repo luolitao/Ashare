@@ -129,7 +129,8 @@ def build_test_cases() -> List[Dict[str, Any]]:
             "func": bs.query_history_k_data_plus,
             "kwargs": {
                 "code": "sz.000001",
-                "fields": "date,code,open,high,low,close,preclose,volume,amount,pctChg",
+                # 分钟线字段：注意多了 time，去掉 preclose、pctChg
+                "fields": "date,time,code,open,high,low,close,volume,amount,adjustflag",
                 "start_date": start_30d,
                 "end_date": end,
                 "frequency": "5",
