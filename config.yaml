@@ -7,6 +7,10 @@ app:
   top_liquidity_count: 100
   # 最少上市天数过滤阈值
   min_listing_days: 60
+  # 是否在每次运行时刷新 Baostock 季频财务数据（非常耗时）
+  # true：每次运行都会打 Baostock 接口，更新 fundamentals_quarter_* 表
+  # false：只使用数据库中已有的财务表，直接拼接 fundamentals_latest_wide
+  refresh_fundamentals: false
 
 database:
   host: 127.0.0.1

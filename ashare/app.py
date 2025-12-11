@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from .baostock_core import BaostockDataFetcher
 from .baostock_session import BaostockSession
-from .config import ProxyConfig
+from .config import ProxyConfig, get_section
 from .db import DatabaseConfig, MySQLWriter
 from .fundamental_manager import FundamentalDataManager
 from .universe import AshareUniverseBuilder
@@ -34,6 +34,19 @@ class AshareApp:
 
         # 日志改为写到项目根目录的 ashare.log，不再跟 output 绑在一起
         self.logger = setup_logger()
+
+        # 从 config.yaml 读取基础面刷新开关
+        app_cfg = get_section("app")
+        refresh_flag = app_cfg.get("refresh_fundamentals", False)
+        if isinstance(refresh_flag, str):
+            refresh_flag = refresh_flag.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }
+        self.refresh_fundamentals: bool = bool(refresh_flag)
 
         self.history_days = (
             history_days
@@ -534,26 +547,41 @@ class AshareApp:
             index_membership = self._export_index_members(latest_trade_day)
             fundamentals_wide = pd.DataFrame()
             try:
-                fundamental_codes: set[str] = set().union(*index_membership.values())
-                if not fundamental_codes:
-                    fallback_count = min(
-                        self.universe_builder.top_liquidity_count, len(stock_df)
+                if self.refresh_fundamentals:
+                    fundamental_codes: set[str] = set().union(
+                        *index_membership.values()
                     )
-                    fundamental_codes = set(stock_df["code"].head(fallback_count))
+                    if not fundamental_codes:
+                        fallback_count = min(
+                            self.universe_builder.top_liquidity_count, len(stock_df)
+                        )
+                        fundamental_codes = set(
+                            stock_df["code"].head(fallback_count)
+                        )
 
-                fundamentals_wide = self.fundamental_manager.refresh_all(
-                    sorted(fundamental_codes),
-                    latest_trade_day,
-                    quarterly_lookback=4,
-                    report_lookback_years=0,
-                    adjust_lookback_years=0,
-                    update_reports=False,
-                    update_corporate_actions=False,
-                    update_macro=False,
-                )
+                    self.logger.info(
+                        "基础面刷新开关已开启，本次将对 %s 支股票刷新季频财务数据。",
+                        len(fundamental_codes),
+                    )
+                    fundamentals_wide = self.fundamental_manager.refresh_all(
+                        sorted(fundamental_codes),
+                        latest_trade_day,
+                        quarterly_lookback=4,
+                        report_lookback_years=0,
+                        adjust_lookback_years=0,
+                        update_reports=False,
+                        update_corporate_actions=False,
+                        update_macro=False,
+                    )
+                else:
+                    self.logger.info(
+                        "基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。"
+                    )
+                    fundamentals_wide = self.fundamental_manager.build_latest_wide()
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning(
-                    "基础面与宏观数据刷新出现异常，将继续主流程: %s", exc
+                    "基础面阶段出现异常，将继续主流程（只使用技术面过滤）: %s",
+                    exc,
                 )
 
             # 3) 导出最近 N 日历史日线（增量模式）
