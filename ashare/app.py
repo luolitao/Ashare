@@ -24,9 +24,12 @@ class AshareApp:
         output_dir: str | Path = "output",
         top_liquidity_count: int = 100,
     ) -> None:
+        # 所有导出的 CSV 之类的数据，仍然放在 output 目录
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = setup_logger(self.output_dir)
+
+        # 日志改为写到项目根目录的 ashare.log，不再跟 output 绑在一起
+        self.logger = setup_logger()
 
         proxy_config = ProxyConfig.from_env()
         proxy_config.apply_to_environment()

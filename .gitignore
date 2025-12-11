@@ -1,6 +1,5 @@
 __pycache__/
 data
 dbn_trading_auto
-output/*
-!output/ashare.log
+output/
 .idea
