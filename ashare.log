@@ -36,3 +36,21 @@
 2025-12-11 14:45:49,685 [INFO] 已生成候选池：表 a_share_universe
 2025-12-11 14:45:49,769 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
 2025-12-11 14:45:49,769 [INFO] 历史日线数据已保存至表：history_daily_kline
+2025-12-11 16:16:06,088 [INFO] 参数配置：history_days=30, top_liquidity_count=100, min_listing_days=60
+2025-12-11 16:16:06,193 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-11 16:16:06,194 [INFO] 已发现 3 个项目组件，前 10 个预览：
+2025-12-11 16:16:06,194 [INFO]  - BaostockSession
+2025-12-11 16:16:06,194 [INFO]  - BaostockDataFetcher
+2025-12-11 16:16:06,195 [INFO]  - AshareUniverseBuilder
+2025-12-11 16:16:06,390 [INFO] 最近交易日：2025-12-11
+2025-12-11 16:16:06,964 [INFO] 已保存 3173 只股票的列表至表 a_share_stock_list
+2025-12-11 16:16:07,532 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-11 16:16:08,051 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-11 16:16:08,279 [INFO] 开始增量拉取 2025-12-11 至 2025-12-11 的日线数据（原有截至 2025-12-10）。
+2025-12-11 16:18:44,151 [INFO] 本次没有任何新的日线数据可写入。
+2025-12-11 16:18:47,226 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-11 16:18:47,532 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-11 16:18:47,759 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-11 16:18:48,533 [INFO] 已生成候选池：表 a_share_universe
+2025-12-11 16:18:48,674 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
+2025-12-11 16:18:48,675 [INFO] 历史日线数据已保存至表：history_daily_kline
