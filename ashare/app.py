@@ -468,7 +468,7 @@ class AshareApp:
 
         merged = _filter_numeric(
             merged,
-            ["profit_roeAvg", "profit_roe", "dupont_roe"],
+            ["profit_roeAvg", "profit_roe", "dupont_dupontROE"],
             lambda s: s > 0,
             "ROE 为正",
         )
@@ -480,15 +480,15 @@ class AshareApp:
         )
         merged = _filter_numeric(
             merged,
-            ["cash_flow_netOperCashFlow", "cash_flow_netOperateCashFlow"],
+            ["cash_flow_CFOToNP", "cash_flow_CFOToOR", "cash_flow_CFOToGr"],
             lambda s: s > 0,
-            "经营现金流为正",
+            "经营现金流为正（按 CFO 比率代理）",
         )
         merged = _filter_numeric(
             merged,
-            ["growth_YOYNI", "growth_YOYTr"],
+            ["growth_YOYNI", "growth_YOYPNI", "growth_YOYEPSBasic"],
             lambda s: s > 0,
-            "净利润或营收同比为正",
+            "净利润或 EPS 同比为正",
         )
 
         return merged
@@ -531,14 +531,25 @@ class AshareApp:
                 self.logger.error("导出行业分类数据失败: %s", exc)
                 return
 
+            index_membership = self._export_index_members(latest_trade_day)
             fundamentals_wide = pd.DataFrame()
             try:
+                fundamental_codes: set[str] = set().union(*index_membership.values())
+                if not fundamental_codes:
+                    fallback_count = min(
+                        self.universe_builder.top_liquidity_count, len(stock_df)
+                    )
+                    fundamental_codes = set(stock_df["code"].head(fallback_count))
+
                 fundamentals_wide = self.fundamental_manager.refresh_all(
-                    stock_df["code"].tolist(),
+                    sorted(fundamental_codes),
                     latest_trade_day,
-                    quarterly_lookback=12,
-                    report_lookback_years=2,
-                    adjust_lookback_years=1,
+                    quarterly_lookback=4,
+                    report_lookback_years=0,
+                    adjust_lookback_years=0,
+                    update_reports=False,
+                    update_corporate_actions=False,
+                    update_macro=False,
                 )
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning(
@@ -568,7 +579,7 @@ class AshareApp:
                     history_df,
                     stock_basic_df=stock_basic_df,
                     industry_df=industry_df,
-                    index_membership=self._export_index_members(latest_trade_day),
+                    index_membership=index_membership,
                 )
             except RuntimeError as exc:
                 self.logger.error("生成当日候选池失败: %s", exc)

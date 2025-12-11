@@ -322,6 +322,9 @@ class FundamentalDataManager:
         quarterly_lookback: int = 8,
         report_lookback_years: int = 2,
         adjust_lookback_years: int = 1,
+        update_reports: bool = True,
+        update_corporate_actions: bool = True,
+        update_macro: bool = True,
     ) -> pd.DataFrame:
         if not codes:
             self.logger.warning("股票代码为空，跳过财务与宏观数据更新。")
@@ -332,27 +335,31 @@ class FundamentalDataManager:
         )
 
         end_date = latest_trade_day
-        start_date = (
-            dt.datetime.strptime(latest_trade_day, "%Y-%m-%d").date()
-            - dt.timedelta(days=365 * report_lookback_years)
-        ).isoformat()
-        self.update_company_reports(codes, start_date=start_date, end_date=end_date)
 
-        adjust_start = (
-            dt.datetime.strptime(latest_trade_day, "%Y-%m-%d").date()
-            - dt.timedelta(days=365 * adjust_lookback_years)
-        ).isoformat()
-        adjust_year_start = dt.datetime.strptime(adjust_start, "%Y-%m-%d").year
-        adjust_year_end = dt.datetime.strptime(end_date, "%Y-%m-%d").year
-        self.update_corporate_actions(
-            codes,
-            start_date=adjust_start,
-            end_date=end_date,
-            start_year=adjust_year_start,
-            end_year=adjust_year_end,
-        )
+        if update_reports and report_lookback_years > 0:
+            start_date = (
+                dt.datetime.strptime(latest_trade_day, "%Y-%m-%d").date()
+                - dt.timedelta(days=365 * report_lookback_years)
+            ).isoformat()
+            self.update_company_reports(codes, start_date=start_date, end_date=end_date)
 
-        macro_start = "2000-01-01"
-        self.update_macro_series(start_date=macro_start, end_date=end_date)
+        if update_corporate_actions and adjust_lookback_years > 0:
+            adjust_start = (
+                dt.datetime.strptime(latest_trade_day, "%Y-%m-%d").date()
+                - dt.timedelta(days=365 * adjust_lookback_years)
+            ).isoformat()
+            adjust_year_start = dt.datetime.strptime(adjust_start, "%Y-%m-%d").year
+            adjust_year_end = dt.datetime.strptime(end_date, "%Y-%m-%d").year
+            self.update_corporate_actions(
+                codes,
+                start_date=adjust_start,
+                end_date=end_date,
+                start_year=adjust_year_start,
+                end_year=adjust_year_end,
+            )
+
+        if update_macro:
+            macro_start = "2000-01-01"
+            self.update_macro_series(start_date=macro_start, end_date=end_date)
 
         return self.build_latest_wide()
