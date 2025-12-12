@@ -171,3 +171,34 @@
 2025-12-12 13:11:03,548 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
 2025-12-12 13:11:04,642 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
 2025-12-12 13:11:05,301 [INFO] 开始增量拉取 2025-12-12 至 2025-12-12 的日线数据（原有截至 2025-12-11）。
+2025-12-12 14:59:55,901 [INFO] 参数配置：history_days=30, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=False
+2025-12-12 14:59:55,987 [INFO] 代理配置: HTTP=None, HTTPS=None
+2025-12-12 14:59:55,987 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 14:59:55,987 [INFO]  - BaostockSession
+2025-12-12 14:59:55,987 [INFO]  - BaostockDataFetcher
+2025-12-12 14:59:55,987 [INFO]  - AshareUniverseBuilder
+2025-12-12 14:59:55,987 [INFO]  - FundamentalDataManager
+2025-12-12 14:59:56,172 [INFO] 最近交易日：2025-12-12
+2025-12-12 14:59:56,715 [INFO] 已保存 3175 只股票的列表至表 a_share_stock_list
+2025-12-12 14:59:57,269 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-12 14:59:57,799 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-12 14:59:57,979 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-12 14:59:58,232 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-12 14:59:58,406 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-12 14:59:58,406 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-12 14:59:59,152 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-12 14:59:59,328 [INFO] 日线K线拉取开关已关闭：跳过 Baostock 拉取，仅从表 history_daily_kline 切片读取最近 30 个交易日数据。
+2025-12-12 14:59:59,328 [WARNING] 日线K线拉取已关闭：表 history_daily_kline 仅包含截至 2025-12-11 的数据（目标截止 2025-12-12），将按数据库最新日期继续。
+2025-12-12 15:00:01,152 [INFO] ROE 为正 过滤：3042 -> 592
+2025-12-12 15:00:01,155 [INFO] 资产负债率 < 75% 过滤：592 -> 592
+2025-12-12 15:00:01,156 [INFO] 经营现金流为正（按 CFO 比率代理） 过滤：592 -> 491
+2025-12-12 15:00:01,157 [INFO] 净利润或 EPS 同比为正 过滤：491 -> 323
+2025-12-12 15:00:01,413 [INFO] 已生成候选池：表 a_share_universe
+2025-12-12 15:00:01,570 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
+2025-12-12 15:00:02,280 [WARNING] 龙虎榜详情获取失败: 'NoneType' object is not subscriptable
+2025-12-12 15:00:03,127 [WARNING] 两融明细 sse 获取失败: Length mismatch: Expected axis has 0 elements, new values have 13 elements
+2025-12-12 15:00:04,227 [INFO] 两融明细 szse 在 2025-12-12 返回为空。
+2025-12-12 15:00:12,356 [INFO] 表 a_share_hsgt_hold_rank 已写入 2767 行。
+2025-12-12 15:00:25,154 [INFO] 表 a_share_gdhs 已写入 5445 行。
+2025-12-12 15:00:25,799 [WARNING] 行为证据同步阶段出现异常: 'NoneType' object is not subscriptable
+2025-12-12 15:00:25,801 [INFO] 历史日线数据已保存至表：history_daily_kline

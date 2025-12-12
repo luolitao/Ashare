@@ -50,6 +50,21 @@ class AshareApp:
             }
         self.refresh_fundamentals: bool = bool(refresh_flag)
 
+        # 日线K线拉取开关（config.yaml: app.fetch_daily_kline）
+        # 可用环境变量 ASHARE_FETCH_DAILY_KLINE 覆盖（优先级更高）
+        kline_flag = os.getenv("ASHARE_FETCH_DAILY_KLINE")
+        if kline_flag is None:
+            kline_flag = app_cfg.get("fetch_daily_kline", True)
+        if isinstance(kline_flag, str):
+            kline_flag = kline_flag.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }
+        self.fetch_daily_kline: bool = bool(kline_flag)
+
         self.history_days = (
             history_days
             if history_days is not None
@@ -66,10 +81,11 @@ class AshareApp:
             else self._read_int_from_env("ASHARE_MIN_LISTING_DAYS", 60)
         )
         self.logger.info(
-            "参数配置：history_days=%s, top_liquidity_count=%s, min_listing_days=%s",
+            "参数配置：history_days=%s, top_liquidity_count=%s, min_listing_days=%s, fetch_daily_kline=%s",
             self.history_days,
             resolved_top_liquidity,
             resolved_min_listing_days,
+            self.fetch_daily_kline,
         )
 
         self.db_config = DatabaseConfig.from_env()
@@ -295,6 +311,7 @@ class AshareApp:
         end_date: str,
         base_table: str = "history_daily_kline",
         window_days: int = 30,
+        fetch_enabled: bool = True,
     ) -> Tuple[pd.DataFrame, str]:
         """
         增量更新日线数据，并返回最近 window_days 天的切片。
@@ -326,7 +343,28 @@ class AshareApp:
         elif isinstance(last_date_raw, str) and last_date_raw:
             last_date_value = dt.datetime.strptime(last_date_raw, "%Y-%m-%d").date()
 
-        if last_date_value is None:
+        # 开关关闭：禁止调用 Baostock 日线K线接口，仅从数据库表切片读取
+        if not fetch_enabled:
+            self.logger.info(
+                "日线K线拉取开关已关闭：跳过 Baostock 拉取，仅从表 %s 切片读取最近 %s 个交易日数据。",
+                base_table,
+                window_days,
+            )
+            if last_date_value is None:
+                raise RuntimeError(
+                    f"日线K线拉取已关闭，但表 {base_table} 不存在或为空，无法从数据库读取。"
+                )
+            if last_date_value < end_day:
+                self.logger.warning(
+                    "日线K线拉取已关闭：表 %s 仅包含截至 %s 的数据（目标截止 %s），将按数据库最新日期继续。",
+                    base_table,
+                    last_date_value.isoformat(),
+                    end_day.isoformat(),
+                )
+                end_day = last_date_value
+                end_date = end_day.isoformat()
+
+        if fetch_enabled and last_date_value is None:
             self.logger.info(
                 "历史表 %s 不存在或为空，执行冷启动：拉取最近 %s 天日线。",
                 base_table,
@@ -340,13 +378,13 @@ class AshareApp:
                 base_table,
                 if_exists="replace",
             )
-        elif last_date_value >= end_day:
+        elif fetch_enabled and last_date_value >= end_day:
             self.logger.info(
                 "历史日线表 %s 已包含截至 %s 的数据，跳过增量拉取。",
                 base_table,
                 end_date,
             )
-        else:
+        elif fetch_enabled:
             trade_start = last_date_value + dt.timedelta(days=1)
             new_trading_days = self._get_trading_days_between(trade_start, end_day)
             if not new_trading_days:
@@ -632,6 +670,7 @@ class AshareApp:
                     latest_trade_day,
                     base_table="history_daily_kline",
                     window_days=self.history_days,
+                    fetch_enabled=self.fetch_daily_kline,
                 )
             except RuntimeError as exc:
                 self.logger.error(
