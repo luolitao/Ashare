@@ -80,8 +80,13 @@ class BaostockSession:
         if not self.logged_in:
             return
 
-        bs.logout()
-        self.logged_in = False
+        try:
+            bs.logout()
+        except Exception:
+            # 退出阶段网络抖动/服务端无响应时，避免抛异常导致 socket 未关闭警告
+            pass
+        finally:
+            self.logged_in = False
 
 
 def _demo() -> None:

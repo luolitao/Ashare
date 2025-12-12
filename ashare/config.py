@@ -86,6 +86,11 @@ class ProxyConfig:
             or os.environ.get("HTTPS_PROXY")
             or os.environ.get("https_proxy")
         )
+        section = get_section("proxy")
+        if not http_proxy:
+            http_proxy = section.get("http")
+        if not https_proxy:
+            https_proxy = section.get("https")
         return cls(http=http_proxy, https=https_proxy)
 
     def as_requests_proxies(self) -> Dict[str, str]:

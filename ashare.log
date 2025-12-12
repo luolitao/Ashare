@@ -366,3 +366,112 @@
 (Background on this error at: https://sqlalche.me/e/20/f405)
 2025-12-12 16:24:21,133 [INFO] 表 a_share_gdhs_detail 已写入 8903 行。
 2025-12-12 16:24:21,142 [INFO] 历史日线数据已保存至表：history_daily_kline
+2025-12-12 16:32:29,141 [INFO] 参数配置：history_days=30, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=False
+2025-12-12 16:32:29,237 [INFO] 代理配置: HTTP=None, HTTPS=None
+2025-12-12 16:32:29,237 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 16:32:29,238 [INFO]  - BaostockSession
+2025-12-12 16:32:29,238 [INFO]  - BaostockDataFetcher
+2025-12-12 16:32:29,238 [INFO]  - AshareUniverseBuilder
+2025-12-12 16:32:29,238 [INFO]  - FundamentalDataManager
+2025-12-12 16:32:29,521 [INFO] 最近交易日：2025-12-12
+2025-12-12 16:32:30,313 [INFO] 已保存 3175 只股票的列表至表 a_share_stock_list
+2025-12-12 16:32:31,207 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-12 16:32:32,012 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-12 16:32:32,419 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-12 16:32:32,648 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-12 16:32:32,866 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-12 16:32:32,867 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-12 16:32:33,604 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-12 16:32:33,705 [INFO] 日线K线拉取开关已关闭：跳过 Baostock 拉取，仅从表 history_daily_kline 切片读取最近 30 个交易日数据。
+2025-12-12 16:32:33,705 [WARNING] 日线K线拉取已关闭：表 history_daily_kline 仅包含截至 2025-12-11 的数据（目标截止 2025-12-12），将按数据库最新日期继续。
+2025-12-12 16:32:36,605 [INFO] ROE 为正 过滤：3042 -> 592
+2025-12-12 16:32:36,611 [INFO] 资产负债率 < 75% 过滤：592 -> 592
+2025-12-12 16:32:36,614 [INFO] 经营现金流为正（按 CFO 比率代理） 过滤：592 -> 491
+2025-12-12 16:32:36,615 [INFO] 净利润或 EPS 同比为正 过滤：491 -> 323
+2025-12-12 16:32:36,948 [INFO] 已生成候选池：表 a_share_universe
+2025-12-12 16:32:37,113 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
+2025-12-12 16:32:38,748 [INFO] 表 a_share_lhb_detail 已写入 77 行。
+2025-12-12 16:32:42,339 [INFO] 表 a_share_margin_detail 已写入 3986 行。
+2025-12-12 16:32:51,737 [INFO] 表 a_share_hsgt_hold_rank 已写入 2767 行。
+2025-12-12 16:33:04,552 [INFO] 表 a_share_gdhs 已写入 5441 行。
+2025-12-12 16:37:46,138 [INFO] 表 a_share_gdhs_detail 已写入 8903 行。
+2025-12-12 16:37:46,170 [INFO] 历史日线数据已保存至表：history_daily_kline
+2025-12-12 16:59:57,207 [INFO] 参数配置：history_days=30, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=False
+2025-12-12 16:59:57,310 [INFO] 代理配置: HTTP=None, HTTPS=None
+2025-12-12 16:59:57,311 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 16:59:57,311 [INFO]  - BaostockSession
+2025-12-12 16:59:57,311 [INFO]  - BaostockDataFetcher
+2025-12-12 16:59:57,311 [INFO]  - AshareUniverseBuilder
+2025-12-12 16:59:57,311 [INFO]  - FundamentalDataManager
+2025-12-12 17:00:00,937 [INFO] 最近交易日：2025-12-12
+2025-12-12 17:00:08,160 [INFO] 已保存 3175 只股票的列表至表 a_share_stock_list
+2025-12-12 17:00:13,586 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-12 17:00:24,537 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-12 17:00:30,451 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-12 17:00:35,440 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-12 17:00:41,691 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-12 17:00:41,692 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-12 17:00:42,346 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-12 17:00:42,509 [INFO] 日线K线拉取开关已关闭：跳过 Baostock 拉取，仅从表 history_daily_kline 切片读取最近 30 个交易日数据。
+2025-12-12 17:00:42,509 [WARNING] 日线K线拉取已关闭：表 history_daily_kline 仅包含截至 2025-12-11 的数据（目标截止 2025-12-12），将按数据库最新日期继续。
+2025-12-12 17:00:49,790 [INFO] ROE 为正 过滤：3042 -> 592
+2025-12-12 17:00:49,794 [INFO] 资产负债率 < 75% 过滤：592 -> 592
+2025-12-12 17:00:49,795 [INFO] 经营现金流为正（按 CFO 比率代理） 过滤：592 -> 491
+2025-12-12 17:00:49,796 [INFO] 净利润或 EPS 同比为正 过滤：491 -> 323
+2025-12-12 17:00:50,048 [INFO] 已生成候选池：表 a_share_universe
+2025-12-12 17:00:50,204 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
+2025-12-12 17:00:51,615 [INFO] 表 a_share_lhb_detail 已写入 77 行。
+2025-12-12 17:00:55,401 [INFO] 表 a_share_margin_detail 已写入 3986 行。
+2025-12-12 17:01:03,387 [INFO] 表 a_share_hsgt_hold_rank 已写入 2767 行。
+2025-12-12 17:01:16,476 [INFO] 表 a_share_gdhs 已写入 5445 行。
+2025-12-12 17:05:08,838 [INFO] 表 a_share_gdhs_detail 已写入 8904 行。
+2025-12-12 17:05:08,868 [INFO] 历史日线数据已保存至表：history_daily_kline
+2025-12-12 17:06:51,208 [INFO] 参数配置：history_days=300, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=False
+2025-12-12 17:06:51,286 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-12 17:06:51,286 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 17:06:51,287 [INFO]  - BaostockSession
+2025-12-12 17:06:51,287 [INFO]  - BaostockDataFetcher
+2025-12-12 17:06:51,287 [INFO]  - AshareUniverseBuilder
+2025-12-12 17:06:51,287 [INFO]  - FundamentalDataManager
+2025-12-12 17:06:51,609 [INFO] 最近交易日：2025-12-12
+2025-12-12 18:49:33,998 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-12 18:49:34,075 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-12 18:49:34,075 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-12 18:49:34,075 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 18:49:34,075 [INFO]  - BaostockSession
+2025-12-12 18:49:34,075 [INFO]  - BaostockDataFetcher
+2025-12-12 18:49:34,075 [INFO]  - AshareUniverseBuilder
+2025-12-12 18:49:34,075 [INFO]  - FundamentalDataManager
+2025-12-12 18:49:36,759 [INFO] 最近交易日：2025-12-12
+2025-12-12 18:49:44,000 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-12 18:50:08,080 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-12 18:50:32,461 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-12 18:50:33,810 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-12 18:50:34,830 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-12 18:50:35,023 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-12 18:50:35,023 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-12 18:50:35,699 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-12 18:50:35,928 [INFO] 开始增量拉取 2025-12-12 至 2025-12-12 的日线数据（原有截至 2025-12-11）。
+2025-12-12 18:51:54,728 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-12 18:51:54,786 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-12 18:51:54,786 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-12 18:51:54,787 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-12 18:51:54,787 [INFO]  - BaostockSession
+2025-12-12 18:51:54,787 [INFO]  - BaostockDataFetcher
+2025-12-12 18:51:54,787 [INFO]  - AshareUniverseBuilder
+2025-12-12 18:51:54,787 [INFO]  - FundamentalDataManager
+2025-12-12 18:51:59,402 [INFO] 最近交易日：2025-12-12
+2025-12-12 18:52:00,650 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-12 18:52:51,932 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-12 18:53:21,602 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-12 18:53:22,754 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-12 18:53:23,287 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-12 18:53:23,610 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-12 18:53:23,611 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-12 18:53:24,396 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-12 18:53:24,401 [INFO] 历史表 history_daily_kline 不存在或为空，执行冷启动：拉取最近 365 天日线。
+2025-12-12 18:53:26,962 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-12 19:05:15,129 [INFO] 已完成 500/3177 支股票的数据拉取
+2025-12-12 19:24:18,850 [INFO] 已完成 1000/3177 支股票的数据拉取
+2025-12-12 19:43:09,769 [INFO] 已完成 1500/3177 支股票的数据拉取
+2025-12-12 20:00:27,182 [INFO] 已完成 2000/3177 支股票的数据拉取

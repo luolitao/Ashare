@@ -40,6 +40,7 @@ class AshareApp:
         # 从 config.yaml 读取基础面刷新开关
         app_cfg = get_section("app")
         refresh_flag = app_cfg.get("refresh_fundamentals", False)
+        # 下面的数值型参数也从 config.yaml 读取默认值（允许环境变量覆盖）
         if isinstance(refresh_flag, str):
             refresh_flag = refresh_flag.strip().lower() in {
                 "1",
@@ -49,6 +50,23 @@ class AshareApp:
                 "on",
             }
         self.refresh_fundamentals: bool = bool(refresh_flag)
+
+        # config.yaml 的默认值（如果写成字符串也要能解析）
+        cfg_history_days = app_cfg.get("history_days", 30)
+        cfg_top_liquidity = app_cfg.get("top_liquidity_count", 100)
+        cfg_min_listing = app_cfg.get("min_listing_days", 60)
+        try:
+            cfg_history_days = int(cfg_history_days)
+        except Exception:
+            cfg_history_days = 30
+        try:
+            cfg_top_liquidity = int(cfg_top_liquidity)
+        except Exception:
+            cfg_top_liquidity = 100
+        try:
+            cfg_min_listing = int(cfg_min_listing)
+        except Exception:
+            cfg_min_listing = 60
 
         # 日线K线拉取开关（config.yaml: app.fetch_daily_kline）
         # 可用环境变量 ASHARE_FETCH_DAILY_KLINE 覆盖（优先级更高）
@@ -68,17 +86,17 @@ class AshareApp:
         self.history_days = (
             history_days
             if history_days is not None
-            else self._read_int_from_env("ASHARE_HISTORY_DAYS", 30)
+            else self._read_int_from_env("ASHARE_HISTORY_DAYS", cfg_history_days)
         )
         resolved_top_liquidity = (
             top_liquidity_count
             if top_liquidity_count is not None
-            else self._read_int_from_env("ASHARE_TOP_LIQUIDITY_COUNT", 100)
+            else self._read_int_from_env("ASHARE_TOP_LIQUIDITY_COUNT", cfg_top_liquidity)
         )
         resolved_min_listing_days = (
             min_listing_days
             if min_listing_days is not None
-            else self._read_int_from_env("ASHARE_MIN_LISTING_DAYS", 60)
+            else self._read_int_from_env("ASHARE_MIN_LISTING_DAYS", cfg_min_listing)
         )
         self.logger.info(
             "参数配置：history_days=%s, top_liquidity_count=%s, min_listing_days=%s, fetch_daily_kline=%s",
