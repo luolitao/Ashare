@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import multiprocessing as mp
 import os
 from pathlib import Path
+from queue import Empty
 from typing import Iterable, Tuple
 
 import pandas as pd
 from tqdm import tqdm
+from sqlalchemy import bindparam, text
 
 from .akshare_fetcher import AkshareDataFetcher
 from .baostock_core import BaostockDataFetcher
@@ -19,6 +22,34 @@ from .external_signal_manager import ExternalSignalManager
 from .fundamental_manager import FundamentalDataManager
 from .universe import AshareUniverseBuilder
 from .utils import setup_logger
+
+
+def _fetch_kline_task(
+    queue: mp.Queue,
+    code: str,
+    start_date: str,
+    end_date: str,
+    freq: str,
+    adjustflag: str,
+) -> None:
+    """子进程中拉取单只股票 K 线并通过队列返回。"""
+
+    session = BaostockSession()
+    try:
+        session.connect()
+        fetcher = BaostockDataFetcher(session)
+        df = fetcher.get_kline(
+            code=code,
+            start_date=start_date,
+            end_date=end_date,
+            freq=freq,
+            adjustflag=adjustflag,
+        )
+        queue.put(("ok", df))
+    except Exception as exc:  # noqa: BLE001
+        queue.put(("error", str(exc)))
+    finally:
+        session.logout()
 
 
 class AshareApp:
@@ -33,9 +64,29 @@ class AshareApp:
     ) -> None:
         # 保持入口参数兼容性
         self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # 日志改为写到项目根目录的 ashare.log，不再跟 output 绑在一起
         self.logger = setup_logger()
+
+        baostock_cfg = get_section("baostock")
+        self.baostock_per_code_timeout = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_PER_CODE_TIMEOUT",
+            baostock_cfg.get("per_code_timeout", 30),
+        )
+        self.baostock_max_retries = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_MAX_RETRIES", baostock_cfg.get("max_retries", 2)
+        )
+        self.resume_min_rows_per_code = self._read_int_from_env(
+            "ASHARE_RESUME_MIN_ROWS_PER_CODE",
+            baostock_cfg.get("resume_min_rows_per_code", 200),
+        )
+        self.history_flush_batch = 5
+        self.write_chunksize = 500
+        if self.baostock_max_retries < 1:
+            self.baostock_max_retries = 1
+        if self.baostock_per_code_timeout <= 0:
+            self.baostock_per_code_timeout = 30
 
         # 从 config.yaml 读取基础面刷新开关
         app_cfg = get_section("app")
@@ -201,6 +252,221 @@ class AshareApp:
 
         return trading_days[-days:]
 
+    def _compute_resume_threshold(self, end_day: dt.date, window_days: int) -> int:
+        trading_days = self._get_recent_trading_days(end_day, window_days)
+        trading_count = max(1, len(trading_days))
+        dynamic_threshold = int(trading_count * 0.8)
+        if dynamic_threshold <= 0:
+            dynamic_threshold = trading_count
+        return max(1, min(self.resume_min_rows_per_code, dynamic_threshold))
+
+    def _load_completed_codes(self, table_name: str, min_rows: int) -> set[str]:
+        query = text(
+            "SELECT `code` FROM `{table}` GROUP BY `code` HAVING COUNT(*) >= :threshold".format(
+                table=table_name
+            )
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(query, conn, params={"threshold": min_rows})
+        except Exception:  # noqa: BLE001
+            return set()
+
+        codes = {str(code) for code in df.get("code", []) if pd.notna(code)}
+        return codes
+
+    def _flush_history_batch(
+        self, batch: list[pd.DataFrame], table_name: str, if_exists: str = "append"
+    ) -> None:
+        if not batch:
+            return
+
+        combined = pd.concat(batch, ignore_index=True)
+        if {"code", "date"}.issubset(combined.columns):
+            combined = combined.drop_duplicates(subset=["code", "date"])
+
+        codes = (
+            combined.get("code", pd.Series(dtype=str))
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        min_date = None
+        max_date = None
+        if "date" in combined.columns:
+            date_series = pd.to_datetime(combined["date"], errors="coerce")
+            min_date_raw = date_series.min()
+            max_date_raw = date_series.max()
+            if pd.notna(min_date_raw) and pd.notna(max_date_raw):
+                min_date = min_date_raw.date().isoformat()
+                max_date = max_date_raw.date().isoformat()
+
+        if codes and min_date and max_date:
+            delete_stmt = (
+                text(
+                    "DELETE FROM `{table}` WHERE `code` IN (:codes) AND `date` BETWEEN :start_date AND :end_date".format(
+                        table=table_name
+                    )
+                ).bindparams(bindparam("codes", expanding=True))
+            )
+            try:
+                with self.db_writer.engine.begin() as conn:
+                    conn.execute(
+                        delete_stmt,
+                        {
+                            "codes": codes,
+                            "start_date": min_date,
+                            "end_date": max_date,
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("删除旧数据失败，将直接追加：%s", exc)
+
+        self.db_writer.write_dataframe(
+            combined,
+            table_name,
+            if_exists=if_exists,
+            chunksize=self.write_chunksize,
+            method="multi",
+        )
+
+    def _write_failed_codes(self, failed_codes: list[str]) -> None:
+        if not failed_codes:
+            return
+
+        failed_path = self.output_dir / "failed_codes.txt"
+        existing: set[str] = set()
+        if failed_path.exists():
+            existing = {line.strip() for line in failed_path.read_text().splitlines() if line.strip()}
+
+        merged = sorted(existing.union(failed_codes))
+        failed_path.write_text("\n".join(merged))
+
+    def _fetch_single_code_with_timeout(
+        self, code: str, start_date: str, end_date: str, freq: str, adjustflag: str
+    ) -> pd.DataFrame | None:
+        for attempt in range(1, self.baostock_max_retries + 1):
+            ctx = mp.get_context("spawn")
+            queue: mp.SimpleQueue = ctx.SimpleQueue()
+            process = ctx.Process(
+                target=_fetch_kline_task,
+                args=(queue, code, start_date, end_date, freq, adjustflag),
+            )
+            process.start()
+            status: str | None = None
+            payload: pd.DataFrame | str | None = None
+            try:
+                status, payload = queue.get(timeout=self.baostock_per_code_timeout)
+            except Empty:
+                status = "timeout"
+                payload = None
+                self.logger.warning(
+                    "股票 %s 拉取超时（>%s 秒），已终止子进程，第 %s/%s 次重试",
+                    code,
+                    self.baostock_per_code_timeout,
+                    attempt,
+                    self.baostock_max_retries,
+                )
+            finally:
+                process.join(timeout=1)
+                if process.is_alive():
+                    process.terminate()
+                    process.join()
+                queue.close()
+
+            if status == "ok":
+                return payload
+
+            if status != "timeout":
+                self.logger.warning(
+                    "股票 %s 拉取失败（第 %s/%s 次）: %s",
+                    code,
+                    attempt,
+                    self.baostock_max_retries,
+                    payload,
+                )
+
+        return None
+
+    def _fetch_and_store_history(
+        self,
+        stock_df: pd.DataFrame,
+        start_day: str,
+        end_date: str,
+        base_table: str,
+        adjustflag: str = "1",
+        resume_threshold: int | None = None,
+    ) -> tuple[int, list[str], list[str], int]:
+        history_frames: list[pd.DataFrame] = []
+        total = len(stock_df)
+        success_count = 0
+        empty_codes: list[str] = []
+        failed_codes: list[str] = []
+        skipped = 0
+        done_codes: set[str] = set()
+        if resume_threshold is not None and resume_threshold > 0:
+            done_codes = self._load_completed_codes(base_table, resume_threshold)
+
+        pbar = tqdm(stock_df["code"], desc="数据拉取进度", total=total)
+        for idx, code in enumerate(pbar, start=1):
+            pbar.set_postfix_str(str(code))
+            if code in done_codes:
+                skipped += 1
+                continue
+
+            daily_df = self._fetch_single_code_with_timeout(
+                code=code,
+                start_date=start_day,
+                end_date=end_date,
+                freq="d",
+                adjustflag=adjustflag,
+            )
+
+            if daily_df is None:
+                failed_codes.append(code)
+                continue
+
+            if daily_df.empty:
+                empty_codes.append(code)
+                continue
+
+            history_frames.append(daily_df)
+            success_count += 1
+
+            if history_frames and (
+                len(history_frames) >= self.history_flush_batch or idx == total
+            ):
+                self._flush_history_batch(history_frames, base_table, if_exists="append")
+                history_frames.clear()
+
+            if idx % 500 == 0 or idx == total:
+                self.logger.info(
+                    "已完成 %s/%s 支股票的拉取，最近处理 %s", idx, total, code
+                )
+
+        if history_frames:
+            self._flush_history_batch(history_frames, base_table, if_exists="append")
+
+        if failed_codes:
+            self._write_failed_codes(failed_codes)
+
+        self.logger.info(
+            "拉取结束：成功 %s/%s，空数据 %s，失败 %s，跳过 %s",
+            success_count,
+            total,
+            len(empty_codes),
+            len(failed_codes),
+            skipped,
+        )
+
+        if empty_codes:
+            self.logger.debug("完全未返回数据的股票：%s", ", ".join(sorted(empty_codes)))
+        if failed_codes:
+            self.logger.debug("请求失败的股票：%s", ", ".join(sorted(failed_codes)))
+
+        return success_count, empty_codes, failed_codes, skipped
+
     def _export_stock_list(self, trade_date: str) -> pd.DataFrame:
         stock_df = self.fetcher.get_stock_list(trade_date)
         if stock_df.empty:
@@ -250,78 +516,91 @@ class AshareApp:
         return index_membership
 
     def _export_recent_daily_history(
-        self, stock_df: pd.DataFrame, end_date: str, days: int = 30
+        self,
+        stock_df: pd.DataFrame,
+        end_date: str,
+        days: int = 30,
+        base_table: str = "history_daily_kline",
     ) -> Tuple[pd.DataFrame, str]:
         if stock_df.empty or "code" not in stock_df.columns:
             raise RuntimeError("导出历史日线失败：股票列表为空或缺少 code 列。")
 
         end_day = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
         recent_trading_days = self._get_recent_trading_days(end_day, days)
+        resume_threshold = self._compute_resume_threshold(end_day, days)
         start_day = recent_trading_days[0].isoformat()
 
-        history_frames: list[pd.DataFrame] = []
-        total = len(stock_df)
-        success_count = 0
-        empty_codes: list[str] = []
-        failed_codes: list[str] = []
         self.logger.info(
             "开始导出 %s 只股票的最近 %s 个交易日历史数据，窗口 [%s, %s]",
-            total,
+            len(stock_df),
             days,
             start_day,
             end_date,
         )
 
-        for idx, code in enumerate(
-            tqdm(stock_df["code"], desc="数据拉取进度"), start=1
-        ):
-            try:
-                daily_df = self.fetcher.get_kline(
-                    code=code,
-                    start_date=start_day,
-                    end_date=end_date,
-                    freq="d",
-                    adjustflag="1",
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning("股票 %s 数据拉取失败: %s", code, exc)
-                failed_codes.append(code)
-                continue
+        success_count, empty_codes, failed_codes, skipped = self._fetch_and_store_history(
+            stock_df,
+            start_day=start_day,
+            end_date=end_date,
+            base_table=base_table,
+            adjustflag="1",
+            resume_threshold=resume_threshold,
+        )
 
-            if daily_df.empty:
-                empty_codes.append(code)
-                continue
-
-            history_frames.append(daily_df)
-            success_count += 1
-
-            if idx % 500 == 0 or idx == total:
-                self.logger.info("已完成 %s/%s 支股票的数据拉取", idx, total)
-
-        if not history_frames:
+        if success_count == 0 and skipped == 0:
             raise RuntimeError("导出历史日线失败：全部股票均未返回数据。")
 
-        self.logger.info(
-            "日线拉取完成：成功 %s/%s，空数据 %s，失败 %s",
-            success_count,
-            total,
-            len(empty_codes),
-            len(failed_codes),
-        )
-        if empty_codes:
-            self.logger.debug("完全未返回数据的股票：%s", ", ".join(sorted(empty_codes)))
-        if failed_codes:
-            self.logger.debug("请求失败的股票：%s", ", ".join(sorted(failed_codes)))
+        recent_df = self._slice_recent_window(base_table, end_day, days)
+        if not recent_df.empty:
+            self.logger.info(
+                "已写入表 %s，当前样本行数 %s，空数据 %s，失败 %s，跳过 %s",
+                base_table,
+                len(recent_df),
+                len(empty_codes),
+                len(failed_codes),
+                skipped,
+            )
+        recent_table = f"history_recent_{days}_days"
+        self._save_sample(recent_df, recent_table)
+        return recent_df, recent_table
 
-        combined = pd.concat(history_frames, ignore_index=True)
-        combined_table = self._save_sample(combined, f"history_recent_{days}_days")
-        self.logger.info(
-            "已导出最近 %s 个交易日的历史数据，共 %s 行，表名：%s",
-            days,
-            len(combined),
-            combined_table,
+    def _slice_recent_window(
+        self, base_table: str, end_day: dt.date, window_days: int
+    ) -> pd.DataFrame:
+        window_trading_days = self._get_recent_trading_days(end_day, window_days)
+        window_start = window_trading_days[0].isoformat()
+        query = text(
+            "SELECT * FROM `{table}` WHERE `date` >= :window_start".format(
+                table=base_table
+            )
         )
-        return combined, combined_table
+
+        with self.db_writer.engine.begin() as conn:
+            recent_df = pd.read_sql_query(query, conn, params={"window_start": window_start})
+
+        if recent_df.empty:
+            raise RuntimeError(
+                f"从表 {base_table} 切出最近 {window_days} 天数据失败：结果为空。"
+            )
+
+        if "date" not in recent_df.columns:
+            raise RuntimeError(
+                f"表 {base_table} 缺少 date 列，无法进行时间窗口切片。"
+            )
+
+        window_day_set = {day for day in window_trading_days}
+        recent_df["date"] = pd.to_datetime(recent_df["date"])
+        recent_df = recent_df[recent_df["date"].dt.date.isin(window_day_set)].copy()
+
+        if recent_df.empty:
+            raise RuntimeError(
+                "从表 {table} 中切出最近 {days} 天数据失败：结果为空。".format(
+                    table=base_table,
+                    days=window_days,
+                )
+            )
+
+        return recent_df
 
     def _export_daily_history_incremental(
         self,
@@ -361,6 +640,9 @@ class AshareApp:
         elif isinstance(last_date_raw, str) and last_date_raw:
             last_date_value = dt.datetime.strptime(last_date_raw, "%Y-%m-%d").date()
 
+        resume_threshold = self._compute_resume_threshold(end_day, window_days)
+        done_codes: set[str] = set()
+
         # 开关关闭：禁止调用 Baostock 日线K线接口，仅从数据库表切片读取
         if not fetch_enabled:
             self.logger.info(
@@ -388,20 +670,33 @@ class AshareApp:
                 base_table,
                 window_days,
             )
-            history_df, _ = self._export_recent_daily_history(
-                stock_df, end_date, days=window_days
+            recent_df, _ = self._export_recent_daily_history(
+                stock_df, end_date, days=window_days, base_table=base_table
             )
-            self.db_writer.write_dataframe(
-                history_df,
-                base_table,
-                if_exists="replace",
-            )
+            recent_table = f"history_recent_{window_days}_days"
+            self._save_sample(recent_df, recent_table)
+            return recent_df, recent_table
         elif fetch_enabled and last_date_value >= end_day:
+            done_codes = self._load_completed_codes(base_table, resume_threshold)
+            if len(done_codes) < len(stock_df):
+                self.logger.info(
+                    "历史表 %s 已存在但未覆盖全部股票，继续补齐缺口。", base_table
+                )
+                recent_df, _ = self._export_recent_daily_history(
+                    stock_df, end_date, days=window_days, base_table=base_table
+                )
+                recent_table = f"history_recent_{window_days}_days"
+                self._save_sample(recent_df, recent_table)
+                return recent_df, recent_table
             self.logger.info(
                 "历史日线表 %s 已包含截至 %s 的数据，跳过增量拉取。",
                 base_table,
                 end_date,
             )
+            recent_df = self._slice_recent_window(base_table, end_day, window_days)
+            recent_table = f"history_recent_{window_days}_days"
+            self._save_sample(recent_df, recent_table)
+            return recent_df, recent_table
         elif fetch_enabled:
             trade_start = last_date_value + dt.timedelta(days=1)
             new_trading_days = self._get_trading_days_between(trade_start, end_day)
@@ -420,103 +715,22 @@ class AshareApp:
                 last_date_value.isoformat(),
             )
 
-            history_frames: list[pd.DataFrame] = []
-            total = len(stock_df)
-            success_count = 0
-            empty_codes: list[str] = []
-            failed_codes: list[str] = []
-
             if start_day is not None:
-                for idx, code in enumerate(
-                    tqdm(stock_df["code"], desc="增量数据拉取进度"),
-                    start=1,
-                ):
-                    try:
-                        daily_df = self.fetcher.get_kline(
-                            code=code,
-                            start_date=start_day,
-                            end_date=end_date,
-                            freq="d",
-                            adjustflag="1",
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        self.logger.warning("股票 %s 增量数据拉取失败: %s", code, exc)
-                        failed_codes.append(code)
-                        continue
-
-                    if daily_df.empty:
-                        empty_codes.append(code)
-                        continue
-
-                    history_frames.append(daily_df)
-                    success_count += 1
-
-                    if idx % 500 == 0 or idx == total:
-                        self.logger.info(
-                            "增量已完成 %s/%s 支股票的数据拉取",
-                            idx,
-                            total,
-                        )
-
-            if history_frames:
-                new_rows = pd.concat(history_frames, ignore_index=True)
-                self.db_writer.write_dataframe(
-                    new_rows,
-                    base_table,
-                    if_exists="append",
+                self._fetch_and_store_history(
+                    stock_df,
+                    start_day=start_day,
+                    end_date=end_date,
+                    base_table=base_table,
+                    adjustflag="1",
+                    resume_threshold=None,
                 )
-                self.logger.info(
-                    "增量拉取完成：成功 %s/%s，空数据 %s，失败 %s",
-                    success_count,
-                    total,
-                    len(empty_codes),
-                    len(failed_codes),
-                )
-                if empty_codes:
-                    self.logger.debug(
-                        "增量阶段完全未返回数据的股票：%s",
-                        ", ".join(sorted(empty_codes)),
-                    )
-                if failed_codes:
-                    self.logger.debug(
-                        "增量阶段请求失败的股票：%s",
-                        ", ".join(sorted(failed_codes)),
-                    )
             else:
                 self.logger.info("本次没有任何新的日线数据可写入。")
 
-        window_trading_days = self._get_recent_trading_days(end_day, window_days)
-        window_start = window_trading_days[0].isoformat()
-        query = f"SELECT * FROM `{base_table}` WHERE `date` >= '{window_start}'"
-
-        with self.db_writer.engine.begin() as conn:
-            recent_df = pd.read_sql(query, conn)
-
-        if recent_df.empty:
-            raise RuntimeError(
-                f"从表 {base_table} 切出最近 {window_days} 天数据失败：结果为空。"
-            )
-
-        if "date" not in recent_df.columns:
-            raise RuntimeError(
-                f"表 {base_table} 缺少 date 列，无法进行时间窗口切片。"
-            )
-
-        window_day_set = {day for day in window_trading_days}
-        recent_df["date"] = pd.to_datetime(recent_df["date"])
-        recent_df = recent_df[
-            recent_df["date"].dt.date.isin(window_day_set)
-        ].copy()
-
-        if recent_df.empty:
-            raise RuntimeError(
-                "从表 {table} 中切出最近 {days} 天数据失败：结果为空。".format(
-                    table=base_table,
-                    days=window_days,
-                )
-            )
-
-        return recent_df, base_table
+        recent_df = self._slice_recent_window(base_table, end_day, window_days)
+        recent_table = f"history_recent_{window_days}_days"
+        self._save_sample(recent_df, recent_table)
+        return recent_df, recent_table
 
     def _extract_focus_codes(self, df: pd.DataFrame) -> list[str]:
         if df.empty:

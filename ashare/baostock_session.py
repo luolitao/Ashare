@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import atexit
+import os
+import socket
 import time
 
 import baostock as bs
@@ -20,6 +22,7 @@ class BaostockSession:
     retry: int = 3
     retry_sleep: float = 3.0
     logged_in: bool = False
+    socket_timeout: float | None = None
 
     def __init__(self, retry: int | None = None, retry_sleep: float | None = None) -> None:
         """
@@ -33,6 +36,9 @@ class BaostockSession:
             retry = cfg.get("retry", self.retry)
         if retry_sleep is None:
             retry_sleep = cfg.get("retry_sleep", self.retry_sleep)
+        socket_timeout_raw = os.getenv(
+            "ASHARE_BAOSTOCK_SOCKET_TIMEOUT", cfg.get("socket_timeout")
+        )
 
         try:
             self.retry = int(retry)
@@ -43,6 +49,14 @@ class BaostockSession:
             self.retry_sleep = float(retry_sleep)
         except (TypeError, ValueError):
             self.retry_sleep = 3.0
+
+        try:
+            timeout_value = float(socket_timeout_raw) if socket_timeout_raw else None
+        except (TypeError, ValueError):
+            timeout_value = None
+        self.socket_timeout = timeout_value
+        if self.socket_timeout and self.socket_timeout > 0:
+            socket.setdefaulttimeout(self.socket_timeout)
 
         atexit.register(self.logout)
 
@@ -87,6 +101,15 @@ class BaostockSession:
             pass
         finally:
             self.logged_in = False
+
+    def reconnect(self) -> None:
+        """重新建立 Baostock 连接。"""
+
+        try:
+            self.logout()
+        finally:
+            self.logged_in = False
+        self.connect()
 
 
 def _demo() -> None:

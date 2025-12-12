@@ -32,6 +32,14 @@ baostock:
   # Baostock 登录失败时的重试次数与间隔（秒）
   retry: 3
   retry_sleep: 3.0
+  # Socket 超时（秒），防止底层网络调用无限等待
+  socket_timeout: 30
+  # 单只股票拉取的子进程超时时间（秒）
+  per_code_timeout: 30
+  # 单只股票最大尝试次数
+  max_retries: 2
+  # 断点续跑判定：每只股票满足最少行数后视为已完成
+  resume_min_rows_per_code: 200
 
 akshare:
   enabled: false
