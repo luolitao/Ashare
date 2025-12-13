@@ -49,6 +49,7 @@ def _worker_fetch_kline(args: tuple[str, str, str, str, str, int]) -> tuple[str,
         max_backoff = 15.0
         return min(max_backoff, base * (2 ** (attempt_index - 1)))
 
+    _worker_session.ensure_alive()
     for attempt in range(1, max_retries + 1):
         try:
             df = _worker_fetcher.get_kline(
@@ -134,11 +135,20 @@ class AshareApp:
         )
         cleanup_mode = str(cleanup_mode_raw).strip().lower()
         if cleanup_mode not in {"window", "skip"}:
+            self.logger.warning(
+                "history_cleanup_mode=%s 无效，已自动回退为 window 模式。",
+                cleanup_mode_raw,
+            )
             cleanup_mode = "window"
         self.history_cleanup_mode = cleanup_mode
         self.history_retention_days = self._read_int_from_env(
             "ASHARE_HISTORY_RETENTION_DAYS", baostock_cfg.get("history_retention_days", 0)
         )
+        if self.history_cleanup_mode == "skip" and self.history_retention_days > 0:
+            self.logger.info(
+                "已启用历史数据保留窗口 %s 天，即便追加模式也会定期清理过期数据。",
+                self.history_retention_days,
+            )
         if self.baostock_max_retries < 1:
             self.baostock_max_retries = 1
         if self.baostock_per_code_timeout <= 0:
@@ -273,19 +283,25 @@ class AshareApp:
         """根据配置、CPU 与任务规模动态确定子进程数量。"""
 
         bounded_max = max(1, min(self.worker_processes_max, mp.cpu_count()))
-        bounded_min = max(1, min(self.worker_processes_min, bounded_max))
-        base_default = max(bounded_min, min(self.worker_processes_default, bounded_max))
         network_cap = self.network_worker_cap
         if network_cap <= 0:
-            network_cap = bounded_max
+            hard_cap = bounded_max
         else:
-            network_cap = max(bounded_min, min(network_cap, bounded_max))
+            hard_cap = max(1, min(network_cap, bounded_max))
 
-        adaptive = min(base_default, network_cap, total_codes or 1)
-        if total_codes > 1000 and adaptive < min(network_cap, bounded_max):
-            adaptive = min(network_cap, bounded_max, adaptive + 1)
+        bounded_min = max(1, min(self.worker_processes_min, hard_cap))
+        base_default = max(bounded_min, min(self.worker_processes_default, hard_cap))
+        adaptive = min(base_default, hard_cap, total_codes or 1)
+        if total_codes > 1000 and adaptive < min(hard_cap, bounded_max):
+            adaptive = min(hard_cap, bounded_max, adaptive + 1)
 
-        return max(bounded_min, adaptive)
+        chosen = max(bounded_min, min(hard_cap, adaptive))
+        if hard_cap == 1 and chosen != 1:
+            chosen = 1
+        if hard_cap == 1:
+            self.logger.info("Baostock 并发已限制为单进程模式以降低封禁风险。")
+
+        return chosen
 
     def _get_trading_days_between(
         self, start_day: dt.date, end_day: dt.date

@@ -23,6 +23,7 @@ class BaostockSession:
     retry_sleep: float = 3.0
     logged_in: bool = False
     socket_timeout: float | None = None
+    alive_check_interval: float = 60.0
 
     def __init__(self, retry: int | None = None, retry_sleep: float | None = None) -> None:
         """
@@ -38,6 +39,10 @@ class BaostockSession:
             retry_sleep = cfg.get("retry_sleep", self.retry_sleep)
         socket_timeout_raw = os.getenv(
             "ASHARE_BAOSTOCK_SOCKET_TIMEOUT", cfg.get("socket_timeout")
+        )
+        alive_interval_raw = os.getenv(
+            "ASHARE_BAOSTOCK_KEEPALIVE_INTERVAL",
+            cfg.get("keepalive_interval", self.alive_check_interval),
         )
 
         try:
@@ -55,6 +60,12 @@ class BaostockSession:
         except (TypeError, ValueError):
             timeout_value = None
         self.socket_timeout = timeout_value
+        try:
+            alive_interval = float(alive_interval_raw)
+        except (TypeError, ValueError):
+            alive_interval = self.alive_check_interval
+        self.alive_check_interval = max(5.0, alive_interval)
+        self._last_alive_ts: float = 0.0
         if self.socket_timeout and self.socket_timeout > 0:
             socket.setdefaulttimeout(self.socket_timeout)
 
@@ -76,6 +87,7 @@ class BaostockSession:
             result = bs.login()
             if result.error_code == "0":
                 self.logged_in = True
+                self._last_alive_ts = time.time()
                 return
 
             last_error_msg = result.error_msg
@@ -101,6 +113,7 @@ class BaostockSession:
             pass
         finally:
             self.logged_in = False
+            self._last_alive_ts = 0.0
 
     def ensure_alive(self, force_refresh: bool = False) -> None:
         """确保会话可用，必要时重新登录。
@@ -117,12 +130,18 @@ class BaostockSession:
             self.connect()
             return
 
+        now = time.time()
+        if now - self._last_alive_ts < self.alive_check_interval:
+            return
+
         try:
             rs = bs.query_server_version()
             if getattr(rs, "error_code", None) != "0":
                 raise RuntimeError("Baostock 会话失效，需要重新登录。")
         except Exception:
             self.reconnect()
+        else:
+            self._last_alive_ts = time.time()
 
     def reconnect(self) -> None:
         """重新建立 Baostock 连接。"""
@@ -131,6 +150,7 @@ class BaostockSession:
             self.logout()
         finally:
             self.logged_in = False
+            self._last_alive_ts = 0.0
         self.connect()
 
 
