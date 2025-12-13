@@ -404,15 +404,24 @@ class AshareApp:
         inspector = inspect(self.db_writer.engine)
         return inspector.has_table(table_name)
 
-    def _load_completed_codes(self, table_name: str, min_rows: int) -> set[str]:
+    def _load_completed_codes(
+        self, table_name: str, min_rows: int, required_end_date: str | None = None
+    ) -> set[str]:
+        having_conditions = ["COUNT(*) >= :threshold"]
+        params: dict[str, object] = {"threshold": min_rows}
+        if required_end_date:
+            having_conditions.append("MAX(`date`) >= :required_end_date")
+            params["required_end_date"] = required_end_date
+
+        having_clause = " AND ".join(having_conditions)
         query = text(
-            "SELECT `code` FROM `{table}` GROUP BY `code` HAVING COUNT(*) >= :threshold".format(
-                table=table_name
+            "SELECT `code` FROM `{table}` GROUP BY `code` HAVING {clause}".format(
+                table=table_name, clause=having_clause
             )
         )
         try:
             with self.db_writer.engine.begin() as conn:
-                df = pd.read_sql_query(query, conn, params={"threshold": min_rows})
+                df = pd.read_sql_query(query, conn, params=params)
         except Exception:  # noqa: BLE001
             return set()
 
@@ -552,7 +561,9 @@ class AshareApp:
         skipped = 0
         done_codes: set[str] = set()
         if resume_threshold is not None and resume_threshold > 0:
-            done_codes = self._load_completed_codes(base_table, resume_threshold)
+            done_codes = self._load_completed_codes(
+                base_table, resume_threshold, required_end_date=end_date
+            )
 
         codes = [str(code) for code in stock_df.get("code", []) if pd.notna(code)]
         codes_to_fetch = [code for code in codes if code not in done_codes]
@@ -884,7 +895,9 @@ class AshareApp:
             self._save_sample(recent_df, recent_table)
             return recent_df, recent_table
         elif fetch_enabled and last_date_value >= end_day:
-            done_codes = self._load_completed_codes(base_table, resume_threshold)
+            done_codes = self._load_completed_codes(
+                base_table, resume_threshold, required_end_date=end_date
+            )
             if len(done_codes) < len(stock_df):
                 self.logger.info(
                     "历史表 %s 已存在但未覆盖全部股票，继续补齐缺口。", base_table
