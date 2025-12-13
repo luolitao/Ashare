@@ -271,6 +271,9 @@ class MA5MA20StrategyRunner:
             sub["kdj_d"] = d
             sub["kdj_j"] = j
             sub["atr14"] = atr
+            # pandas>=2.2, include_groups=False 会去掉分组列，主动恢复 code
+            if "code" not in sub.columns:
+                sub["code"] = group_code
             return sub
 
         # pandas 新版本会提示 groupby.apply 将来不再包含分组列，提前兼容
