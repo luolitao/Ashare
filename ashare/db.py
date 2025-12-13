@@ -22,6 +22,10 @@ class DatabaseConfig:
     user: str = "root"
     password: str = ""
     db_name: str = "ashare"
+    pool_size: int = 5
+    max_overflow: int = 10
+    pool_recycle: int = 1800
+    pool_timeout: int = 30
 
     @classmethod
     def from_env(cls) -> "DatabaseConfig":
@@ -42,11 +46,30 @@ class DatabaseConfig:
             section.get("password", cls.password),
         )
         db_name = os.getenv("MYSQL_DB_NAME", section.get("db_name", cls.db_name))
+        pool_size_raw = os.getenv(
+            "MYSQL_POOL_SIZE", section.get("pool_size", cls.pool_size)
+        )
+        max_overflow_raw = os.getenv(
+            "MYSQL_MAX_OVERFLOW", section.get("max_overflow", cls.max_overflow)
+        )
+        pool_recycle_raw = os.getenv(
+            "MYSQL_POOL_RECYCLE", section.get("pool_recycle", cls.pool_recycle)
+        )
+        pool_timeout_raw = os.getenv(
+            "MYSQL_POOL_TIMEOUT", section.get("pool_timeout", cls.pool_timeout)
+        )
 
         try:
             port = int(port_raw)
         except (TypeError, ValueError):
             port = cls.port
+
+        def _parse_positive_int(raw: str | int | float | None, default: int) -> int:
+            try:
+                value = int(raw)
+                return value if value > 0 else default
+            except (TypeError, ValueError):
+                return default
 
         return cls(
             host=host,
@@ -54,6 +77,10 @@ class DatabaseConfig:
             user=user,
             password=password,
             db_name=db_name,
+            pool_size=_parse_positive_int(pool_size_raw, cls.pool_size),
+            max_overflow=_parse_positive_int(max_overflow_raw, cls.max_overflow),
+            pool_recycle=_parse_positive_int(pool_recycle_raw, cls.pool_recycle),
+            pool_timeout=_parse_positive_int(pool_timeout_raw, cls.pool_timeout),
         )
 
     def _credential(self) -> str:
@@ -94,7 +121,15 @@ class MySQLWriter:
             )
         server_engine.dispose()
 
-        return create_engine(self.config.database_url(), future=True)
+        return create_engine(
+            self.config.database_url(),
+            future=True,
+            pool_size=self.config.pool_size,
+            max_overflow=self.config.max_overflow,
+            pool_timeout=self.config.pool_timeout,
+            pool_recycle=self.config.pool_recycle,
+            pool_pre_ping=True,
+        )
 
     def write_dataframe(
         self,

@@ -23,6 +23,11 @@ database:
   user: root
   password: ""
   db_name: ashare
+  # SQLAlchemy 连接池配置，避免频繁创建连接
+  pool_size: 5
+  max_overflow: 10
+  pool_recycle: 1800
+  pool_timeout: 30
 
 proxy:
   http: http://127.0.0.1:7890
@@ -34,6 +39,8 @@ baostock:
   retry_sleep: 3.0
   # Socket 超时（秒），防止底层网络调用无限等待
   socket_timeout: 30
+  # 登录状态保活探测间隔（秒），避免高频心跳导致频繁登录
+  keepalive_interval: 60
   # 单只股票拉取的子进程超时时间（秒）
   per_code_timeout: 30
   # 单只股票最大尝试次数
