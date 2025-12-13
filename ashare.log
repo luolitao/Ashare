@@ -561,3 +561,312 @@
 2025-12-13 10:41:38,979 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
 2025-12-13 10:41:40,173 [INFO] 历史表 history_daily_kline 不存在或为空，执行冷启动：拉取最近 365 天日线。
 2025-12-13 10:41:43,064 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 10:46:11,148 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 10:46:11,218 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 10:46:11,218 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 10:46:11,218 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 10:46:11,218 [INFO]  - BaostockSession
+2025-12-13 10:46:11,219 [INFO]  - BaostockDataFetcher
+2025-12-13 10:46:11,219 [INFO]  - AshareUniverseBuilder
+2025-12-13 10:46:11,219 [INFO]  - FundamentalDataManager
+2025-12-13 10:46:11,705 [INFO] 最近交易日：2025-12-12
+2025-12-13 10:46:13,138 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 10:46:17,622 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 10:46:24,110 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 10:46:28,436 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 10:46:29,288 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 10:46:30,096 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 10:46:30,096 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 10:46:31,400 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 10:46:32,612 [INFO] 历史表 history_daily_kline 不存在或为空，执行冷启动：拉取最近 365 天日线。
+2025-12-13 10:46:33,222 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 10:46:51,482 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.ProgrammingError) (1146, "Table 'ashare.history_daily_kline' doesn't exist")
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600000', 'codes_2': 'sh.600004', 'codes_3': 'sh.600006', 'codes_4': 'sh.600007', 'codes_5': 'sh.600008'}]
+(Background on this error at: https://sqlalche.me/e/20/f405)
+2025-12-13 10:47:08,274 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600009', 'codes_2': 'sh.600010', 'codes_3': 'sh.600011', 'codes_4': 'sh.600012', 'codes_5': 'sh.600015'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:47:30,778 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600016', 'codes_2': 'sh.600017', 'codes_3': 'sh.600018', 'codes_4': 'sh.600019', 'codes_5': 'sh.600020'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:47:46,124 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600021', 'codes_2': 'sh.600022', 'codes_3': 'sh.600023', 'codes_4': 'sh.600025', 'codes_5': 'sh.600026'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:48:07,464 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600027', 'codes_2': 'sh.600028', 'codes_3': 'sh.600029', 'codes_4': 'sh.600030', 'codes_5': 'sh.600031'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:48:25,037 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600032', 'codes_2': 'sh.600033', 'codes_3': 'sh.600035', 'codes_4': 'sh.600036', 'codes_5': 'sh.600037'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:48:41,019 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600038', 'codes_2': 'sh.600039', 'codes_3': 'sh.600048', 'codes_4': 'sh.600050', 'codes_5': 'sh.600051'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:48:59,296 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600052', 'codes_2': 'sh.600053', 'codes_3': 'sh.600054', 'codes_4': 'sh.600055', 'codes_5': 'sh.600056'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:49:20,996 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600057', 'codes_2': 'sh.600058', 'codes_3': 'sh.600059', 'codes_4': 'sh.600060', 'codes_5': 'sh.600061'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 10:49:38,375 [WARNING] 删除旧数据失败，将直接追加：(pymysql.err.OperationalError) (1241, 'Operand should contain 1 column(s)')
+[SQL: DELETE FROM `history_daily_kline` WHERE `code` IN ((%(codes_1)s, %(codes_2)s, %(codes_3)s, %(codes_4)s, %(codes_5)s)) AND `date` BETWEEN %(start_date)s AND %(end_date)s]
+[parameters: {'start_date': '2024-06-17', 'end_date': '2025-12-12', 'codes_1': 'sh.600062', 'codes_2': 'sh.600063', 'codes_3': 'sh.600064', 'codes_4': 'sh.600066', 'codes_5': 'sh.600067'}]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
+2025-12-13 11:20:42,074 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 11:20:42,149 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 11:20:42,149 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 11:20:42,149 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 11:20:42,150 [INFO]  - BaostockSession
+2025-12-13 11:20:42,150 [INFO]  - BaostockDataFetcher
+2025-12-13 11:20:42,150 [INFO]  - AshareUniverseBuilder
+2025-12-13 11:20:42,150 [INFO]  - FundamentalDataManager
+2025-12-13 11:20:43,269 [INFO] 最近交易日：2025-12-12
+2025-12-13 11:20:46,406 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 11:20:51,540 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 11:20:59,946 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 11:21:00,255 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 11:21:00,528 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 11:21:00,717 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 11:21:00,717 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 11:21:02,017 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 11:21:02,764 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 11:21:03,094 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 11:21:03,128 [INFO] 本次历史日线拉取将使用 5 个并发子进程（候选 3127 支股票）。
+2025-12-13 11:21:18,059 [INFO] 已完成 100/3127 支股票的拉取，最近处理 sh.600199
+2025-12-13 11:21:34,296 [INFO] 已完成 200/3127 支股票的拉取，最近处理 sh.600333
+2025-12-13 11:21:47,561 [INFO] 已完成 300/3127 支股票的拉取，最近处理 sh.600481
+2025-12-13 11:22:01,696 [INFO] 已完成 400/3127 支股票的拉取，最近处理 sh.600601
+2025-12-13 11:22:17,201 [INFO] 已完成 500/3127 支股票的拉取，最近处理 sh.600727
+2025-12-13 11:22:35,013 [INFO] 已完成 600/3127 支股票的拉取，最近处理 sh.600850
+2025-12-13 11:22:53,170 [INFO] 已完成 700/3127 支股票的拉取，最近处理 sh.600990
+2025-12-13 11:23:14,210 [INFO] 已完成 800/3127 支股票的拉取，最近处理 sh.601328
+2025-12-13 11:23:35,611 [INFO] 已完成 900/3127 支股票的拉取，最近处理 sh.601919
+2025-12-13 11:23:59,583 [INFO] 已完成 1000/3127 支股票的拉取，最近处理 sh.603086
+2025-12-13 11:24:25,940 [INFO] 已完成 1100/3127 支股票的拉取，最近处理 sh.603209
+2025-12-13 11:24:50,276 [INFO] 已完成 1200/3127 支股票的拉取，最近处理 sh.603336
+2025-12-13 11:25:18,255 [INFO] 已完成 1300/3127 支股票的拉取，最近处理 sh.603578
+2025-12-13 11:25:44,080 [INFO] 已完成 1400/3127 支股票的拉取，最近处理 sh.603757
+2025-12-13 11:26:10,378 [INFO] 已完成 1500/3127 支股票的拉取，最近处理 sh.603955
+2025-12-13 11:26:40,993 [INFO] 已完成 1600/3127 支股票的拉取，最近处理 sh.605286
+2025-12-13 11:27:12,288 [INFO] 已完成 1700/3127 支股票的拉取，最近处理 sz.000100
+2025-12-13 11:27:38,483 [INFO] 已完成 1800/3127 支股票的拉取，最近处理 sz.000592
+2025-12-13 11:28:15,437 [INFO] 已完成 1900/3127 支股票的拉取，最近处理 sz.000751
+2025-12-13 11:31:34,223 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 11:31:34,277 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 11:31:34,278 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 11:31:34,278 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 11:31:34,278 [INFO]  - BaostockSession
+2025-12-13 11:31:34,278 [INFO]  - BaostockDataFetcher
+2025-12-13 11:31:34,278 [INFO]  - AshareUniverseBuilder
+2025-12-13 11:31:34,278 [INFO]  - FundamentalDataManager
+2025-12-13 11:31:36,635 [INFO] 最近交易日：2025-12-12
+2025-12-13 11:31:47,353 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 11:31:50,903 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 11:31:57,970 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 11:31:58,775 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 11:31:59,063 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 11:31:59,266 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 11:31:59,267 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 11:32:00,614 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 11:32:02,334 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 11:32:02,651 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 11:32:03,689 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 1223 支股票）。
+2025-12-13 11:32:58,215 [INFO] 已完成 100/1223 支股票的拉取，最近处理 sz.000917
+2025-12-13 11:34:03,139 [INFO] 已完成 200/1223 支股票的拉取，最近处理 sz.001279
+2025-12-13 11:35:02,473 [INFO] 已完成 300/1223 支股票的拉取，最近处理 sz.002039
+2025-12-13 11:35:50,891 [INFO] 已完成 400/1223 支股票的拉取，最近处理 sz.002146
+2025-12-13 11:36:36,202 [INFO] 已完成 500/1223 支股票的拉取，最近处理 sz.002249
+2025-12-13 11:37:22,777 [INFO] 已完成 600/1223 支股票的拉取，最近处理 sz.002357
+2025-12-13 11:38:05,160 [INFO] 已完成 700/1223 支股票的拉取，最近处理 sz.002465
+2025-12-13 11:38:45,702 [INFO] 已完成 800/1223 支股票的拉取，最近处理 sz.002574
+2025-12-13 11:39:27,714 [INFO] 已完成 900/1223 支股票的拉取，最近处理 sz.002681
+2025-12-13 11:40:15,106 [INFO] 已完成 1000/1223 支股票的拉取，最近处理 sz.002799
+2025-12-13 11:41:30,346 [INFO] 已完成 1100/1223 支股票的拉取，最近处理 sz.002909
+2025-12-13 11:42:43,711 [INFO] 已完成 1200/1223 支股票的拉取，最近处理 sz.003019
+2025-12-13 11:43:01,440 [INFO] 已完成 1223/1223 支股票的拉取，最近处理 sz.003816
+2025-12-13 11:43:01,455 [INFO] 拉取结束：成功 1223/1223，空数据 0，失败 0，跳过 1954
+2025-12-13 11:43:20,693 [ERROR] 导出最近 365 个交易日的日线数据失败: Baostock 调用失败: 10002007, 网络接收错误。
+2025-12-13 11:58:10,174 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 11:58:10,279 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 11:58:10,280 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 11:58:10,280 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 11:58:10,280 [INFO]  - BaostockSession
+2025-12-13 11:58:10,280 [INFO]  - BaostockDataFetcher
+2025-12-13 11:58:10,280 [INFO]  - AshareUniverseBuilder
+2025-12-13 11:58:10,280 [INFO]  - FundamentalDataManager
+2025-12-13 11:58:10,743 [INFO] 最近交易日：2025-12-12
+2025-12-13 11:58:13,927 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 11:58:17,824 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 11:58:21,807 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 11:58:23,153 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 11:58:29,666 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 11:58:36,890 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 11:58:36,891 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 11:58:38,059 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 11:58:43,453 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 11:58:44,553 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 11:58:46,272 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 31 支股票）。
+2025-12-13 12:16:36,087 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 12:16:36,155 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 12:16:36,155 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 12:16:36,155 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 12:16:36,155 [INFO]  - BaostockSession
+2025-12-13 12:16:36,155 [INFO]  - BaostockDataFetcher
+2025-12-13 12:16:36,155 [INFO]  - AshareUniverseBuilder
+2025-12-13 12:16:36,155 [INFO]  - FundamentalDataManager
+2025-12-13 12:16:36,366 [INFO] 最近交易日：2025-12-12
+2025-12-13 12:16:38,278 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 12:16:41,318 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 12:16:44,898 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 12:16:45,156 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 12:16:45,439 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 12:16:45,990 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 12:16:45,991 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 12:16:47,405 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 12:16:50,531 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 12:16:50,804 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 12:16:52,498 [INFO] Baostock 并发已限制为单进程模式以降低封禁风险。
+2025-12-13 12:16:52,499 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 31 支股票）。
+2025-12-13 12:17:07,152 [INFO] 已完成 31/31 支股票的拉取，最近处理 sz.001400
+2025-12-13 12:17:07,165 [INFO] 拉取结束：成功 31/31，空数据 0，失败 0，跳过 3146
+2025-12-13 12:17:07,206 [WARNING] Baostock 调用异常（第 1 次），即将重试：Baostock 调用失败: 10001001, 用户未登录
+2025-12-13 12:17:36,305 [INFO] 已写入表 history_daily_kline，当前样本行数 1150276，空数据 0，失败 0，跳过 3146
+2025-12-13 12:27:32,090 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 12:27:32,154 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 12:27:32,154 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 12:27:32,154 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 12:27:32,154 [INFO]  - BaostockSession
+2025-12-13 12:27:32,154 [INFO]  - BaostockDataFetcher
+2025-12-13 12:27:32,154 [INFO]  - AshareUniverseBuilder
+2025-12-13 12:27:32,154 [INFO]  - FundamentalDataManager
+2025-12-13 12:27:34,160 [INFO] 最近交易日：2025-12-12
+2025-12-13 12:27:35,281 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 12:27:39,851 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 12:27:43,754 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 12:27:44,834 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 12:27:47,070 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 12:27:47,655 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 12:27:47,655 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 12:27:48,736 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 12:27:52,241 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 12:27:55,621 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 12:27:57,141 [INFO] Baostock 并发已限制为单进程模式以降低封禁风险。
+2025-12-13 12:27:57,141 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 31 支股票）。
+2025-12-13 12:28:33,867 [INFO] 已完成 31/31 支股票的拉取，最近处理 sz.001400
+2025-12-13 12:28:33,867 [INFO] 拉取结束：成功 31/31，空数据 0，失败 0，跳过 3146
+2025-12-13 12:28:53,092 [INFO] 已写入表 history_daily_kline，当前样本行数 1150276，空数据 0，失败 0，跳过 3146
+2025-12-13 12:38:32,909 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 12:38:32,969 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 12:38:32,969 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 12:38:33,614 [INFO] Baostock 会话已建立，后续任务将持续复用当前连接。
+2025-12-13 12:38:33,615 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 12:38:33,615 [INFO]  - BaostockSession
+2025-12-13 12:38:33,615 [INFO]  - BaostockDataFetcher
+2025-12-13 12:38:33,615 [INFO]  - AshareUniverseBuilder
+2025-12-13 12:38:33,616 [INFO]  - FundamentalDataManager
+2025-12-13 12:38:33,708 [INFO] 最近交易日：2025-12-12
+2025-12-13 12:38:35,943 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 12:38:43,025 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 12:38:46,039 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 12:38:46,795 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 12:38:47,349 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 12:38:48,578 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 12:38:48,579 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 12:38:49,715 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 12:38:52,423 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 12:38:53,726 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 12:38:55,372 [INFO] Baostock 并发已限制为单进程模式以降低封禁风险。
+2025-12-13 12:38:55,372 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 31 支股票）。
+2025-12-13 12:39:23,819 [INFO] 已完成 31/31 支股票的拉取，最近处理 sz.001400
+2025-12-13 12:39:23,819 [INFO] 拉取结束：成功 31/31，空数据 0，失败 0，跳过 3146
+2025-12-13 12:39:55,040 [INFO] 已写入表 history_daily_kline，当前样本行数 1150276，空数据 0，失败 0，跳过 3146
+2025-12-13 12:50:12,162 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 12:50:12,234 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 12:50:12,234 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 12:50:12,345 [INFO] Baostock 会话已建立，后续任务将持续复用当前连接。
+2025-12-13 12:50:12,345 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 12:50:12,346 [INFO]  - BaostockSession
+2025-12-13 12:50:12,346 [INFO]  - BaostockDataFetcher
+2025-12-13 12:50:12,346 [INFO]  - AshareUniverseBuilder
+2025-12-13 12:50:12,346 [INFO]  - FundamentalDataManager
+2025-12-13 12:50:12,433 [INFO] 最近交易日：2025-12-12
+2025-12-13 12:50:15,326 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 12:50:22,045 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 12:50:26,977 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 12:50:28,700 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 12:50:29,315 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 12:50:29,493 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 12:50:29,494 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 12:50:30,558 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 12:50:30,823 [INFO] 历史表 history_daily_kline 不存在或为空，执行冷启动：拉取最近 365 天日线。
+2025-12-13 12:50:31,108 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 12:50:31,112 [INFO] 本次历史日线拉取将使用 4 个并发子进程（候选 3177 支股票）。
+2025-12-13 12:50:48,867 [INFO] 已完成 100/3177 支股票的拉取，最近处理 sh.600108
+2025-12-13 12:51:04,674 [INFO] 已完成 200/3177 支股票的拉取，最近处理 sh.600266
+2025-12-13 12:51:18,064 [INFO] 已完成 300/3177 支股票的拉取，最近处理 sh.600395
+2025-12-13 12:51:32,429 [INFO] 已完成 400/3177 支股票的拉取，最近处理 sh.600545
+2025-12-13 12:51:47,000 [INFO] 已完成 500/3177 支股票的拉取，最近处理 sh.600665
+2025-12-13 12:52:03,455 [INFO] 已完成 600/3177 支股票的拉取，最近处理 sh.600775
+2025-12-13 12:52:21,515 [INFO] 已完成 700/3177 支股票的拉取，最近处理 sh.600905
+2025-12-13 12:52:41,637 [INFO] 已完成 800/3177 支股票的拉取，最近处理 sh.601126
+2025-12-13 12:53:03,295 [INFO] 已完成 900/3177 支股票的拉取，最近处理 sh.601688
+2025-12-13 12:53:23,470 [INFO] 已完成 1000/3177 支股票的拉取，最近处理 sh.603015
+2025-12-13 12:53:46,714 [INFO] 已完成 1100/3177 支股票的拉取，最近处理 sh.603139
+2025-12-13 12:54:08,642 [INFO] 已完成 1200/3177 支股票的拉取，最近处理 sh.603275
+2025-12-13 12:54:32,709 [INFO] 已完成 1300/3177 支股票的拉取，最近处理 sh.603418
+2025-12-13 12:54:57,498 [INFO] 已完成 1400/3177 支股票的拉取，最近处理 sh.603667
+2025-12-13 12:55:25,968 [INFO] 已完成 1500/3177 支股票的拉取，最近处理 sh.603859
+2025-12-13 12:55:53,798 [INFO] 已完成 1600/3177 支股票的拉取，最近处理 sh.605050
+2025-12-13 13:07:18,896 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 13:07:18,958 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 13:07:18,958 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 13:07:19,056 [INFO] Baostock 会话已建立，后续任务将持续复用当前连接。
+2025-12-13 13:07:19,056 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 13:07:19,056 [INFO]  - BaostockSession
+2025-12-13 13:07:19,056 [INFO]  - BaostockDataFetcher
+2025-12-13 13:07:19,056 [INFO]  - AshareUniverseBuilder
+2025-12-13 13:07:19,056 [INFO]  - FundamentalDataManager
+2025-12-13 13:07:19,606 [INFO] 最近交易日：2025-12-12
+2025-12-13 13:07:21,214 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 13:07:28,391 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 13:07:30,756 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 13:07:31,043 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 13:07:32,015 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 13:07:33,247 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 13:07:33,247 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 13:07:34,619 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 13:07:36,551 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 13:07:37,201 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 13:07:38,217 [INFO] Baostock 并发已限制为单进程模式以降低封禁风险。
+2025-12-13 13:07:38,218 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 1538 支股票）。
+2025-12-13 13:14:13,497 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=True
+2025-12-13 13:14:13,558 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-13 13:14:13,558 [INFO] Akshare 行为证据层已关闭，跳过相关初始化。
+2025-12-13 13:14:14,150 [INFO] Baostock 会话已建立，后续任务将持续复用当前连接。
+2025-12-13 13:14:14,150 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-13 13:14:14,150 [INFO]  - BaostockSession
+2025-12-13 13:14:14,150 [INFO]  - BaostockDataFetcher
+2025-12-13 13:14:14,150 [INFO]  - AshareUniverseBuilder
+2025-12-13 13:14:14,150 [INFO]  - FundamentalDataManager
+2025-12-13 13:14:16,929 [INFO] 最近交易日：2025-12-12
+2025-12-13 13:14:17,781 [INFO] 已保存 3177 只股票的列表至表 a_share_stock_list
+2025-12-13 13:14:19,281 [INFO] 已保存证券基本资料至表 a_share_stock_basic
+2025-12-13 13:14:21,160 [INFO] 已保存行业分类信息至表 a_share_stock_industry
+2025-12-13 13:14:21,628 [INFO] 已保存 hs300 成分股至表 index_hs300_members
+2025-12-13 13:14:21,889 [INFO] 已保存 zz500 成分股至表 index_zz500_members
+2025-12-13 13:14:22,068 [INFO] 已保存 sz50 成分股至表 index_sz50_members
+2025-12-13 13:14:22,068 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-13 13:14:23,160 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-13 13:14:24,968 [INFO] 历史表 history_daily_kline 已存在但未覆盖全部股票，继续补齐缺口。
+2025-12-13 13:14:25,234 [INFO] 开始导出 3177 只股票的最近 365 个交易日历史数据，窗口 [2024-06-17, 2025-12-12]
+2025-12-13 13:14:26,289 [INFO] Baostock 并发已限制为单进程模式以降低封禁风险。
+2025-12-13 13:14:26,290 [INFO] 本次历史日线拉取将使用 1 个并发子进程（候选 1519 支股票）。
+2025-12-13 13:15:29,420 [INFO] 已完成 100/1519 支股票的拉取，最近处理 sz.000301
