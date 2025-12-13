@@ -304,6 +304,10 @@ class AshareApp:
         else:
             self.logger.info("Akshare 行为证据层已关闭，跳过相关初始化。")
 
+        # 登录一次会话，后续流程保持复用，减少频繁连接开销
+        self.session.ensure_alive()
+        self.logger.info("Baostock 会话已建立，后续任务将持续复用当前连接。")
+
     def _save_sample(self, df: pd.DataFrame, table_name: str) -> str:
         self.db_writer.write_dataframe(df, table_name)
         return table_name
@@ -487,6 +491,14 @@ class AshareApp:
             self.logger.debug("%s后内存峰值约 %.2f MB", prefix, memory_mb)
         except Exception:
             return
+
+    def _cleanup_session(self) -> None:
+        """统一释放 Baostock 会话，避免遗留连接。"""
+
+        try:
+            self.session.logout()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Baostock 会话登出时发生异常：%s", exc)
 
     def _purge_old_history(self, table_name: str, reference_date: str) -> None:
         if self.history_retention_days <= 0:
@@ -1153,6 +1165,7 @@ class AshareApp:
             # 5) 提示历史日线路径
             self.logger.info("历史日线数据已保存至表：%s", history_table)
         finally:
+            self._cleanup_session()
             self.db_writer.dispose()
 
 if __name__ == "__main__":
