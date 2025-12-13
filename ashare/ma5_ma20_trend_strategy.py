@@ -292,6 +292,18 @@ class MA5MA20StrategyRunner:
         """生成 BUY/SELL/HOLD 信号，并给出 reason。"""
         p = self.params
 
+        def _prev_state(mask: pd.Series) -> pd.Series:
+            """分组取前一日布尔状态，兼容 pandas 新版的 fillna 行为。"""
+
+            return (
+                mask.groupby(df["code"])
+                .shift(1)
+                .astype("boolean")
+                .fillna(False)
+                .infer_objects(copy=False)
+                .astype(bool)
+            )
+
         # 1) 趋势过滤：多头排列 + 价格站上中长均线
         trend_ok = (
             (df["close"] > df["ma60"])
@@ -302,13 +314,7 @@ class MA5MA20StrategyRunner:
 
         # 2) MA5/MA20 金叉/死叉
         ma5_gt_ma20 = (df["ma5"] > df["ma20"]).astype(bool)
-        prev_ma5_gt_ma20 = (
-            ma5_gt_ma20.groupby(df["code"])
-            .shift(1)
-            .fillna(False)
-            .infer_objects(copy=False)
-            .astype(bool)
-        )
+        prev_ma5_gt_ma20 = _prev_state(ma5_gt_ma20)
         cross_up = ma5_gt_ma20 & (~prev_ma5_gt_ma20)
         cross_down = (~ma5_gt_ma20) & prev_ma5_gt_ma20
 
@@ -317,25 +323,13 @@ class MA5MA20StrategyRunner:
 
         # 4) MACD 过滤（DIF 上穿 DEA 或 HIST>0）
         macd_gt = (df["macd_dif"] > df["macd_dea"]).astype(bool)
-        prev_macd_gt = (
-            macd_gt.groupby(df["code"])
-            .shift(1)
-            .fillna(False)
-            .infer_objects(copy=False)
-            .astype(bool)
-        )
+        prev_macd_gt = _prev_state(macd_gt)
         macd_cross_up = macd_gt & (~prev_macd_gt)
         macd_ok = macd_cross_up | (df["macd_hist"] > 0)
 
         # 5) KDJ 低位金叉（可选增强：只作为 reason 标记）
         kdj_gt = (df["kdj_k"] > df["kdj_d"]).astype(bool)
-        prev_kdj_gt = (
-            kdj_gt.groupby(df["code"])
-            .shift(1)
-            .fillna(False)
-            .infer_objects(copy=False)
-            .astype(bool)
-        )
+        prev_kdj_gt = _prev_state(kdj_gt)
         kdj_cross_up = kdj_gt & (~prev_kdj_gt)
         kdj_low = df["kdj_k"] <= float(p.kdj_low_threshold)
         kdj_ok = kdj_cross_up & kdj_low
