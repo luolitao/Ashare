@@ -44,6 +44,11 @@ def _worker_fetch_kline(args: tuple[str, str, str, str, str, int]) -> tuple[str,
     if _worker_session is None or _worker_fetcher is None:
         raise RuntimeError("Baostock 会话未初始化。")
 
+    def _calc_backoff(attempt_index: int) -> float:
+        base = 1.0
+        max_backoff = 15.0
+        return min(max_backoff, base * (2 ** (attempt_index - 1)))
+
     for attempt in range(1, max_retries + 1):
         try:
             df = _worker_fetcher.get_kline(
@@ -57,7 +62,7 @@ def _worker_fetch_kline(args: tuple[str, str, str, str, str, int]) -> tuple[str,
         except Exception as exc:  # noqa: BLE001
             if attempt >= max_retries:
                 return "error", code, str(exc)
-            time.sleep(1)
+            time.sleep(_calc_backoff(attempt))
             try:
                 _worker_session.reconnect()
             except Exception:  # noqa: BLE001
@@ -91,24 +96,50 @@ class AshareApp:
         self.baostock_max_retries = self._read_int_from_env(
             "ASHARE_BAOSTOCK_MAX_RETRIES", baostock_cfg.get("max_retries", 2)
         )
-        self.worker_processes = self._read_int_from_env(
-            "ASHARE_BAOSTOCK_WORKERS", min(4, mp.cpu_count())
+        worker_default = baostock_cfg.get("worker_processes", min(4, mp.cpu_count()))
+        worker_min = baostock_cfg.get("min_worker_processes", 1)
+        worker_max = baostock_cfg.get("max_worker_processes", mp.cpu_count())
+        network_cap = baostock_cfg.get("network_worker_cap", worker_default)
+        self.worker_processes_default = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_WORKERS", worker_default
+        )
+        self.worker_processes_min = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_MIN_WORKERS", worker_min
+        )
+        self.worker_processes_max = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_MAX_WORKERS", worker_max
+        )
+        self.network_worker_cap = self._read_int_from_env(
+            "ASHARE_BAOSTOCK_NETWORK_WORKER_CAP", network_cap
         )
         self.progress_log_every = self._read_int_from_env(
-            "ASHARE_PROGRESS_LOG_EVERY", 100
+            "ASHARE_PROGRESS_LOG_EVERY", baostock_cfg.get("progress_log_every", 100)
         )
         self.resume_min_rows_per_code = self._read_int_from_env(
             "ASHARE_RESUME_MIN_ROWS_PER_CODE",
             baostock_cfg.get("resume_min_rows_per_code", 200),
         )
-        self.history_flush_batch = 5
-        self.write_chunksize = 500
+        self.history_flush_batch = self._read_int_from_env(
+            "ASHARE_HISTORY_FLUSH_BATCH", baostock_cfg.get("history_flush_batch", 5)
+        )
+        self.write_chunksize = self._read_int_from_env(
+            "ASHARE_HISTORY_WRITE_CHUNKSIZE",
+            baostock_cfg.get("history_write_chunksize", 500),
+        )
+        cleanup_mode_raw = os.getenv(
+            "ASHARE_HISTORY_CLEANUP_MODE", baostock_cfg.get("history_cleanup_mode", "window")
+        )
+        cleanup_mode = str(cleanup_mode_raw).strip().lower()
+        if cleanup_mode not in {"window", "skip"}:
+            cleanup_mode = "window"
+        self.history_cleanup_mode = cleanup_mode
+        self.history_retention_days = self._read_int_from_env(
+            "ASHARE_HISTORY_RETENTION_DAYS", baostock_cfg.get("history_retention_days", 0)
+        )
         if self.baostock_max_retries < 1:
             self.baostock_max_retries = 1
         if self.baostock_per_code_timeout <= 0:
             self.baostock_per_code_timeout = 30
-        if self.worker_processes < 1:
-            self.worker_processes = 1
         if self.progress_log_every < 1:
             self.progress_log_every = 100
 
@@ -235,6 +266,23 @@ class AshareApp:
 
         return default
 
+    def _choose_worker_processes(self, total_codes: int) -> int:
+        """根据配置、CPU 与任务规模动态确定子进程数量。"""
+
+        bounded_max = max(1, min(self.worker_processes_max, mp.cpu_count()))
+        bounded_min = max(1, min(self.worker_processes_min, bounded_max))
+        base_default = max(bounded_min, min(self.worker_processes_default, bounded_max))
+        network_cap = self.network_worker_cap
+        if network_cap <= 0:
+            network_cap = bounded_max
+        else:
+            network_cap = max(bounded_min, min(network_cap, bounded_max))
+
+        adaptive = min(base_default, network_cap, total_codes or 1)
+        if total_codes > 1000 and adaptive < bounded_max:
+            adaptive = min(bounded_max, adaptive + 1)
+        return max(bounded_min, adaptive)
+
     def _get_trading_days_between(
         self, start_day: dt.date, end_day: dt.date
     ) -> list[dt.date]:
@@ -331,7 +379,9 @@ class AshareApp:
                 max_date = max_date_raw.date().isoformat()
 
         if codes and min_date and max_date:
-            if not self._table_exists(table_name):
+            if self.history_cleanup_mode == "skip":
+                self.logger.info("清理模式为 skip，直接追加 %s 条记录。", len(combined))
+            elif not self._table_exists(table_name):
                 self.logger.info("表 %s 不存在，跳过旧数据删除。", table_name)
             else:
                 delete_stmt = (
@@ -361,6 +411,42 @@ class AshareApp:
             chunksize=self.write_chunksize,
             method="multi",
         )
+
+        self._log_memory_usage("历史批量写入")
+
+    def _log_memory_usage(self, prefix: str) -> None:
+        try:
+            import resource
+
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            memory_mb = usage.ru_maxrss / 1024
+            self.logger.debug("%s后内存峰值约 %.2f MB", prefix, memory_mb)
+        except Exception:
+            return
+
+    def _purge_old_history(self, table_name: str, reference_date: str) -> None:
+        if self.history_retention_days <= 0:
+            return
+        if not self._table_exists(table_name):
+            return
+
+        try:
+            end_day = dt.datetime.strptime(reference_date, "%Y-%m-%d").date()
+        except ValueError:
+            return
+
+        cutoff = (end_day - dt.timedelta(days=self.history_retention_days)).isoformat()
+        purge_stmt = text(
+            "DELETE FROM `{table}` WHERE `date` < :cutoff".format(table=table_name)
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                conn.execute(purge_stmt, {"cutoff": cutoff})
+            self.logger.info(
+                "已按照保留窗口 %s 天清理 %s 之前的历史日线。", self.history_retention_days, cutoff
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("历史保留窗口清理失败：%s", exc)
 
     def _write_failed_codes(self, failed_codes: list[str]) -> None:
         if not failed_codes:
@@ -400,13 +486,20 @@ class AshareApp:
             return success_count, empty_codes, failed_codes, skipped
 
         ctx = mp.get_context("spawn")
+        worker_processes = self._choose_worker_processes(len(codes_to_fetch))
         worker_args = [
             (code, start_day, end_date, "d", adjustflag, self.baostock_max_retries)
             for code in codes_to_fetch
         ]
 
+        self.logger.info(
+            "本次历史日线拉取将使用 %s 个并发子进程（候选 %s 支股票）。",
+            worker_processes,
+            len(codes_to_fetch),
+        )
+
         with ctx.Pool(
-            processes=self.worker_processes,
+            processes=worker_processes,
             initializer=_init_kline_worker,
             maxtasksperchild=200,
         ) as pool:
@@ -456,6 +549,8 @@ class AshareApp:
             self.logger.debug("完全未返回数据的股票：%s", ", ".join(sorted(empty_codes)))
         if failed_codes:
             self.logger.debug("请求失败的股票：%s", ", ".join(sorted(failed_codes)))
+
+        self._purge_old_history(base_table, end_date)
 
         return success_count, empty_codes, failed_codes, skipped
 
