@@ -1,3 +1,4 @@
+
 app:
   # 输出目录（AshareApp.output_dir）
   output_dir: output
@@ -80,4 +81,24 @@ akshare:
     period: ""
     detail_enabled: true
     detail_top_n: 100
+
+# MA5-MA20 顺势趋势波段系统
+# - enabled: true  时会在 start.py 数据采集后自动运行，并写入两张策略表：
+#   1) strategy_ma5_ma20_signals（信号快照）
+#   2) strategy_ma5_ma20_candidates（BUY 候选清单）
+strategy_ma5_ma20_trend:
+  enabled: true
+  # 选股池来源：top_liquidity（推荐，低频）/ universe / all
+  universe_source: top_liquidity
+  # 与 app.history_days 对齐（默认 365）
+  lookback_days: 365
+
+  volume_ratio_threshold: 1.5
+  volume_ma_window: 5
+
+  pullback_band: 0.01
+  kdj_low_threshold: 30
+
+  signals_table: strategy_ma5_ma20_signals
+  candidates_table: strategy_ma5_ma20_candidates
 
