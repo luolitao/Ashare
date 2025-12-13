@@ -110,10 +110,10 @@ class BaostockSession:
 
         try:
             bs.logout()
-        except Exception:
-            # 退出阶段网络抖动/服务端无响应时，避免抛异常导致 socket 未关闭警告
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("登出失败：%s", exc)
         finally:
+            # 无论登出是否成功，都要清理状态，避免遗留连接或阻塞退出
             self.logged_in = False
             self._last_alive_ts = 0.0
 
@@ -121,8 +121,7 @@ class BaostockSession:
         """确保会话可用，必要时重新登录或主动探测。
 
         - `force_refresh` 为 ``True`` 时直接重新登录；
-        - `force_check` 为 ``True`` 时跳过探测节流，立即执行一次有效性检查，
-          但不会主动登出再登录，避免频繁重置会话。
+        - `force_check` 为 ``True`` 时跳过探测节流，立即执行一次有效性检查。
         """
 
         if force_refresh:
@@ -141,8 +140,8 @@ class BaostockSession:
 
         try:
             self._probe_alive()
-        except Exception:
-            self.logger.warning("会话验证失败，尝试重连。")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("会话检查失败: %s", exc)
             self.reconnect()
         else:
             self._last_alive_ts = time.time()
