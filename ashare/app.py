@@ -97,7 +97,7 @@ class AshareApp:
         self.baostock_max_retries = self._read_int_from_env(
             "ASHARE_BAOSTOCK_MAX_RETRIES", baostock_cfg.get("max_retries", 2)
         )
-        worker_default = baostock_cfg.get("worker_processes", min(4, mp.cpu_count()))
+        worker_default = baostock_cfg.get("worker_processes", 1)
         worker_min = baostock_cfg.get("min_worker_processes", 1)
         worker_max = baostock_cfg.get("max_worker_processes", mp.cpu_count())
         network_cap = baostock_cfg.get("network_worker_cap", worker_default)
@@ -280,8 +280,9 @@ class AshareApp:
             network_cap = max(bounded_min, min(network_cap, bounded_max))
 
         adaptive = min(base_default, network_cap, total_codes or 1)
-        if total_codes > 1000 and adaptive < bounded_max:
-            adaptive = min(bounded_max, adaptive + 1)
+        if total_codes > 1000 and adaptive < min(network_cap, bounded_max):
+            adaptive = min(network_cap, bounded_max, adaptive + 1)
+
         return max(bounded_min, adaptive)
 
     def _get_trading_days_between(
