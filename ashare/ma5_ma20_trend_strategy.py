@@ -142,12 +142,6 @@ class MA5MA20StrategyRunner:
         self.db_writer = MySQLWriter(DatabaseConfig.from_env())
         self.indicator_window = self._resolve_indicator_window()
 
-        self.logger.info(
-            "MA5-MA20 策略：基础表窗口 lookback_days=%s，指标计算窗口对齐 lookback_days=%s",
-            self.params.lookback_days,
-            self.indicator_window,
-        )
-
     def _resolve_indicator_window(self) -> int:
         try:
             lookback = int(self.params.lookback_days)
@@ -580,6 +574,12 @@ class MA5MA20StrategyRunner:
         if not self.params.enabled:
             self.logger.info("strategy_ma5_ma20_trend.enabled=false，已跳过 MA5-MA20 策略运行。")
             return
+
+        self.logger.debug(
+            "MA5-MA20 参数：lookback_days=%s indicator_window=%s",
+            self.params.lookback_days,
+            self.indicator_window,
+        )
 
         daily_tbl = self._daily_table_name()
         latest_date = self._get_latest_trade_date()
