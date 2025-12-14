@@ -1110,3 +1110,30 @@
 2025-12-14 11:32:12,504 [INFO] 表 a_share_gdhs_detail 已写入 8891 行。
 2025-12-14 11:32:12,515 [INFO] 历史日线数据已保存至表：history_recent_365_days
 2025-12-14 11:32:32,110 [INFO] strategy_ma5_ma20_trend.enabled=false，已跳过 MA5-MA20 策略运行。
+2025-12-14 12:02:06,177 [INFO] 参数配置：history_days=365, top_liquidity_count=100, min_listing_days=60, fetch_daily_kline=False
+2025-12-14 12:02:06,234 [INFO] 代理配置: HTTP=http://127.0.0.1:7890, HTTPS=http://127.0.0.1:7890
+2025-12-14 12:02:06,235 [INFO] 已关闭所有 Baostock 拉取开关，本次将以数据库为准执行离线模式。
+2025-12-14 12:02:06,235 [INFO] 已发现 4 个项目组件，前 10 个预览：
+2025-12-14 12:02:06,235 [INFO]  - BaostockSession
+2025-12-14 12:02:06,235 [INFO]  - BaostockDataFetcher
+2025-12-14 12:02:06,235 [INFO]  - AshareUniverseBuilder
+2025-12-14 12:02:06,235 [INFO]  - FundamentalDataManager
+2025-12-14 12:02:07,248 [INFO] 最近交易日：2025-12-12
+2025-12-14 12:02:07,558 [INFO] 基础面刷新开关已关闭，本次仅使用数据库中已有的财务表构建宽表。
+2025-12-14 12:02:08,662 [INFO] 已生成宽表 fundamentals_latest_wide，共 800 行。
+2025-12-14 12:02:11,149 [INFO] 日线K线拉取开关已关闭：跳过 Baostock 拉取，仅从表 history_daily_kline 切片读取最近 365 个交易日数据。
+2025-12-14 12:02:11,171 [INFO] 已创建视图 history_recent_365_days，按 2025-12-12 截止选取最近 365 个交易日的日线窗口。
+2025-12-14 12:03:34,938 [INFO] ROE 为正 过滤：3043 -> 592
+2025-12-14 12:03:34,940 [INFO] 资产负债率 < 75% 过滤：592 -> 592
+2025-12-14 12:03:34,942 [INFO] 经营现金流为正（按 CFO 比率代理） 过滤：592 -> 491
+2025-12-14 12:03:34,943 [INFO] 净利润或 EPS 同比为正 过滤：491 -> 323
+2025-12-14 12:03:35,588 [INFO] 已生成候选池：表 a_share_universe
+2025-12-14 12:03:35,824 [INFO] 已将成交额排序结果写入表 a_share_top_liquidity，可用于筛选高流动性标的。
+2025-12-14 12:03:37,096 [INFO] 表 a_share_lhb_detail 已写入 77 行。
+2025-12-14 12:06:08,488 [WARNING] 两融明细 sse 获取失败（date=2025-12-11, try=1/6）: ('Connection broken: IncompleteRead(327059 bytes read, 502700 more expected)', IncompleteRead(327059 bytes read, 502700 more expected))
+2025-12-14 12:07:00,549 [INFO] 表 a_share_margin_detail 已写入 3986 行。
+2025-12-14 12:07:08,355 [INFO] 表 a_share_hsgt_hold_rank 已写入 2767 行。
+2025-12-14 12:07:20,578 [INFO] 表 a_share_gdhs 已写入 5445 行。
+2025-12-14 12:10:51,462 [INFO] 表 a_share_gdhs_detail 已写入 8891 行。
+2025-12-14 12:10:51,475 [INFO] 历史日线数据已保存至表：history_recent_365_days
+2025-12-14 12:10:51,923 [INFO] strategy_ma5_ma20_trend.enabled=false，已跳过 MA5-MA20 策略运行。

@@ -1420,7 +1420,7 @@ class AshareApp:
             self._sync_external_signals(latest_trade_day, top_liquidity)
 
             # 5) 提示历史日线路径
-            self.logger.info("历史日线数据已保存至表：%s", history_table)
+            self.logger.info("历史日线数据已保存至视图：%s", history_table)
         finally:
             self._cleanup_session()
             self.db_writer.dispose()
