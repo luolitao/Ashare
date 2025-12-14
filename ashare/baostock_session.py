@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
+import io
 import logging
 import os
 import socket
@@ -86,7 +88,11 @@ class BaostockSession:
 
         last_error_msg = ""
         for attempt in range(1, self.retry + 1):
-            result = bs.login()
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                result = bs.login()
+            out = buf.getvalue().strip()
+            if out:
+                self.logger.debug("baostock: %s", out)
             if result.error_code == "0":
                 self.logged_in = True
                 self._last_alive_ts = time.time()
@@ -109,7 +115,11 @@ class BaostockSession:
             return
 
         try:
-            bs.logout()
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                bs.logout()
+            out = buf.getvalue().strip()
+            if out:
+                self.logger.debug("baostock: %s", out)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("登出失败：%s", exc)
         finally:

@@ -1126,7 +1126,7 @@ class AshareApp:
             )
 
         recent_df["date"] = pd.to_datetime(recent_df["date"])
-        self.logger.info(
+        self.logger.debug(
             "已从表 %s 切片读取最近 %s 个交易日数据（start=%s, end<%s），不再创建 history_recent_%s_days 视图。",
             base_table,
             sanitized_days,
@@ -1175,7 +1175,7 @@ class AshareApp:
                 end_day=end_day,
                 view_name=view_name,
             )
-            self.logger.info(
+            self.logger.debug(
                 "近期自然日便捷视图已更新：%s（最近 %s 天）",
                 view,
                 view_days,
@@ -1588,12 +1588,12 @@ class AshareApp:
             self._sync_external_signals(latest_trade_day, top_liquidity)
 
             # 5) 提示历史日线路径
-            self.logger.info(
+            self.logger.debug(
                 "历史日线窗口数据来源：%s（切片最近 %s 个交易日）", history_table, self.history_days
             )
             recent_view = getattr(self, "_last_history_calendar_view", None)
             if recent_view:
-                self.logger.info(
+                self.logger.debug(
                     "近期自然日便捷视图已更新：%s（最近 %s 天）",
                     recent_view,
                     self.history_view_days,
