@@ -1112,6 +1112,7 @@ class AshareApp:
                 "history_view_days=%s，近期自然日视图未开启，跳过创建。",
                 view_days_raw,
             )
+            self._last_history_calendar_view = None
             return None
 
         view_name = f"history_recent_{view_days}_days"
@@ -1537,6 +1538,8 @@ class AshareApp:
 
             # 5) 提示历史日线路径
             self.logger.info("历史日线窗口数据来源：%s（最近 %s 个交易日）", history_table, self.history_days)
+            # recent_view 由 _refresh_history_calendar_view() 创建并缓存到实例属性
+            recent_view = getattr(self, "_last_history_calendar_view", None)
             if recent_view:
                 self.logger.info("近期自然日便捷视图已更新：%s（最近 %s 天）", recent_view, self.history_view_days)
         finally:
