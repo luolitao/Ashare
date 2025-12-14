@@ -1093,7 +1093,7 @@ class AshareApp:
         base_table: str,
         end_day: dt.date,
         slice_window_days: int | None = None,
-    ) -> None:
+    ) -> str | None:
         """按自然日刷新近期查询视图（用于手动 SQL 查询，不影响回测/指标计算口径）。
 
         - 使用 app.history_view_days 控制自然日窗口（例如 45）。
@@ -1108,19 +1108,29 @@ class AshareApp:
             view_days = 0
 
         if view_days <= 0:
-            return
+            self.logger.info(
+                "history_view_days=%s，近期自然日视图未开启，跳过创建。",
+                view_days_raw,
+            )
+            return None
 
         view_name = f"history_recent_{view_days}_days"
         if slice_window_days is not None and int(slice_window_days) == view_days:
             view_name = f"history_recent_calendar_{view_days}_days"
 
         try:
-            self._create_recent_history_calendar_view(
+            view = self._create_recent_history_calendar_view(
                 base_table,
                 view_days,
                 end_day=end_day,
                 view_name=view_name,
             )
+            self.logger.info(
+                "近期自然日便捷视图已更新：%s（最近 %s 天）",
+                view,
+                view_days,
+            )
+            return view
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
                 "创建近期自然日视图失败（base=%s, view=%s, end=%s, days=%s）: %s",
@@ -1130,6 +1140,7 @@ class AshareApp:
                 view_days,
                 exc,
             )
+            return None
 
     def _export_daily_history_incremental(
         self,
