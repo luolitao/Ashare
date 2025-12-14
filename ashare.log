@@ -1304,3 +1304,14 @@
 2025-12-14 18:45:45 [INFO] MA5-MA20 策略：日线表=history_daily_kline，选股池来源=top_liquidity，codes=100
 2025-12-14 18:45:46 [INFO] MA5-MA20 策略：读取日线 30000 行（100 只股票）。
 2025-12-14 18:45:47 [INFO] MA5-MA20 策略完成：2 BUY / 11 SELL / 87 HOLD（最新交易日：2025-12-12）
+2025-12-14 21:02:10 [INFO] MA5-MA20 策略：日线表=history_daily_kline，选股池来源=top_liquidity，codes=100
+2025-12-14 21:02:10 [INFO] MA5-MA20 策略：读取日线 30000 行（100 只股票）。
+2025-12-14 21:02:11 [INFO] MA5-MA20 策略完成：2 BUY / 11 SELL / 87 HOLD（最新交易日：2025-12-12）
+2025-12-14 21:19:21 [INFO] MA5-MA20 策略：日线表=history_daily_kline，选股池来源=top_liquidity，codes=100
+2025-12-14 21:19:21 [INFO] MA5-MA20 策略：读取日线 30000 行（100 只股票）。
+2025-12-14 21:19:22 [INFO] signals_write_scope=window：已覆盖写入 2024-09-18~2025-12-12（100 codes）。
+2025-12-14 21:19:37 [INFO] MA5-MA20 策略完成：2 BUY / 11 SELL / 87 HOLD（最新交易日：2025-12-12）
+2025-12-14 22:09:49 [INFO] MA5-MA20 策略：日线表=history_daily_kline，选股池来源=top_liquidity，codes=100
+2025-12-14 22:09:50 [INFO] MA5-MA20 策略：读取日线 30000 行（100 只股票）。
+2025-12-14 22:09:51 [INFO] signals_write_scope=window：已覆盖写入 2024-09-18~2025-12-12（100 codes）。
+2025-12-14 22:10:00 [INFO] MA5-MA20 策略完成：2 BUY / 11 SELL / 87 HOLD（最新交易日：2025-12-12）

@@ -9,8 +9,8 @@
   - strategy_ma5_ma20_signals：
       - signals_write_scope=latest：仅写入最新交易日（默认）
       - signals_write_scope=window：写入本次计算窗口内的全部交易日（用于回填历史/回测）
-  - 默认通过 VIEW 筛选最新交易日 BUY 候选
-    （v_strategy_ma5_ma20_candidates_latest，如需物理表可关闭 candidates_as_view）
+  - 默认通过 VIEW 列出全部 BUY 信号（历史）
+    （v_strategy_ma5_ma20_candidates；如需物理表可关闭 candidates_as_view）
 
 说明：
   - 本实现先做“日线低频版本”作为选股/清单层。
@@ -64,7 +64,7 @@ class MA5MA20Params:
 
     # 可选：用视图替代 candidates 表（更简洁；候选清单实时从 signals 最新日筛选）
     candidates_as_view: bool = True
-    candidates_view: str = "v_strategy_ma5_ma20_candidates_latest"
+    candidates_view: str = "v_strategy_ma5_ma20_candidates"
 
     # signals 写入范围：
     # - latest：仅写入最新交易日（默认，低开销）
@@ -490,9 +490,10 @@ class MA5MA20StrategyRunner:
             conn.execute(create_stmt)
 
     def _ensure_candidates_view(self, view_name: str) -> None:
-        """创建/更新 candidates 视图：从 signals 最新交易日筛选 BUY。
+        """创建/更新 candidates 视图：从 signals 列出全部历史 BUY 信号。
 
-        若 signals 行数未来显著增长，可在 signals 上为 (`date`,`signal`) 建索引。
+        若你只想看“最新交易日”的 BUY，请在查询时自行加：
+        WHERE `date` = (SELECT MAX(`date`) FROM signals_table)
         """
         base = self.params.signals_table
         create_stmt = text(
@@ -504,8 +505,6 @@ class MA5MA20StrategyRunner:
               `vol_ratio`,`macd_hist`,`kdj_k`,`kdj_d`,`atr14`,`stop_ref`,
               `reason`
             FROM `{base}`
-            WHERE `date` = (SELECT MAX(`date`) FROM `{base}`)
-              AND `signal` = 'BUY'
             """
         )
         with self.db_writer.engine.begin() as conn:
