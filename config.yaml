@@ -11,7 +11,7 @@ app:
   # 是否导出股票元数据（股票列表/证券基本资料/行业分类/指数成分股）
   # true：会调用 Baostock 元数据接口更新 a_share_stock_list/a_share_stock_basic/a_share_stock_industry/index_*_members
   # false：不请求 Baostock 元数据接口，只从数据库读取（要求相关表已存在，或至少存在 history_daily_kline 用于兜底）
-  fetch_stock_meta: true
+  fetch_stock_meta: false
 
   # 最近 N 个交易日窗口
   history_days: 365
