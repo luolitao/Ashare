@@ -124,3 +124,25 @@ strategy_ma5_ma20_trend:
   # signals 写入范围：latest=仅最新交易日（默认），window=回填本次计算窗口内全部交易日
   signals_write_scope: window
 
+# 开盘监测：检查“前一交易日收盘 BUY 信号”是否可在今日开盘执行
+open_monitor:
+  enabled: true
+  # signals_table 默认沿用 strategy_ma5_ma20_trend.signals_table，可显式覆盖
+  # signals_table: strategy_ma5_ma20_signals
+  output_table: strategy_ma5_ma20_open_monitor
+
+  # 行情来源：auto（优先 AkShare，失败回退 Eastmoney）/ akshare / eastmoney
+  quote_source: auto
+
+  # 过滤阈值（按你的风格可自行调小/调大）
+  max_gap_up_pct: 0.05        # 今开高开超过 5%：不追
+  max_gap_down_pct: -0.03     # 今开低开超过 -3%：不接
+  min_open_vs_ma20_pct: 0.0   # 今开必须站上 MA20（0.0=不允许跌破）
+  limit_up_trigger_pct: 9.7   # 涨幅接近/达到涨停：跳过
+
+  # 输出
+  write_to_db: true
+  export_csv: true
+  export_top_n: 100
+  output_subdir: open_monitor
+
