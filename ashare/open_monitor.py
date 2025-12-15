@@ -351,6 +351,76 @@ class MA5MA20OpenMonitorRunner:
             self.logger.debug("检查索引 %s.%s 是否存在失败：%s", table, index, exc)
             return False
 
+    def _ensure_varchar_column(self, table: str, column: str, length: int) -> None:
+        if not self._column_exists(table, column):
+            return
+
+        try:
+            stmt = text(
+                """
+                SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, COLUMN_TYPE
+                FROM information_schema.columns
+                WHERE table_schema = :schema AND table_name = :table AND column_name = :column
+                """
+            )
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={
+                        "schema": self.db_writer.config.db_name,
+                        "table": table,
+                        "column": column,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("读取列 %s.%s 元数据失败：%s", table, column, exc)
+            return
+
+        if df.empty:
+            return
+
+        row = df.iloc[0]
+        data_type = str(row.get("DATA_TYPE") or "").lower()
+        char_len = row.get("CHARACTER_MAXIMUM_LENGTH")
+        column_type = str(row.get("COLUMN_TYPE") or "").lower()
+
+        is_text_like = "text" in data_type or "blob" in data_type or "blob" in column_type
+        current_len = int(char_len or 0)
+        target_len = max(length, current_len)
+
+        if not is_text_like and current_len >= length:
+            return
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` VARCHAR({target_len})"
+                    )
+                )
+            self.logger.info(
+                "表 %s.%s 列已调整为 VARCHAR(%s) 以支持索引。",
+                table,
+                column,
+                target_len,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "调整列 %s.%s 类型为 VARCHAR 失败：%s", table, column, exc
+            )
+
+    def _ensure_indexable_columns(self, table: str) -> None:
+        dedupe_columns = {
+            "monitor_date": 32,
+            "date": 32,
+            "code": 32,
+            "snapshot_hash": 64,
+        }
+
+        for column, length in dedupe_columns.items():
+            self._ensure_varchar_column(table, column, length)
+
     def _ensure_snapshot_schema(self, table: str) -> None:
         if not table or not self._table_exists(table):
             return
@@ -366,6 +436,8 @@ class MA5MA20OpenMonitorRunner:
                 self.logger.info("表 %s 已新增 snapshot_hash 列用于去重。", table)
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("为表 %s 添加 snapshot_hash 列失败：%s", table, exc)
+
+        self._ensure_indexable_columns(table)
 
         index_name = "ux_open_monitor_dedupe"
         if not self._index_exists(table, index_name):
