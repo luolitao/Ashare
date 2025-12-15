@@ -131,8 +131,15 @@ open_monitor:
   # signals_table: strategy_ma5_ma20_signals
   output_table: strategy_ma5_ma20_open_monitor
 
-  # 行情来源：auto（优先 AkShare，失败回退 Eastmoney）/ akshare / eastmoney
-  quote_source: auto
+  # 回看近 N 个交易日的 BUY 信号作为候选
+  signal_lookback_days: 3
+
+  # 行情来源：akshare / eastmoney（路线A：建议固定 eastmoney，避免 AkShare/代理导致噪音）
+  quote_source: eastmoney
+
+  # 候选有效期（按 reason 区分）：默认金叉 3 天、回踩 5 天
+  cross_valid_days: 3
+  pullback_valid_days: 5
 
   # 过滤阈值（按你的风格可自行调小/调大）
   max_gap_up_pct: 0.05        # 今开高开超过 5%：不追
@@ -143,6 +150,10 @@ open_monitor:
 
   # 追高过滤：入场价相对 MA5 乖离过大（例如 0.08=超过 MA5 8% 就不追）
   max_entry_vs_ma5_pct: 0.08
+
+  # 过期判定：信号后过快拉升（相对 ATR 或涨幅），默认 1.2*ATR 或 7% 以上视为过期
+  expire_atr_mult: 1.2
+  expire_pct_threshold: 0.07
 
   # 风控：开盘以“实际入场价”为基准计算止损（stop_ref=entry-stop_atr_mult*ATR）
   stop_atr_mult: 2.0

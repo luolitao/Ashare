@@ -99,8 +99,15 @@ class OpenMonitorParams:
     # 输出表：开盘检查结果
     output_table: str = "strategy_ma5_ma20_open_monitor"
 
+    # 回看近 N 个交易日的 BUY 信号
+    signal_lookback_days: int = 3
+
     # 行情来源：eastmoney / akshare（兼容：auto 将按 eastmoney 处理）
     quote_source: str = "eastmoney"
+
+    # 候选有效期：回踩形态默认更长
+    cross_valid_days: int = 3
+    pullback_valid_days: int = 5
 
     # 核心过滤规则
     max_gap_up_pct: float = 0.05       # 今开相对昨收涨幅 > 5% → skip
@@ -111,6 +118,10 @@ class OpenMonitorParams:
 
     # 追高过滤：入场价相对 MA5 乖离过大
     max_entry_vs_ma5_pct: float = 0.08  # 入场价 > MA5*(1+8%) → skip
+
+    # 过期判定：信号后快速拉升
+    expire_atr_mult: float = 1.2
+    expire_pct_threshold: float = 0.07
 
     # 风控：开盘入场价为基准的 ATR 止损
     stop_atr_mult: float = 2.0         # stop_ref = entry - stop_atr_mult*ATR
@@ -158,12 +169,18 @@ class OpenMonitorParams:
                 return default
 
         quote_source = str(sec.get("quote_source", cls.quote_source)).strip().lower() or "auto"
+        # 路线A：auto 也按 eastmoney 处理，避免误以为会优先 AkShare
+        if quote_source == "auto":
+            quote_source = "eastmoney"
 
         return cls(
             enabled=_get_bool("enabled", cls.enabled),
             signals_table=str(sec.get("signals_table", default_signals)).strip() or default_signals,
             output_table=str(sec.get("output_table", cls.output_table)).strip() or cls.output_table,
+            signal_lookback_days=_get_int("signal_lookback_days", cls.signal_lookback_days),
             quote_source=quote_source,
+            cross_valid_days=_get_int("cross_valid_days", cls.cross_valid_days),
+            pullback_valid_days=_get_int("pullback_valid_days", cls.pullback_valid_days),
             max_gap_up_pct=_get_float("max_gap_up_pct", cls.max_gap_up_pct),
             max_gap_up_atr_mult=_get_float("max_gap_up_atr_mult", cls.max_gap_up_atr_mult),
             max_gap_down_pct=_get_float("max_gap_down_pct", cls.max_gap_down_pct),
@@ -171,6 +188,8 @@ class OpenMonitorParams:
             limit_up_trigger_pct=_get_float("limit_up_trigger_pct", cls.limit_up_trigger_pct),
 
             max_entry_vs_ma5_pct=_get_float("max_entry_vs_ma5_pct", cls.max_entry_vs_ma5_pct),
+            expire_atr_mult=_get_float("expire_atr_mult", cls.expire_atr_mult),
+            expire_pct_threshold=_get_float("expire_pct_threshold", cls.expire_pct_threshold),
             stop_atr_mult=_get_float("stop_atr_mult", cls.stop_atr_mult),
             signal_day_limit_up_pct=_get_float("signal_day_limit_up_pct", cls.signal_day_limit_up_pct),
 
@@ -188,6 +207,16 @@ class MA5MA20OpenMonitorRunner:
         self.logger = setup_logger()
         self.params = OpenMonitorParams.from_config()
         self.db_writer = MySQLWriter(DatabaseConfig.from_env())
+        self.volume_ratio_threshold = self._resolve_volume_ratio_threshold()
+
+    def _resolve_volume_ratio_threshold(self) -> float:
+        strat = get_section("strategy_ma5_ma20_trend") or {}
+        if isinstance(strat, dict):
+            raw = strat.get("volume_ratio_threshold")
+            parsed = _to_float(raw)
+            if parsed is not None and parsed > 0:
+                return float(parsed)
+        return 1.5
 
     # -------------------------
     # DB helpers
@@ -258,63 +287,188 @@ class MA5MA20OpenMonitorRunner:
 
         return out
 
-    def _load_latest_buy_signals(self) -> Tuple[str | None, pd.DataFrame]:
+    def _is_trading_day(self, date_str: str, latest_trade_date: str | None = None) -> bool:
+        """粗略判断是否为交易日（优先用日线表，其次用工作日）。"""
+
+        try:
+            d = dt.datetime.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+        except Exception:  # noqa: BLE001
+            return False
+
+        if d.weekday() >= 5:
+            return False
+
+        # 盘中/当日：日线表大概率还没落库，直接按工作日视为交易日（节假日误跑属低频场景）
+        if latest_trade_date and str(date_str)[:10] > str(latest_trade_date)[:10]:
+            return True
+
+        daily = self._daily_table()
+        if not self._table_exists(daily):
+            return True
+
+        stmt = text(f"SELECT 1 FROM `{daily}` WHERE `date` = :d LIMIT 1")
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": str(d)})
+            return not df.empty
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _load_trade_age_map(
+        self, latest_trade_date: str, min_date: str, monitor_date: str | None
+    ) -> Dict[str, int]:
+        """返回 {date_str: trading_day_age}，0 表示监控基准日。"""
+
+        base_date = latest_trade_date
+        monitor_str = str(monitor_date or "").strip()
+        if monitor_str and monitor_str > latest_trade_date and self._is_trading_day(monitor_str, latest_trade_date):
+            base_date = monitor_str
+
+        daily = self._daily_table()
+        if not self._table_exists(daily):
+            # 兜底：没有日线表时，只能用 monitor_str 作为 age=0 的基准
+            return {monitor_str: 0} if monitor_str else {}
+
+        stmt = text(
+            f"""
+            SELECT DISTINCT CAST(`date` AS CHAR) AS d
+            FROM `{daily}`
+            WHERE `date` <= :base_date AND `date` >= :min_date
+            ORDER BY `date` DESC
+            """
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"base_date": base_date, "min_date": min_date})
+        except Exception:
+            df = None
+
+        dates = df["d"].dropna().astype(str).str[:10].tolist() if df is not None else []
+        # 只在“确认为交易日/工作日盘中”时插入，避免周末误跑把周末插进去
+        if (
+            monitor_str
+            and monitor_str not in dates
+            and monitor_str > latest_trade_date
+            and self._is_trading_day(monitor_str, latest_trade_date)
+        ):
+            dates.insert(0, monitor_str)
+
+        if not dates:
+            return {}
+
+        return {d: i for i, d in enumerate(dates)}
+
+    def _load_recent_buy_signals(self) -> Tuple[str | None, List[str], pd.DataFrame]:
         table = self.params.signals_table
-        with self.db_writer.engine.begin() as conn:
-            try:
+        monitor_date = dt.date.today().isoformat()
+        lookback = max(int(self.params.signal_lookback_days or 0), 1)
+
+        try:
+            with self.db_writer.engine.begin() as conn:
                 max_df = pd.read_sql_query(
                     text(f"SELECT MAX(`date`) AS max_date FROM `{table}`"),
                     conn,
                 )
-            except Exception as exc:  # noqa: BLE001
-                self.logger.error("读取 signals_table=%s 失败：%s", table, exc)
-                return None, pd.DataFrame()
-
-        if max_df.empty:
-            return None, pd.DataFrame()
-
-        max_date = max_df.iloc[0].get("max_date")
-        if pd.isna(max_date) or not str(max_date).strip():
-            return None, pd.DataFrame()
-
-        signal_date = str(max_date)[:10]
-        self.logger.info("最新信号交易日：%s（来源表=%s）", signal_date, table)
-
-        with self.db_writer.engine.begin() as conn:
-            try:
-                df = pd.read_sql_query(
+                dates_df = pd.read_sql_query(
                     text(
                         f"""
-                        SELECT
-                          `date`,`code`,`close`,
-                          `ma5`,`ma20`,`ma60`,`ma250`,
-                          `vol_ratio`,`macd_hist`,`kdj_k`,`kdj_d`,`atr14`,`stop_ref`,
-                          `signal`,`reason`
+                        SELECT DISTINCT `date`
                         FROM `{table}`
-                        WHERE `date` = :d AND `signal` = 'BUY'
+                        WHERE `signal` = 'BUY'
+                        ORDER BY `date` DESC
+                        LIMIT :n
                         """
                     ),
                     conn,
-                    params={"d": signal_date},
+                    params={"n": lookback},
                 )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("读取 signals_table=%s 失败：%s", table, exc)
+            return None, [], pd.DataFrame()
+
+        if max_df.empty:
+            return None, [], pd.DataFrame()
+
+        max_date = max_df.iloc[0].get("max_date")
+        if pd.isna(max_date) or not str(max_date).strip():
+            return None, [], pd.DataFrame()
+
+        latest_trade_date = str(max_date)[:10]
+        if dates_df.empty:
+            self.logger.info("%s 没有任何 BUY 信号，跳过开盘监测。", latest_trade_date)
+            return latest_trade_date, [], pd.DataFrame()
+
+        signal_dates = [str(v)[:10] for v in dates_df["date"].tolist() if str(v).strip()]
+        self.logger.info(
+            "回看最近 %s 个交易日（最新=%s）BUY 信号：%s", lookback, latest_trade_date, signal_dates
+        )
+
+        stmt = text(
+            f"""
+            SELECT
+              `date`,`code`,`close`,
+              `ma5`,`ma20`,`ma60`,`ma250`,
+              `vol_ratio`,`macd_hist`,`kdj_k`,`kdj_d`,`atr14`,`stop_ref`,
+              `signal`,`reason`
+            FROM `{table}`
+            WHERE `date` IN :dates AND `signal` = 'BUY'
+            """
+        ).bindparams(bindparam("dates", expanding=True))
+
+        with self.db_writer.engine.begin() as conn:
+            try:
+                df = pd.read_sql_query(stmt, conn, params={"dates": signal_dates})
             except Exception as exc:  # noqa: BLE001
                 self.logger.error("读取 %s BUY 信号失败：%s", table, exc)
-                return signal_date, pd.DataFrame()
+                return latest_trade_date, signal_dates, pd.DataFrame()
 
         if df.empty:
-            self.logger.info("%s 没有任何 BUY 信号，跳过开盘监测。", signal_date)
-            return signal_date, df
+            self.logger.info("%s 内无 BUY 信号，跳过开盘监测。", signal_dates)
+            return latest_trade_date, signal_dates, df
 
         df["code"] = df["code"].astype(str)
+        df["date_str"] = df["date"].astype(str).str[:10]
+        min_date = df["date_str"].min()
+        trade_age_map = self._load_trade_age_map(latest_trade_date, str(min_date), monitor_date)
+        df["signal_age"] = df["date_str"].map(trade_age_map)
 
-        # 额外补充：信号日涨幅（用于识别“信号日接近涨停”的追高风险）
         try:
-            codes = df["code"].dropna().astype(str).unique().tolist()
-            pct_map = self._load_signal_day_pct_change(signal_date, codes)
-            df["_signal_day_pct_change"] = df["code"].map(pct_map)
+            for d in signal_dates:
+                codes = df.loc[df["date_str"] == d, "code"].dropna().unique().tolist()
+                pct_map = self._load_signal_day_pct_change(d, codes)
+                mask = df["date_str"] == d
+                df.loc[mask, "_signal_day_pct_change"] = df.loc[mask, "code"].map(pct_map)
         except Exception:
             df["_signal_day_pct_change"] = None
-        return signal_date, df
+        return latest_trade_date, signal_dates, df
+
+    def _load_latest_snapshots(self, latest_trade_date: str, codes: List[str]) -> pd.DataFrame:
+        if not latest_trade_date or not codes:
+            return pd.DataFrame()
+
+        table = self.params.signals_table
+        stmt = text(
+            f"""
+            SELECT
+              `date`,`code`,`close`,`ma5`,`ma20`,`ma60`,`ma250`,
+              `vol_ratio`,`macd_hist`,`atr14`,`stop_ref`
+            FROM `{table}`
+            WHERE `date` = :d AND `code` IN :codes
+            """
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": latest_trade_date, "codes": codes})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取最新指标失败，将跳过最新快照：%s", exc)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df["code"] = df["code"].astype(str)
+        return df
 
     # -------------------------
     # Quote fetch
@@ -479,7 +633,18 @@ class MA5MA20OpenMonitorRunner:
     # -------------------------
     # Evaluate
     # -------------------------
-    def _evaluate(self, signals: pd.DataFrame, quotes: pd.DataFrame, signal_date: str) -> pd.DataFrame:
+    def _is_pullback_signal(self, signal_reason: str) -> bool:
+        reason_text = str(signal_reason or "")
+        lower = reason_text.lower()
+        return ("回踩" in reason_text) and (("ma20" in lower) or ("ma 20" in lower))
+
+    def _evaluate(
+        self,
+        signals: pd.DataFrame,
+        quotes: pd.DataFrame,
+        latest_snapshots: pd.DataFrame,
+        latest_trade_date: str,
+    ) -> pd.DataFrame:
         if signals.empty:
             return pd.DataFrame()
 
@@ -487,31 +652,56 @@ class MA5MA20OpenMonitorRunner:
         if q.empty:
             out = signals.copy()
             out["monitor_date"] = dt.date.today().isoformat()
-            out["signal_date"] = signal_date
             out["open"] = None
             out["latest"] = None
             out["pct_change"] = None
             out["gap_pct"] = None
             out["action"] = "UNKNOWN"
             out["action_reason"] = "行情数据不可用"
+            out["candidate_status"] = "UNKNOWN"
+            out["status_reason"] = "行情数据不可用"
             out["checked_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             return out
 
         q["code"] = q["code"].astype(str)
         merged = signals.merge(q, on="code", how="left", suffixes=("", "_q"))
 
-        merged["close"] = merged.get("close").apply(_to_float)
-        merged["prev_close"] = merged.get("prev_close").apply(_to_float)
-        merged["ma5"] = merged.get("ma5").apply(_to_float)
-        merged["ma20"] = merged.get("ma20").apply(_to_float)
-        merged["open"] = merged.get("open").apply(_to_float)
-        merged["latest"] = merged.get("latest").apply(_to_float)
-        merged["pct_change"] = merged.get("pct_change").apply(_to_float)
-        merged["atr14"] = merged.get("atr14").apply(_to_float)
-        merged["_signal_day_pct_change"] = merged.get("_signal_day_pct_change").apply(_to_float)
+        if not latest_snapshots.empty:
+            snap = latest_snapshots.copy()
+            rename_map = {c: f"latest_{c}" for c in snap.columns if c not in {"code"}}
+            snap = snap.rename(columns=rename_map)
+            merged = merged.merge(snap, on="code", how="left")
+
+        float_cols = [
+            "close",
+            "prev_close",
+            "ma5",
+            "ma20",
+            "ma60",
+            "ma250",
+            "vol_ratio",
+            "macd_hist",
+            "atr14",
+            "stop_ref",
+            "open",
+            "latest",
+            "pct_change",
+            "_signal_day_pct_change",
+            "latest_close",
+            "latest_ma5",
+            "latest_ma20",
+            "latest_ma60",
+            "latest_ma250",
+            "latest_vol_ratio",
+            "latest_macd_hist",
+            "latest_atr14",
+            "latest_stop_ref",
+        ]
+        for col in float_cols:
+            if col in merged.columns:
+                merged[col] = merged.get(col).apply(_to_float)
 
         def _calc_gap(row: pd.Series) -> float | None:
-            # gap 用“可入场价（今开优先，否则用最新价）”相对“昨收(行情接口优先) / 策略收盘(兜底)”
             ref_close = row.get("prev_close")
             if ref_close is None:
                 ref_close = row.get("close")
@@ -523,7 +713,6 @@ class MA5MA20OpenMonitorRunner:
             if ref_close is None or px is None:
                 return None
             if ref_close <= 0 or px <= 0:
-                # 开盘前/集合竞价阶段，部分接口会返回 0；当作“无今开”
                 return None
             return (px - ref_close) / ref_close
 
@@ -539,9 +728,27 @@ class MA5MA20OpenMonitorRunner:
         stop_atr_mult = self.params.stop_atr_mult
         signal_day_limit_up = self.params.signal_day_limit_up_pct
 
+        expire_atr_mult = self.params.expire_atr_mult
+        expire_pct_threshold = self.params.expire_pct_threshold
+        cross_valid_days = self.params.cross_valid_days
+        pullback_valid_days = self.params.pullback_valid_days
+        vol_threshold = self.volume_ratio_threshold
+
         actions: List[str] = []
         reasons: List[str] = []
+        statuses: List[str] = []
+        status_reasons: List[str] = []
         stop_refs: List[float | None] = []
+        signal_stop_refs: List[float | None] = []
+        valid_days_list: List[int | None] = []
+
+        def _prefer_latest(row: pd.Series, key: str) -> float | None:
+            latest_val = row.get(f"latest_{key}")
+            if latest_val is not None and not pd.isna(latest_val):
+                return latest_val
+            val = row.get(key)
+            return None if pd.isna(val) else val
+
         for _, row in merged.iterrows():
             action = "EXECUTE"
             reason = "OK"
@@ -549,19 +756,29 @@ class MA5MA20OpenMonitorRunner:
             open_px = row.get("open")
             latest_px = row.get("latest")
             entry_px = open_px
-            ma20 = row.get("ma20")
-            ma5 = row.get("ma5")
-            atr14 = row.get("atr14")
+            ma20 = _prefer_latest(row, "ma20")
+            ma5 = _prefer_latest(row, "ma5")
+            ma60 = _prefer_latest(row, "ma60")
+            ma250 = _prefer_latest(row, "ma250")
+            vol_ratio = _prefer_latest(row, "vol_ratio")
+            macd_hist = _prefer_latest(row, "macd_hist")
+            atr14 = _prefer_latest(row, "atr14")
+
+            signal_stop_ref = _prefer_latest(row, "stop_ref")
+            signal_close = row.get("close")
+            current_close = _prefer_latest(row, "close")
             ref_close = row.get("prev_close")
             if ref_close is None:
-                ref_close = row.get("close")
+                ref_close = signal_close
+
             gap = row.get("gap_pct")
             pct = row.get("pct_change")
             signal_day_pct = row.get("_signal_day_pct_change")
+            signal_reason = str(row.get("reason") or "")
+            signal_age = row.get("signal_age")
 
             used_latest_as_entry = False
             if entry_px is None or entry_px <= 0:
-                # 有些时段今开可能为空/为 0（开盘前常见），用最新价代替
                 entry_px = latest_px
                 used_latest_as_entry = True
                 if entry_px is None or entry_px <= 0:
@@ -570,14 +787,99 @@ class MA5MA20OpenMonitorRunner:
                 else:
                     reason = "用最新价替代今开"
 
-            # 风险参考：用“实际入场价”计算 ATR 止损（避免跳空导致 close-based 止损失真）
-            stop_ref = row.get("stop_ref")
+            stop_ref = signal_stop_ref
             if entry_px is not None and atr14 is not None and atr14 > 0 and stop_atr_mult > 0:
                 stop_ref = entry_px - stop_atr_mult * atr14
 
-            stop_refs.append(_to_float(stop_ref))
+            def _current_price() -> float | None:
+                px = latest_px
+                if px is None or px <= 0:
+                    px = open_px
+                if px is None or px <= 0:
+                    px = current_close
+                return px
 
-            # 情绪过滤：信号日（昨收）本身接近涨停，次日默认不追
+            price_now = _current_price()
+
+            valid_days = pullback_valid_days if self._is_pullback_signal(signal_reason) else cross_valid_days
+
+            status = "ACTIVE"
+            status_reason = "健康满足"
+
+            if ma5 is not None and ma20 is not None and ma5 < ma20:
+                status = "INVALID"
+                status_reason = "MA5 下穿 MA20（死叉）"
+            elif (
+                price_now is not None
+                and ma20 is not None
+                and vol_ratio is not None
+                and vol_ratio >= vol_threshold
+                and price_now < ma20
+            ):
+                status = "INVALID"
+                status_reason = "价格跌破 MA20 且前一交易日放量"
+            elif (
+                price_now is not None
+                and signal_stop_ref is not None
+                and price_now < signal_stop_ref
+            ):
+                status = "INVALID"
+                status_reason = "跌破 ATR 止损参考价"
+            elif valid_days > 0 and signal_age is not None and signal_age >= valid_days:
+                status = "EXPIRED"
+                status_reason = f"超过有效期 {valid_days} 个交易日"
+            elif (
+                price_now is not None
+                and ma5 is not None
+                and max_entry_vs_ma5 > 0
+                and price_now > ma5 * (1.0 + max_entry_vs_ma5)
+            ):
+                status = "EXPIRED"
+                status_reason = "入场价/最新价相对 MA5 乖离过大"
+            elif price_now is not None and signal_close is not None and price_now > signal_close:
+                gain = (price_now - signal_close) / signal_close
+                atr_base = atr14 if atr14 is not None else row.get("atr14")
+                atr_gain = None
+                if atr_base is not None and atr_base > 0:
+                    atr_gain = (price_now - signal_close) / atr_base
+                if atr_gain is not None and atr_gain > expire_atr_mult:
+                    status = "EXPIRED"
+                    status_reason = f"信号后拉升超过 ATR×{expire_atr_mult:.2f}"
+                elif gain > expire_pct_threshold:
+                    status = "EXPIRED"
+                    status_reason = f"信号后涨幅 {gain*100:.2f}% 超过阈值"
+            else:
+                trend_ok = (
+                    current_close is not None
+                    and ma60 is not None
+                    and ma250 is not None
+                    and ma20 is not None
+                    and current_close > ma60
+                    and current_close > ma250
+                    and ma20 > ma60 > ma250
+                )
+                macd_ok = macd_hist is not None and macd_hist > 0
+                vol_ok = vol_ratio is not None and vol_ratio >= vol_threshold
+
+                if not trend_ok:
+                    status = "INVALID"
+                    status_reason = "多头排列/趋势破坏"
+                elif (not macd_ok) or (not vol_ok):
+                    status = "WAIT"
+                    weak_reasons = []
+                    if not macd_ok:
+                        weak_reasons.append("MACD 动能转弱")
+                    if not vol_ok:
+                        weak_reasons.append("量能不足")
+                    status_reason = "；".join(weak_reasons) if weak_reasons else "继续观察"
+
+            if status in {"INVALID", "EXPIRED"}:
+                action = "SKIP"
+                reason = status_reason
+            elif status == "WAIT":
+                action = "WAIT"
+                reason = status_reason
+
             if action == "EXECUTE" and signal_day_pct is not None and signal_day_pct >= signal_day_limit_up:
                 action = "SKIP"
                 reason = f"信号日涨幅 {signal_day_pct*100:.2f}% 接近涨停，次日不追"
@@ -586,7 +888,6 @@ class MA5MA20OpenMonitorRunner:
                 action = "SKIP"
                 reason = f"涨幅 {pct:.2f}% 接近/达到涨停"
 
-            # 动态高开阈值：min(固定百分比, ATR*mult)
             if action == "EXECUTE" and gap is not None and gap > 0:
                 gap_up_threshold = max_up
                 atr_based = None
@@ -616,7 +917,6 @@ class MA5MA20OpenMonitorRunner:
                     px_label = "入场价(最新)" if used_latest_as_entry else "入场价"
                     reason = f"{px_label} {entry_px:.2f} 跌破 MA20 阈值 {threshold:.2f}"
 
-            # 追高过滤：入场价相对 MA5 乖离过大
             if action == "EXECUTE" and (ma5 is not None) and (entry_px is not None) and (max_entry_vs_ma5 > 0):
                 threshold_ma5 = ma5 * (1.0 + max_entry_vs_ma5)
                 if entry_px > threshold_ma5:
@@ -629,18 +929,29 @@ class MA5MA20OpenMonitorRunner:
 
             actions.append(action)
             reasons.append(reason)
+            statuses.append(status)
+            status_reasons.append(status_reason)
+            stop_refs.append(_to_float(stop_ref))
+            signal_stop_refs.append(_to_float(signal_stop_ref))
+            valid_days_list.append(valid_days)
 
         merged["monitor_date"] = dt.date.today().isoformat()
-        merged["signal_date"] = signal_date
+        merged["latest_trade_date"] = latest_trade_date
         merged["action"] = actions
         merged["action_reason"] = reasons
+        merged["candidate_status"] = statuses
+        merged["status_reason"] = status_reasons
         merged["stop_ref"] = stop_refs
+        merged["signal_stop_ref"] = signal_stop_refs
+        merged["valid_days"] = valid_days_list
         merged["checked_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         keep_cols = [
             "monitor_date",
-            "signal_date",
+            "latest_trade_date",
             "date",
+            "signal_age",
+            "valid_days",
             "code",
             "name",
             "close",
@@ -658,8 +969,11 @@ class MA5MA20OpenMonitorRunner:
             "kdj_d",
             "atr14",
             "stop_ref",
+            "signal_stop_ref",
             "signal",
             "reason",
+            "candidate_status",
+            "status_reason",
             "action",
             "action_reason",
             "checked_at",
@@ -718,11 +1032,15 @@ class MA5MA20OpenMonitorRunner:
 
         export_df = df.copy()
         export_df["gap_pct"] = export_df["gap_pct"].apply(_to_float)
-        # CSV 里把“可执行”放在最前面，方便你开盘快速扫一眼
+        # CSV 里把“状态正常且可执行”放在最前面，方便你开盘快速扫一眼
         action_rank = {"EXECUTE": 0, "WAIT": 1, "SKIP": 2, "UNKNOWN": 3}
+        status_rank = {"ACTIVE": 0, "WAIT": 1, "EXPIRED": 2, "INVALID": 3, "UNKNOWN": 4}
         export_df["_action_rank"] = export_df["action"].map(action_rank).fillna(99)
-        export_df = export_df.sort_values(by=["_action_rank", "gap_pct"], ascending=[True, True])
-        export_df = export_df.drop(columns=["_action_rank"], errors="ignore")
+        export_df["_status_rank"] = export_df["candidate_status"].map(status_rank).fillna(99)
+        export_df = export_df.sort_values(
+            by=["_status_rank", "_action_rank", "gap_pct"], ascending=[True, True, True]
+        )
+        export_df = export_df.drop(columns=["_action_rank", "_status_rank"], errors="ignore")
         if self.params.export_top_n > 0:
             export_df = export_df.head(self.params.export_top_n)
 
@@ -746,12 +1064,12 @@ class MA5MA20OpenMonitorRunner:
         if force and (not self.params.enabled):
             self.logger.info("open_monitor.enabled=false，但 force=True，仍将执行开盘监测。")
 
-        signal_date, signals = self._load_latest_buy_signals()
-        if not signal_date or signals.empty:
+        latest_trade_date, signal_dates, signals = self._load_recent_buy_signals()
+        if not latest_trade_date or signals.empty:
             return
 
         codes = signals["code"].dropna().astype(str).unique().tolist()
-        self.logger.info("待监测标的数量：%s", len(codes))
+        self.logger.info("待监测标的数量：%s（信号日：%s）", len(codes), signal_dates)
 
         quotes = self._fetch_quotes(codes)
         if quotes.empty:
@@ -759,7 +1077,8 @@ class MA5MA20OpenMonitorRunner:
         else:
             self.logger.info("实时行情已获取：%s 条", len(quotes))
 
-        result = self._evaluate(signals, quotes, signal_date)
+        latest_snapshots = self._load_latest_snapshots(latest_trade_date, codes)
+        result = self._evaluate(signals, quotes, latest_snapshots, latest_trade_date)
         if result.empty:
             return
 
@@ -778,6 +1097,20 @@ class MA5MA20OpenMonitorRunner:
                 "可执行清单 Top%s（按 gap 由小到大）：\n%s",
                 top_n,
                 preview.to_string(index=False),
+            )
+
+        wait_df = result[result["action"] == "WAIT"].copy()
+        wait_df["gap_pct"] = wait_df["gap_pct"].apply(_to_float)
+        wait_df = wait_df.sort_values(by="gap_pct", ascending=True)
+        wait_top = min(10, len(wait_df))
+        if wait_top > 0:
+            wait_preview = wait_df[
+                ["code", "name", "close", "open", "latest", "gap_pct", "status_reason"]
+            ].head(wait_top)
+            self.logger.info(
+                "WAIT 观察清单 Top%s（按 gap 由小到大）：\n%s",
+                wait_top,
+                wait_preview.to_string(index=False),
             )
 
         self._persist_results(result)
