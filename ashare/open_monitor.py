@@ -355,6 +355,9 @@ class MA5MA20OpenMonitorRunner:
         if not self._column_exists(table, column):
             return
 
+        # utf8mb4 下单列 VARCHAR 最大约 16383 字符（受 65535 bytes 行大小限制影响）
+        MYSQL_SAFE_VARCHAR_MAX = 16383
+
         try:
             stmt = text(
                 """
@@ -385,12 +388,32 @@ class MA5MA20OpenMonitorRunner:
         char_len = row.get("CHARACTER_MAXIMUM_LENGTH")
         column_type = str(row.get("COLUMN_TYPE") or "").lower()
 
-        is_text_like = "text" in data_type or "blob" in data_type or "blob" in column_type
-        current_len = int(char_len or 0)
-        target_len = max(length, current_len)
+        # information_schema 对 TEXT/LONGTEXT 会给出 65535 等“理论最大长度”，
+        # 但这不代表能安全改成 VARCHAR(65535)（utf8mb4 下会触发 1074）。
+        is_text_like = (
+            ("text" in data_type)
+            or ("blob" in data_type)
+            or ("text" in column_type)
+            or ("blob" in column_type)
+        )
+        is_varchar_like = data_type in {"varchar", "char"}
 
-        if not is_text_like and current_len >= length:
+        # DATE/INT 等非字符串列没必要强行转 VARCHAR，且可能破坏语义。
+        if not (is_text_like or is_varchar_like):
             return
+
+        current_len = int(char_len or 0)
+        safe_len = min(int(length), MYSQL_SAFE_VARCHAR_MAX)
+
+        if safe_len <= 0:
+            return
+
+        if is_text_like:
+            target_len = safe_len
+        else:
+            if current_len >= safe_len:
+                return
+            target_len = min(max(safe_len, current_len), MYSQL_SAFE_VARCHAR_MAX)
 
         try:
             with self.db_writer.engine.begin() as conn:
@@ -409,6 +432,43 @@ class MA5MA20OpenMonitorRunner:
             self.logger.warning(
                 "调整列 %s.%s 类型为 VARCHAR 失败：%s", table, column, exc
             )
+
+    def _cleanup_duplicate_snapshots(self, table: str) -> None:
+        """清理历史重复快照，确保唯一索引可创建（仅保留最新 checked_at）。"""
+
+        required_cols = {"monitor_date", "date", "code", "snapshot_hash", "checked_at"}
+        for col in required_cols:
+            if not self._column_exists(table, col):
+                return
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                res = conn.execute(
+                    text(
+                        f"""
+                        DELETE t1
+                        FROM `{table}` t1
+                        JOIN `{table}` t2
+                          ON t1.`monitor_date` = t2.`monitor_date`
+                         AND t1.`date` = t2.`date`
+                         AND t1.`code` = t2.`code`
+                         AND t1.`snapshot_hash` = t2.`snapshot_hash`
+                         AND (
+                              (t1.`checked_at` < t2.`checked_at`)
+                              OR (t1.`checked_at` IS NULL AND t2.`checked_at` IS NOT NULL)
+                         )
+                        """
+                    )
+                )
+            # pymysql 对 DELETE 可能返回 -1，这里只做“有变化”提示
+            if getattr(res, "rowcount", 0) and res.rowcount > 0:
+                self.logger.info(
+                    "表 %s 已清理 %s 条重复快照（保留最新 checked_at）。",
+                    table,
+                    res.rowcount,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("清理表 %s 重复快照失败：%s", table, exc)
 
     def _ensure_indexable_columns(self, table: str) -> None:
         dedupe_columns = {
@@ -441,6 +501,8 @@ class MA5MA20OpenMonitorRunner:
 
         index_name = "ux_open_monitor_dedupe"
         if not self._index_exists(table, index_name):
+            self._cleanup_duplicate_snapshots(table)
+
             try:
                 with self.db_writer.engine.begin() as conn:
                     conn.execute(
