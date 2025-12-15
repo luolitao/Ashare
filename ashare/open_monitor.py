@@ -103,9 +103,19 @@ class OpenMonitorParams:
 
     # 核心过滤规则
     max_gap_up_pct: float = 0.05       # 今开相对昨收涨幅 > 5% → skip
+    max_gap_up_atr_mult: float = 1.5   # 动态高开阈值：gap_up > min(max_gap_up_pct, atr_mult*ATR/昨收) → skip
     max_gap_down_pct: float = -0.03    # 今开相对昨收跌幅 < -3% → skip
     min_open_vs_ma20_pct: float = 0.0  # 今开 < MA20*(1+min_open_vs_ma20_pct) → skip（默认需站上 MA20）
     limit_up_trigger_pct: float = 9.7  # 涨跌幅 >= 9.7% → 视为涨停/接近涨停，skip
+
+    # 追高过滤：入场价相对 MA5 乖离过大
+    max_entry_vs_ma5_pct: float = 0.08  # 入场价 > MA5*(1+8%) → skip
+
+    # 风控：开盘入场价为基准的 ATR 止损
+    stop_atr_mult: float = 2.0         # stop_ref = entry - stop_atr_mult*ATR
+
+    # 情绪过滤：信号日（昨日收盘）如果是接近涨停的大阳线，次日默认不追
+    signal_day_limit_up_pct: float = 0.095  # 9.5%（兼容“接近涨停”）
 
     # 输出控制
     write_to_db: bool = True
@@ -154,9 +164,15 @@ class OpenMonitorParams:
             output_table=str(sec.get("output_table", cls.output_table)).strip() or cls.output_table,
             quote_source=quote_source,
             max_gap_up_pct=_get_float("max_gap_up_pct", cls.max_gap_up_pct),
+            max_gap_up_atr_mult=_get_float("max_gap_up_atr_mult", cls.max_gap_up_atr_mult),
             max_gap_down_pct=_get_float("max_gap_down_pct", cls.max_gap_down_pct),
             min_open_vs_ma20_pct=_get_float("min_open_vs_ma20_pct", cls.min_open_vs_ma20_pct),
             limit_up_trigger_pct=_get_float("limit_up_trigger_pct", cls.limit_up_trigger_pct),
+
+            max_entry_vs_ma5_pct=_get_float("max_entry_vs_ma5_pct", cls.max_entry_vs_ma5_pct),
+            stop_atr_mult=_get_float("stop_atr_mult", cls.stop_atr_mult),
+            signal_day_limit_up_pct=_get_float("signal_day_limit_up_pct", cls.signal_day_limit_up_pct),
+
             write_to_db=_get_bool("write_to_db", cls.write_to_db),
             export_csv=_get_bool("export_csv", cls.export_csv),
             export_top_n=_get_int("export_top_n", cls.export_top_n),
@@ -182,6 +198,64 @@ class MA5MA20OpenMonitorRunner:
             return not df.empty
         except Exception:
             return False
+
+    def _daily_table(self) -> str:
+        """获取日线数据表名（用于补充计算“信号日涨幅”等信息）。"""
+
+        strat = get_section("strategy_ma5_ma20_trend") or {}
+        if isinstance(strat, dict):
+            name = str(strat.get("daily_table") or "").strip()
+            if name:
+                return name
+        return "history_daily_kline"
+
+    def _load_signal_day_pct_change(self, signal_date: str, codes: List[str]) -> Dict[str, float]:
+        """补充“信号日涨幅”（close vs 前一交易日 close）。
+
+        用途：识别“信号日接近涨停/情绪极端”的场景，避免次日开盘追高。
+        """
+
+        if not signal_date or not codes:
+            return {}
+
+        daily = self._daily_table()
+        if not self._table_exists(daily):
+            return {}
+
+        stmt = text(
+            f"""
+            SELECT `code`, `close`, `prev_close`
+            FROM (
+              SELECT
+                `code`, `date`, `close`,
+                LAG(`close`) OVER (PARTITION BY `code` ORDER BY `date`) AS `prev_close`
+              FROM `{daily}`
+              WHERE `code` IN :codes AND `date` <= :d
+            ) t
+            WHERE `date` = :d
+            """
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": signal_date, "codes": codes})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取 %s 信号日涨幅失败（将跳过）：%s", daily, exc)
+            return {}
+
+        if df is None or df.empty:
+            return {}
+
+        out: Dict[str, float] = {}
+        for _, row in df.iterrows():
+            code = str(row.get("code") or "").strip()
+            close = _to_float(row.get("close"))
+            prev_close = _to_float(row.get("prev_close"))
+            if not code or close is None or prev_close is None or prev_close <= 0:
+                continue
+            out[code] = (close - prev_close) / prev_close
+
+        return out
 
     def _load_latest_buy_signals(self) -> Tuple[str | None, pd.DataFrame]:
         table = self.params.signals_table
@@ -231,6 +305,14 @@ class MA5MA20OpenMonitorRunner:
             return signal_date, df
 
         df["code"] = df["code"].astype(str)
+
+        # 额外补充：信号日涨幅（用于识别“信号日接近涨停”的追高风险）
+        try:
+            codes = df["code"].dropna().astype(str).unique().tolist()
+            pct_map = self._load_signal_day_pct_change(signal_date, codes)
+            df["_signal_day_pct_change"] = df["code"].map(pct_map)
+        except Exception:
+            df["_signal_day_pct_change"] = None
         return signal_date, df
 
     # -------------------------
@@ -385,63 +467,115 @@ class MA5MA20OpenMonitorRunner:
         merged = signals.merge(q, on="code", how="left", suffixes=("", "_q"))
 
         merged["close"] = merged.get("close").apply(_to_float)
+        merged["prev_close"] = merged.get("prev_close").apply(_to_float)
+        merged["ma5"] = merged.get("ma5").apply(_to_float)
         merged["ma20"] = merged.get("ma20").apply(_to_float)
         merged["open"] = merged.get("open").apply(_to_float)
         merged["latest"] = merged.get("latest").apply(_to_float)
         merged["pct_change"] = merged.get("pct_change").apply(_to_float)
+        merged["atr14"] = merged.get("atr14").apply(_to_float)
+        merged["_signal_day_pct_change"] = merged.get("_signal_day_pct_change").apply(_to_float)
 
         def _calc_gap(row: pd.Series) -> float | None:
-            close = row.get("close")
-            opx = row.get("open")
-            if close is None or opx is None:
+            # gap 用“可入场价（今开优先，否则用最新价）”相对“昨收(行情接口优先) / 策略收盘(兜底)”
+            ref_close = row.get("prev_close")
+            if ref_close is None:
+                ref_close = row.get("close")
+
+            px = row.get("open")
+            if px is None or px <= 0:
+                px = row.get("latest")
+
+            if ref_close is None or px is None:
                 return None
-            if close <= 0 or opx <= 0:
+            if ref_close <= 0 or px <= 0:
                 # 开盘前/集合竞价阶段，部分接口会返回 0；当作“无今开”
                 return None
-            return (opx - close) / close
+            return (px - ref_close) / ref_close
 
         merged["gap_pct"] = merged.apply(_calc_gap, axis=1)
 
         max_up = self.params.max_gap_up_pct
+        max_up_atr_mult = self.params.max_gap_up_atr_mult
         max_down = self.params.max_gap_down_pct
         min_vs_ma20 = self.params.min_open_vs_ma20_pct
         limit_up_trigger = self.params.limit_up_trigger_pct
 
+        max_entry_vs_ma5 = self.params.max_entry_vs_ma5_pct
+        stop_atr_mult = self.params.stop_atr_mult
+        signal_day_limit_up = self.params.signal_day_limit_up_pct
+
         actions: List[str] = []
         reasons: List[str] = []
+        stop_refs: List[float | None] = []
         for _, row in merged.iterrows():
             action = "EXECUTE"
             reason = "OK"
 
-            opx = row.get("open")
+            open_px = row.get("open")
+            latest_px = row.get("latest")
+            entry_px = open_px
             ma20 = row.get("ma20")
+            ma5 = row.get("ma5")
+            atr14 = row.get("atr14")
+            ref_close = row.get("prev_close")
+            if ref_close is None:
+                ref_close = row.get("close")
             gap = row.get("gap_pct")
             pct = row.get("pct_change")
+            signal_day_pct = row.get("_signal_day_pct_change")
 
-            if opx is None or opx <= 0:
+            used_latest_as_entry = False
+            if entry_px is None or entry_px <= 0:
                 # 有些时段今开可能为空/为 0（开盘前常见），用最新价代替
-                opx = row.get("latest")
-                if opx is None:
+                entry_px = latest_px
+                used_latest_as_entry = True
+                if entry_px is None or entry_px <= 0:
                     action = "UNKNOWN"
                     reason = "无今开/最新价"
                 else:
                     reason = "用最新价替代今开"
 
+            # 风险参考：用“实际入场价”计算 ATR 止损（避免跳空导致 close-based 止损失真）
+            stop_ref = row.get("stop_ref")
+            if entry_px is not None and atr14 is not None and atr14 > 0 and stop_atr_mult > 0:
+                stop_ref = entry_px - stop_atr_mult * atr14
+
+            # 情绪过滤：信号日（昨收）本身接近涨停，次日默认不追
+            if action == "EXECUTE" and signal_day_pct is not None and signal_day_pct >= signal_day_limit_up:
+                action = "SKIP"
+                reason = f"信号日涨幅 {signal_day_pct*100:.2f}% 接近涨停，次日不追"
+
             if action == "EXECUTE" and pct is not None and pct >= limit_up_trigger:
                 action = "SKIP"
                 reason = f"涨幅 {pct:.2f}% 接近/达到涨停"
 
-            if action == "EXECUTE" and gap is not None and gap > max_up:
-                action = "SKIP"
-                reason = f"高开 {gap*100:.2f}% 超过阈值 {max_up*100:.2f}%"
+            # 动态高开阈值：min(固定百分比, ATR*mult)
+            if action == "EXECUTE" and gap is not None and gap > 0:
+                gap_up_threshold = max_up
+                atr_based = None
+                if ref_close is not None and ref_close > 0 and atr14 is not None and atr14 > 0 and max_up_atr_mult > 0:
+                    atr_based = max_up_atr_mult * atr14 / ref_close
+                    if atr_based > 0:
+                        gap_up_threshold = min(max_up, atr_based)
+
+                if gap > gap_up_threshold:
+                    action = "SKIP"
+                    if atr_based is None:
+                        reason = f"高开 {gap*100:.2f}% 超过阈值 {gap_up_threshold*100:.2f}%"
+                    else:
+                        reason = (
+                            f"高开 {gap*100:.2f}% 超过阈值 {gap_up_threshold*100:.2f}%"
+                            f"（min(固定{max_up*100:.2f}%, ATR×{max_up_atr_mult:.1f}={atr_based*100:.2f}% )）"
+                        )
 
             if action == "EXECUTE" and gap is not None and gap < max_down:
                 action = "SKIP"
                 reason = f"低开 {gap*100:.2f}% 低于阈值 {max_down*100:.2f}%"
 
-            if action == "EXECUTE" and (ma20 is not None) and (opx is not None):
+            if action == "EXECUTE" and (ma20 is not None) and (entry_px is not None):
                 threshold = ma20 * (1.0 + min_vs_ma20)
-                if opx < threshold:
+                if entry_px < threshold:
                     action = "SKIP"
                     reason = f"开盘价 {opx:.2f} 跌破 MA20 阈值 {threshold:.2f}"
 
@@ -535,7 +669,11 @@ class MA5MA20OpenMonitorRunner:
 
         export_df = df.copy()
         export_df["gap_pct"] = export_df["gap_pct"].apply(_to_float)
-        export_df = export_df.sort_values(by=["action", "gap_pct"], ascending=[True, True])
+        # CSV 里把“可执行”放在最前面，方便你开盘快速扫一眼
+        action_rank = {"EXECUTE": 0, "WAIT": 1, "SKIP": 2, "UNKNOWN": 3}
+        export_df["_action_rank"] = export_df["action"].map(action_rank).fillna(99)
+        export_df = export_df.sort_values(by=["_action_rank", "gap_pct"], ascending=[True, True])
+        export_df = export_df.drop(columns=["_action_rank"], errors="ignore")
         if self.params.export_top_n > 0:
             export_df = export_df.head(self.params.export_top_n)
 

@@ -79,7 +79,7 @@ baostock:
   history_retention_days: 0
 
 akshare:
-  enabled: false
+  enabled: true
   lhb:
     enabled: true
   margin:
@@ -136,13 +136,23 @@ open_monitor:
 
   # 过滤阈值（按你的风格可自行调小/调大）
   max_gap_up_pct: 0.05        # 今开高开超过 5%：不追
+  max_gap_up_atr_mult: 1.5    # 动态阈值：gap_up > min(max_gap_up_pct, ATR*mult/昨收) 也会不追（更能挡住跳空追高）
   max_gap_down_pct: -0.03     # 今开低开超过 -3%：不接
   min_open_vs_ma20_pct: 0.0   # 今开必须站上 MA20（0.0=不允许跌破）
   limit_up_trigger_pct: 9.7   # 涨幅接近/达到涨停：跳过
 
+  # 追高过滤：入场价相对 MA5 乖离过大（例如 0.08=超过 MA5 8% 就不追）
+  max_entry_vs_ma5_pct: 0.08
+
+  # 风控：开盘以“实际入场价”为基准计算止损（stop_ref=entry-stop_atr_mult*ATR）
+  stop_atr_mult: 2.0
+
+  # 情绪过滤：信号日如果已经接近涨停的大阳线，次日默认不追
+  signal_day_limit_up_pct: 0.095
+
   # 输出
   write_to_db: true
-  export_csv: true
+  export_csv: false
   export_top_n: 100
   output_subdir: open_monitor
 
