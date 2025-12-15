@@ -115,8 +115,8 @@ akshare:
   board_industry:
     enabled: true
     spot_enabled: true
-    hist_enabled: false
-    history_days: 200
+    hist_enabled: true
+    history_days: 300
     adjust: hfq
     build_stock_board_dim: true
 
