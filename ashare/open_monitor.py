@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import hashlib
 import json
 import math
@@ -32,6 +33,8 @@ from typing import Any, Dict, List, Tuple
 import pandas as pd
 from sqlalchemy import bindparam, text
 
+from .baostock_core import BaostockDataFetcher
+from .baostock_session import BaostockSession
 from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
 from .utils.logger import setup_logger
@@ -55,7 +58,14 @@ def _to_float(value: Any) -> float | None:  # noqa: ANN401
         return None
 
 
-SNAPSHOT_HASH_EXCLUDE = {"checked_at"}
+SNAPSHOT_HASH_EXCLUDE = {
+    "checked_at",
+    "used_ma5",
+    "used_ma20",
+    "used_ma60",
+    "used_vol_ratio",
+    "used_macd_hist",
+}
 
 
 def _normalize_snapshot_value(value: Any) -> Any:  # noqa: ANN401
@@ -202,6 +212,8 @@ class OpenMonitorParams:
         else:
             default_signals = cls.signals_table
 
+        logger = logging.getLogger(__name__)
+
         def _get_bool(key: str, default: bool) -> bool:
             val = sec.get(key, default)
             if isinstance(val, bool):
@@ -222,6 +234,28 @@ class OpenMonitorParams:
             except Exception:
                 return default
 
+        def _normalize_ratio_pct(value: float, key: str) -> float:
+            normalized = value / 100.0 if abs(value) > 1.5 else value
+            if abs(value) > 1.5:
+                logger.info(
+                    "配置 %s 以百分数填写（%s），已按比例 %.4f 处理。",
+                    key,
+                    value,
+                    normalized,
+                )
+            return normalized
+
+        def _normalize_percent_value(value: float, key: str) -> float:
+            normalized = value * 100.0 if abs(value) <= 1.5 else value
+            if abs(value) <= 1.5:
+                logger.info(
+                    "配置 %s 以小数比例填写（%s），已按百分数 %.2f%% 处理。",
+                    key,
+                    value,
+                    normalized,
+                )
+            return normalized
+
         quote_source = str(sec.get("quote_source", cls.quote_source)).strip().lower() or "auto"
         # 路线A：auto 也按 eastmoney 处理，避免误以为会优先 AkShare
         if quote_source == "auto":
@@ -235,17 +269,36 @@ class OpenMonitorParams:
             quote_source=quote_source,
             cross_valid_days=_get_int("cross_valid_days", cls.cross_valid_days),
             pullback_valid_days=_get_int("pullback_valid_days", cls.pullback_valid_days),
-            max_gap_up_pct=_get_float("max_gap_up_pct", cls.max_gap_up_pct),
+            max_gap_up_pct=_normalize_ratio_pct(
+                _get_float("max_gap_up_pct", cls.max_gap_up_pct), "max_gap_up_pct"
+            ),
             max_gap_up_atr_mult=_get_float("max_gap_up_atr_mult", cls.max_gap_up_atr_mult),
-            max_gap_down_pct=_get_float("max_gap_down_pct", cls.max_gap_down_pct),
-            min_open_vs_ma20_pct=_get_float("min_open_vs_ma20_pct", cls.min_open_vs_ma20_pct),
-            limit_up_trigger_pct=_get_float("limit_up_trigger_pct", cls.limit_up_trigger_pct),
+            max_gap_down_pct=_normalize_ratio_pct(
+                _get_float("max_gap_down_pct", cls.max_gap_down_pct), "max_gap_down_pct"
+            ),
+            min_open_vs_ma20_pct=_normalize_ratio_pct(
+                _get_float("min_open_vs_ma20_pct", cls.min_open_vs_ma20_pct),
+                "min_open_vs_ma20_pct",
+            ),
+            limit_up_trigger_pct=_normalize_percent_value(
+                _get_float("limit_up_trigger_pct", cls.limit_up_trigger_pct),
+                "limit_up_trigger_pct",
+            ),
 
-            max_entry_vs_ma5_pct=_get_float("max_entry_vs_ma5_pct", cls.max_entry_vs_ma5_pct),
+            max_entry_vs_ma5_pct=_normalize_ratio_pct(
+                _get_float("max_entry_vs_ma5_pct", cls.max_entry_vs_ma5_pct),
+                "max_entry_vs_ma5_pct",
+            ),
             expire_atr_mult=_get_float("expire_atr_mult", cls.expire_atr_mult),
-            expire_pct_threshold=_get_float("expire_pct_threshold", cls.expire_pct_threshold),
+            expire_pct_threshold=_normalize_ratio_pct(
+                _get_float("expire_pct_threshold", cls.expire_pct_threshold),
+                "expire_pct_threshold",
+            ),
             stop_atr_mult=_get_float("stop_atr_mult", cls.stop_atr_mult),
-            signal_day_limit_up_pct=_get_float("signal_day_limit_up_pct", cls.signal_day_limit_up_pct),
+            signal_day_limit_up_pct=_normalize_ratio_pct(
+                _get_float("signal_day_limit_up_pct", cls.signal_day_limit_up_pct),
+                "signal_day_limit_up_pct",
+            ),
 
             write_to_db=_get_bool("write_to_db", cls.write_to_db),
             incremental_write=_get_bool("incremental_write", cls.incremental_write),
@@ -266,6 +319,9 @@ class MA5MA20OpenMonitorRunner:
         self.params = OpenMonitorParams.from_config()
         self.db_writer = MySQLWriter(DatabaseConfig.from_env())
         self.volume_ratio_threshold = self._resolve_volume_ratio_threshold()
+        self._calendar_cache: set[str] = set()
+        self._calendar_range: tuple[dt.date, dt.date] | None = None
+        self._baostock_client: BaostockDataFetcher | None = None
         app_cfg = get_section("app") or {}
         self.index_codes = []
         if isinstance(app_cfg, dict):
@@ -278,7 +334,6 @@ class MA5MA20OpenMonitorRunner:
             board_cfg = {}
         self.board_env_enabled = bool(board_cfg.get("enabled", False))
         self.board_spot_enabled = bool(board_cfg.get("spot_enabled", True))
-        self.board_strength_history_days = board_cfg.get("history_days", 200)
         om_cfg = get_section("open_monitor") or {}
         threshold = _to_float(om_cfg.get("env_index_score_threshold"))
         self.env_index_score_threshold = threshold if threshold is not None else 2.0
@@ -291,6 +346,120 @@ class MA5MA20OpenMonitorRunner:
             if parsed is not None and parsed > 0:
                 return float(parsed)
         return 1.5
+
+    def _get_baostock_client(self) -> BaostockDataFetcher:
+        if self._baostock_client is None:
+            self._baostock_client = BaostockDataFetcher(BaostockSession())
+        return self._baostock_client
+
+    def _load_trading_calendar(self, start: dt.date, end: dt.date) -> bool:
+        """加载并缓存交易日历，避免节假日误判。"""
+
+        if self._calendar_range and start >= self._calendar_range[0] and end <= self._calendar_range[1]:
+            return True
+
+        current_start = start
+        current_end = end
+        if self._calendar_range:
+            current_start = min(self._calendar_range[0], start)
+            current_end = max(self._calendar_range[1], end)
+
+        try:
+            client = self._get_baostock_client()
+            calendar_df = client.get_trade_calendar(current_start.isoformat(), current_end.isoformat())
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("加载交易日历失败，将回退工作日判断：%s", exc)
+            return False
+
+        if calendar_df.empty or "calendar_date" not in calendar_df.columns:
+            return False
+
+        dates = (
+            pd.to_datetime(calendar_df["calendar_date"], errors="coerce")
+            .dt.date.dropna()
+            .tolist()
+        )
+        self._calendar_cache.update({d.isoformat() for d in dates})
+        self._calendar_range = (current_start, current_end)
+        return True
+
+    @staticmethod
+    def _calc_minutes_elapsed(now: dt.datetime) -> int:
+        """计算当日已过去的交易分钟数（含午休处理）。"""
+
+        start_am = dt.time(9, 30)
+        end_am = dt.time(11, 30)
+        start_pm = dt.time(13, 0)
+        end_pm = dt.time(15, 0)
+
+        t = now.time()
+        if t < start_am:
+            return 0
+        if t <= end_am:
+            delta = dt.datetime.combine(now.date(), t) - dt.datetime.combine(
+                now.date(), start_am
+            )
+            return int(delta.total_seconds() // 60)
+        if t < start_pm:
+            return 120
+        if t <= end_pm:
+            delta = dt.datetime.combine(now.date(), t) - dt.datetime.combine(
+                now.date(), start_pm
+            )
+            return 120 + int(delta.total_seconds() // 60)
+        return 240
+
+    def _load_avg_volume(
+        self, latest_trade_date: str, codes: List[str], window: int = 20
+    ) -> Dict[str, float]:
+        if not latest_trade_date or not codes:
+            return {}
+
+        table = self._daily_table()
+        if not self._table_exists(table):
+            return {}
+
+        try:
+            end_date = pd.to_datetime(latest_trade_date).date()
+        except Exception:
+            return {}
+
+        start_date = end_date - dt.timedelta(days=max(window * 4, 60))
+        stmt = text(
+            f"""
+            SELECT `date`,`code`,`volume`
+            FROM `{table}`
+            WHERE `code` IN :codes AND `date` BETWEEN :start_date AND :end_date
+            """
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={
+                        "codes": codes,
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取历史成交量失败，将跳过盘中量比：%s", exc)
+            return {}
+
+        if df.empty or "volume" not in df.columns:
+            return {}
+
+        df["code"] = df["code"].astype(str)
+        df["volume"] = df["volume"].apply(_to_float)
+        avg_map: Dict[str, float] = {}
+        for code, grp in df.groupby("code", sort=False):
+            top = grp.sort_values("date", ascending=False).head(window)
+            volumes = top["volume"].dropna()
+            if not volumes.empty:
+                avg_map[code] = float(volumes.mean())
+        return avg_map
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         if not self._table_exists(table) or self._column_exists(table, column):
@@ -312,14 +481,16 @@ class MA5MA20OpenMonitorRunner:
                 with self.db_writer.engine.begin() as conn:
                     conn.execute(
                         text(
-                            f"ALTER TABLE `{table}` ADD COLUMN `{column}` DATETIME NULL"
+                            f"ALTER TABLE `{table}` ADD COLUMN `{column}` DATETIME(6) NULL"
                         )
                     )
-                self.logger.info("表 %s 已新增 DATETIME 列 %s。", table, column)
+                self.logger.info("表 %s 已新增 DATETIME(6) 列 %s。", table, column)
             except Exception as exc:  # noqa: BLE001
-                self.logger.warning("为表 %s 添加 DATETIME 列 %s 失败：%s", table, column, exc)
+                self.logger.warning("为表 %s 添加 DATETIME(6) 列 %s 失败：%s", table, column, exc)
             return
 
+        data_type = ""
+        column_type = ""
         try:
             stmt = text(
                 """
@@ -342,26 +513,97 @@ class MA5MA20OpenMonitorRunner:
             self.logger.debug("读取列 %s.%s 类型失败：%s", table, column, exc)
             return
 
-        if df.empty:
-            return
+        if not df.empty:
+            data_type = str(df.iloc[0].get("DATA_TYPE") or "").lower()
+            column_type = str(df.iloc[0].get("COLUMN_TYPE") or "").lower()
 
-        data_type = str(df.iloc[0].get("DATA_TYPE") or "").lower()
-        if data_type == "datetime":
+        if data_type == "datetime" and "datetime(6)" in column_type:
             return
 
         try:
             with self.db_writer.engine.begin() as conn:
                 conn.execute(
                     text(
-                        f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` DATETIME NULL"
+                        f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` DATETIME(6) NULL"
                     )
                 )
             self.logger.info(
-                "表 %s.%s 列已转换为 DATETIME，保证时间排序正确。", table, column
+                "表 %s.%s 列已转换为 DATETIME(6)，保证时间排序正确。", table, column
             )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(
-                "将列 %s.%s 转为 DATETIME 失败，保留原类型：%s", table, column, exc
+                "将列 %s.%s 转为 DATETIME(6) 失败（当前类型：%s），保留原类型：%s",
+                table,
+                column,
+                column_type or "unknown",
+                exc,
+            )
+
+    def _ensure_numeric_column(self, table: str, column: str, definition: str) -> None:
+        if not self._table_exists(table):
+            return
+
+        if not self._column_exists(table, column):
+            self._ensure_column(table, column, definition)
+            return
+
+        data_type = ""
+        column_type = ""
+        try:
+            stmt = text(
+                """
+                SELECT DATA_TYPE, COLUMN_TYPE
+                FROM information_schema.columns
+                WHERE table_schema = :schema AND table_name = :table AND column_name = :column
+                """
+            )
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={
+                        "schema": self.db_writer.config.db_name,
+                        "table": table,
+                        "column": column,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取列 %s.%s 类型失败：%s", table, column, exc)
+            return
+
+        if not df.empty:
+            data_type = str(df.iloc[0].get("DATA_TYPE") or "").lower()
+            column_type = str(df.iloc[0].get("COLUMN_TYPE") or "").lower()
+
+        numeric_types = {
+            "double",
+            "float",
+            "decimal",
+            "int",
+            "bigint",
+            "smallint",
+            "tinyint",
+        }
+
+        if data_type in numeric_types:
+            return
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` {definition}"))
+            self.logger.info(
+                "表 %s.%s 列已调整为数值列 %s，避免类型漂移。",
+                table,
+                column,
+                definition,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "调整列 %s.%s 为数值列失败（当前类型：%s），保留原类型：%s",
+                table,
+                column,
+                column_type or "unknown",
+                exc,
             )
 
     # -------------------------
@@ -597,8 +839,8 @@ class MA5MA20OpenMonitorRunner:
 
         self._ensure_datetime_column(table, "checked_at")
 
-        self._ensure_column(table, "signal_strength", "DOUBLE NULL")
-        self._ensure_column(table, "strength_delta", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "signal_strength", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "strength_delta", "DOUBLE NULL")
         self._ensure_column(table, "strength_trend", "VARCHAR(16) NULL")
         self._ensure_column(table, "strength_note", "VARCHAR(512) NULL")
 
@@ -614,6 +856,19 @@ class MA5MA20OpenMonitorRunner:
                 self.logger.info("表 %s 已新增索引 %s 加速强度历史查询。", table, index_name)
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("创建索引 %s 失败：%s", index_name, exc)
+
+        code_time_index = "idx_open_monitor_code_time"
+        if not self._index_exists(table, code_time_index):
+            try:
+                with self.db_writer.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"CREATE INDEX `{code_time_index}` ON `{table}` (`code`, `checked_at`)"
+                        )
+                    )
+                self.logger.info("表 %s 已新增索引 %s 以优化跨日强度查询。", table, code_time_index)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("创建索引 %s 失败：%s", code_time_index, exc)
 
     def _load_existing_snapshot_keys(
         self, table: str, monitor_date: str, codes: List[str]
@@ -716,9 +971,11 @@ class MA5MA20OpenMonitorRunner:
         if d.weekday() >= 5:
             return False
 
-        # 盘中/当日：日线表大概率还没落库，直接按工作日视为交易日（节假日误跑属低频场景）
-        if latest_trade_date and str(date_str)[:10] > str(latest_trade_date)[:10]:
-            return True
+        target_str = d.isoformat()
+        start = d - dt.timedelta(days=400)
+        success = self._load_trading_calendar(start, d)
+        if success and self._calendar_range and self._calendar_range[0] <= d <= self._calendar_range[1]:
+            return target_str in self._calendar_cache
 
         daily = self._daily_table()
         if not self._table_exists(daily):
@@ -728,9 +985,15 @@ class MA5MA20OpenMonitorRunner:
         try:
             with self.db_writer.engine.begin() as conn:
                 df = pd.read_sql_query(stmt, conn, params={"d": str(d)})
-            return not df.empty
+            if not df.empty:
+                return True
+            if latest_trade_date and target_str > str(latest_trade_date)[:10]:
+                return True
+            return False
         except Exception:  # noqa: BLE001
-            return True
+            if latest_trade_date and target_str > str(latest_trade_date)[:10]:
+                return True
+            return False
 
     def _load_trade_age_map(
         self, latest_trade_date: str, min_date: str, monitor_date: str | None
@@ -888,8 +1151,10 @@ class MA5MA20OpenMonitorRunner:
         df["code"] = df["code"].astype(str)
         return df
 
-    def _load_previous_strength(self, codes: List[str]) -> Dict[str, float]:
-        """读取开盘监测表中最新的信号强度，用于计算增减。"""
+    def _load_previous_strength(
+        self, codes: List[str], as_of: dt.datetime | None = None
+    ) -> Dict[str, float]:
+        """读取历史信号强度，用于计算增减（支持跨天对比）。"""
 
         table = self.params.output_table
         if not codes or not self._table_exists(table):
@@ -900,8 +1165,6 @@ class MA5MA20OpenMonitorRunner:
         ):
             return {}
 
-        today = dt.date.today().isoformat()
-
         stmt = text(
             f"""
             SELECT t1.`code`, t1.`signal_strength`
@@ -909,17 +1172,21 @@ class MA5MA20OpenMonitorRunner:
             JOIN (
                 SELECT `code`, MAX(`checked_at`) AS latest_checked
                 FROM `{table}`
-                WHERE `monitor_date` = :d AND `code` IN :codes AND `signal_strength` IS NOT NULL
+                WHERE `code` IN :codes AND `signal_strength` IS NOT NULL {"AND `checked_at` < :as_of" if as_of else ""}
                 GROUP BY `code`
             ) t2
               ON t1.`code` = t2.`code` AND t1.`checked_at` = t2.`latest_checked`
-            WHERE t1.`monitor_date` = :d AND t1.`code` IN :codes AND t1.`signal_strength` IS NOT NULL
+            WHERE t1.`code` IN :codes AND t1.`signal_strength` IS NOT NULL {"AND t1.`checked_at` < :as_of" if as_of else ""}
             """
         ).bindparams(bindparam("codes", expanding=True))
 
+        params: dict[str, Any] = {"codes": codes}
+        if as_of:
+            params["as_of"] = as_of
+
         try:
             with self.db_writer.engine.begin() as conn:
-                df = pd.read_sql_query(stmt, conn, params={"d": today, "codes": codes})
+                df = pd.read_sql_query(stmt, conn, params=params)
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取历史信号强度失败，将跳过强度对比：%s", exc)
             return {}
@@ -1193,7 +1460,7 @@ class MA5MA20OpenMonitorRunner:
             return pd.DataFrame()
 
         base_url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
-        fields = "f2,f3,f12,f14,f17,f18"
+        fields = "f2,f3,f4,f5,f6,f12,f14,f15,f16,f17,f18"
         secids = [_to_eastmoney_secid(c) for c in codes]
 
         batch_size = 80
@@ -1228,8 +1495,12 @@ class MA5MA20OpenMonitorRunner:
             name = str(r.get("f14") or "").strip()
             latest = _to_float(r.get("f2"))
             pct = _to_float(r.get("f3"))
+            high = _to_float(r.get("f15"))
+            low = _to_float(r.get("f16"))
             open_px = _to_float(r.get("f17"))
             prev_close = _to_float(r.get("f18"))
+            volume = _to_float(r.get("f5"))
+            amount = _to_float(r.get("f6"))
 
             code_guess = _to_baostock_code("auto", symbol)
             code = mapping.get(symbol, code_guess)
@@ -1242,6 +1513,10 @@ class MA5MA20OpenMonitorRunner:
                     "open": open_px,
                     "latest": latest,
                     "prev_close": prev_close,
+                    "high": high,
+                    "low": low,
+                    "volume": volume,
+                    "amount": amount,
                     "pct_change": pct,
                 }
             )
@@ -1268,18 +1543,38 @@ class MA5MA20OpenMonitorRunner:
             return pd.DataFrame()
 
         q = quotes.copy()
+        checked_at_ts = dt.datetime.now()
+        avg_volume_map = self._load_avg_volume(
+            latest_trade_date, signals["code"].dropna().astype(str).unique().tolist()
+        )
+        minutes_elapsed = self._calc_minutes_elapsed(checked_at_ts)
+        total_minutes = 240
         if q.empty:
             out = signals.copy()
             out["monitor_date"] = dt.date.today().isoformat()
             out["open"] = None
             out["latest"] = None
+            out["high"] = None
+            out["low"] = None
             out["pct_change"] = None
+            out["volume"] = None
+            out["amount"] = None
+            out["avg_volume_20"] = None
+            out["intraday_vol_ratio"] = None
             out["gap_pct"] = None
             out["action"] = "UNKNOWN"
             out["action_reason"] = "行情数据不可用"
             out["candidate_status"] = "UNKNOWN"
             out["status_reason"] = "行情数据不可用"
-            out["checked_at"] = dt.datetime.now().replace(microsecond=0)
+            out["checked_at"] = checked_at_ts
+            for col in [
+                "used_ma5",
+                "used_ma20",
+                "used_ma60",
+                "used_vol_ratio",
+                "used_macd_hist",
+            ]:
+                out[col] = None
             return out
 
         q["code"] = q["code"].astype(str)
@@ -1319,6 +1614,11 @@ class MA5MA20OpenMonitorRunner:
             snap = snap.rename(columns=rename_map)
             merged = merged.merge(snap, on="code", how="left")
 
+        if avg_volume_map:
+            merged["avg_volume_20"] = merged["code"].map(avg_volume_map)
+        else:
+            merged["avg_volume_20"] = None
+
         float_cols = [
             "close",
             "prev_close",
@@ -1332,7 +1632,12 @@ class MA5MA20OpenMonitorRunner:
             "stop_ref",
             "open",
             "latest",
+            "high",
+            "low",
             "pct_change",
+            "volume",
+            "amount",
+            "avg_volume_20",
             "_signal_day_pct_change",
             "latest_close",
             "latest_ma5",
@@ -1349,6 +1654,54 @@ class MA5MA20OpenMonitorRunner:
         for col in float_cols:
             if col in merged.columns:
                 merged[col] = merged.get(col).apply(_to_float)
+
+        def _normalize_intraday_volume(vol: float | None, avg_vol: float | None) -> float | None:
+            if vol is None or avg_vol is None or avg_vol <= 0:
+                return vol
+
+            ratio = vol / avg_vol
+            multiplied = (vol * 100.0) / avg_vol
+            divided = (vol / 100.0) / avg_vol
+
+            if ratio < 0.02 <= multiplied <= 200:
+                self.logger.debug(
+                    "检测到成交量单位可能为“手”，已按股处理（乘以 100）。"
+                )
+                return vol * 100.0
+
+            if ratio > 200 >= divided >= 0.02:
+                self.logger.debug(
+                    "检测到成交量单位可能已按股存储，已按“手”还原（除以 100）。"
+                )
+                return vol / 100.0
+
+            return vol
+
+        def _calc_intraday_vol_ratio(row: pd.Series) -> float | None:
+            vol = _normalize_intraday_volume(row.get("volume"), row.get("avg_volume_20"))
+            avg_vol = row.get("avg_volume_20")
+            effective_minutes = max(minutes_elapsed, 5)
+            if (
+                vol is None
+                or avg_vol is None
+                or avg_vol <= 0
+                or minutes_elapsed <= 0
+                or total_minutes <= 0
+            ):
+                return None
+
+            scaled = (vol / effective_minutes) * total_minutes
+            if scaled <= 0:
+                return None
+            return scaled / avg_vol
+
+        merged["intraday_vol_ratio"] = merged.apply(_calc_intraday_vol_ratio, axis=1)
+        if "latest_vol_ratio" in merged.columns:
+            merged["latest_vol_ratio"] = merged["intraday_vol_ratio"].combine_first(
+                merged.get("latest_vol_ratio")
+            )
+        else:
+            merged["latest_vol_ratio"] = merged["intraday_vol_ratio"]
 
         def _calc_gap(row: pd.Series) -> float | None:
             ref_close = row.get("prev_close")
@@ -1398,6 +1751,11 @@ class MA5MA20OpenMonitorRunner:
         strength_deltas: List[float | None] = []
         strength_trends: List[str | None] = []
         strength_notes: List[str | None] = []
+        used_ma5_list: List[float | None] = []
+        used_ma20_list: List[float | None] = []
+        used_ma60_list: List[float | None] = []
+        used_vol_ratio_list: List[float | None] = []
+        used_macd_hist_list: List[float | None] = []
 
         def _prefer_latest(row: pd.Series, key: str) -> float | None:
             latest_val = row.get(f"latest_{key}")
@@ -1491,6 +1849,9 @@ class MA5MA20OpenMonitorRunner:
                     else:
                         score -= 0.1
                         notes.append("量能偏弱")
+                else:
+                    score -= 0.1
+                    notes.append("量能不足")
 
             if isinstance(board_status, str):
                 status_norm = board_status.strip().lower()
@@ -1526,7 +1887,7 @@ class MA5MA20OpenMonitorRunner:
             self.logger.warning(
                 "incremental_write=False 会覆盖当日历史，strength_delta/strength_trend 可能缺乏对比基础"
             )
-        prev_strength_map = self._load_previous_strength(codes_all)
+        prev_strength_map = self._load_previous_strength(codes_all, as_of=checked_at_ts)
 
         for _, row in merged.iterrows():
             action = "EXECUTE"
@@ -1786,6 +2147,11 @@ class MA5MA20OpenMonitorRunner:
             strength_deltas.append(_to_float(strength_delta))
             strength_trends.append(strength_trend)
             strength_notes.append(strength_note or None)
+            used_ma5_list.append(_to_float(ma5))
+            used_ma20_list.append(_to_float(ma20))
+            used_ma60_list.append(_to_float(ma60))
+            used_vol_ratio_list.append(_to_float(vol_ratio))
+            used_macd_hist_list.append(_to_float(macd_hist))
 
             actions.append(action)
             reasons.append(reason)
@@ -1804,7 +2170,7 @@ class MA5MA20OpenMonitorRunner:
         merged["stop_ref"] = stop_refs
         merged["signal_stop_ref"] = signal_stop_refs
         merged["valid_days"] = valid_days_list
-        merged["checked_at"] = dt.datetime.now().replace(microsecond=0)
+        merged["checked_at"] = checked_at_ts
         merged["env_index_score"] = env_index_scores
         merged["board_status"] = board_statuses
         merged["board_rank"] = board_ranks
@@ -1813,6 +2179,11 @@ class MA5MA20OpenMonitorRunner:
         merged["strength_delta"] = strength_deltas
         merged["strength_trend"] = strength_trends
         merged["strength_note"] = strength_notes
+        merged["used_ma5"] = used_ma5_list
+        merged["used_ma20"] = used_ma20_list
+        merged["used_ma60"] = used_ma60_list
+        merged["used_vol_ratio"] = used_vol_ratio_list
+        merged["used_macd_hist"] = used_macd_hist_list
 
         keep_cols = [
             "monitor_date",
@@ -1827,12 +2198,23 @@ class MA5MA20OpenMonitorRunner:
             "latest",
             "pct_change",
             "gap_pct",
+            "high",
+            "low",
+            "volume",
+            "amount",
+            "avg_volume_20",
+            "intraday_vol_ratio",
             "ma5",
             "ma20",
             "ma60",
             "ma250",
             "vol_ratio",
             "macd_hist",
+            "used_ma5",
+            "used_ma20",
+            "used_ma60",
+            "used_vol_ratio",
+            "used_macd_hist",
             "kdj_k",
             "kdj_d",
             "atr14",
@@ -1877,6 +2259,14 @@ class MA5MA20OpenMonitorRunner:
         monitor_date = str(df.iloc[0].get("monitor_date") or "").strip()
         codes = df["code"].dropna().astype(str).unique().tolist()
 
+        for col in ["signal_strength", "strength_delta"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if self._table_exists(table):
+            self._ensure_strength_schema(table)
+            self._ensure_snapshot_schema(table)
+
         df["snapshot_hash"] = df.apply(lambda row: make_snapshot_hash(row.to_dict()), axis=1)
         df = df.drop_duplicates(subset=["monitor_date", "date", "code", "snapshot_hash"])
 
@@ -1894,8 +2284,6 @@ class MA5MA20OpenMonitorRunner:
                 self.logger.warning("开盘监测表去重删除失败，将直接追加：%s", exc)
 
         if self._table_exists(table):
-            self._ensure_strength_schema(table)
-            self._ensure_snapshot_schema(table)
             existing_keys = self._load_existing_snapshot_keys(table, monitor_date, codes)
             if existing_keys:
                 before = len(df)
@@ -1922,6 +2310,7 @@ class MA5MA20OpenMonitorRunner:
         try:
             self.db_writer.write_dataframe(df, table, if_exists="append")
             self.logger.info("开盘监测结果已写入表 %s：%s 条", table, len(df))
+            self._ensure_strength_schema(table)
             self._ensure_snapshot_schema(table)
         except Exception as exc:  # noqa: BLE001
             self.logger.error("写入开盘监测表失败：%s", exc)
@@ -1944,9 +2333,11 @@ class MA5MA20OpenMonitorRunner:
         suffix = ""
         if self.params.incremental_export_timestamp:
             checked_at = str(df.iloc[0].get("checked_at") or "").strip()
-            # checked_at 形如：2025-12-15 09:30:00
+            # checked_at 形如：2025-12-15 09:30:00.123456
             if checked_at and " " in checked_at:
-                time_part = checked_at.split(" ", 1)[1].replace(":", "")
+                time_part = checked_at.split(" ", 1)[1].replace(":", "").replace(
+                    ".", ""
+                )
                 if time_part:
                     suffix = f"_{time_part}"
 
