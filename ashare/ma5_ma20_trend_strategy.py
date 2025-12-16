@@ -333,52 +333,33 @@ class MA5MA20StrategyRunner:
         table = "a_share_stock_basic"
         try:
             with self.db_writer.engine.begin() as conn:
-                candidates = [
-                    ["code", "code_name", "list_date"],
-                    ["code", "code_name", "listDate"],
-                    ["code", "code_name", "ipo_date"],
-                    ["code", "code_name", "ipoDate"],
-                    ["code", "code_name"],
-                ]
-                last_exc: Exception | None = None
-                for cols in candidates:
-                    sql = "SELECT " + ",".join(f"`{c}`" for c in cols) + f" FROM `{table}`"
-                    try:
-                        df = pd.read_sql(text(sql), conn)
-                        if "list_date" in df.columns:
-                            df["list_date"] = _normalize_list_date(df["list_date"])
-                        return df
-                    except OperationalError as exc:
-                        if "1054" in str(exc) or "Unknown column" in str(exc):
-                            self.logger.info(
-                                "读取 %s 字段 %s 失败，将尝试回退：%s", table, cols, exc
-                            )
-                            last_exc = exc
-                            continue
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        last_exc = exc
-                        break
-                self.logger.info("未能读取 %s（将跳过 list_date/ipoDate 推导）：%s", table, last_exc)
-                return pd.DataFrame()
+                try:
+                    df = pd.read_sql(
+                        text("SELECT `code`,`code_name`,`ipoDate` FROM `a_share_stock_basic`"),
+                        conn,
+                    )
+                except OperationalError as exc:
+                    if "1054" in str(exc) or "Unknown column" in str(exc):
+                        self.logger.info(
+                            "读取 %s 字段 ['code', 'code_name', 'ipoDate'] 失败，将回退基础字段：%s",
+                            table,
+                            exc,
+                        )
+                        return pd.read_sql(
+                            text(f"SELECT `code`,`code_name` FROM `{table}`"), conn
+                        )
+                    raise
+
+                if "ipoDate" in df.columns:
+                    df["ipoDate"] = _normalize_list_date(df["ipoDate"])
+                return df
         except Exception as exc:  # noqa: BLE001
             self.logger.info(
-                "读取 %s 含 list_date 失败，将回退基础字段（ST/板块限幅仍可用）：%s",
+                "读取 %s 失败，将跳过 ST 标签与板块限幅识别：%s",
                 table,
                 exc,
             )
-            try:
-                with self.db_writer.engine.begin() as conn:
-                    return pd.read_sql(
-                        text(f"SELECT `code`,`code_name` FROM `{table}`"), conn
-                    )
-            except Exception as exc2:  # noqa: BLE001
-                self.logger.info(
-                    "读取 %s 基础字段失败（将跳过 ST 标签与板块限幅识别）：%s",
-                    table,
-                    exc2,
-                )
-                return pd.DataFrame()
+            return pd.DataFrame()
 
     def _compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """为每个 code 计算均线、量能、MACD、KDJ、ATR。"""
@@ -658,8 +639,7 @@ class MA5MA20StrategyRunner:
         mask_growth, mask_bj, mask_st = self._build_board_masks(code_series, stock_basic_df)
         list_date_col = self._select_column(
             stock_basic_df,
-            ["list_date", "listDate", "ipo_date", "ipoDate"],
-            contains="ipo",
+            ["ipoDate"],
         )
         code_col = self._select_column(stock_basic_df, ["code"], contains="code")
         listing_days = pd.Series(pd.NA, index=out.index, dtype="Int64")
