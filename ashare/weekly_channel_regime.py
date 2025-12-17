@@ -20,7 +20,7 @@ import pandas as pd
 
 
 def _to_weekly_ohlcv(df_daily: pd.DataFrame) -> pd.DataFrame:
-    """把日线 OHLCV 按 code 聚合成周线（周五作为周收盘）。
+    """把日线 OHLCV 按 code 聚合成周线（week_end=当周最后交易日）。
 
     期望列：code,date,open,high,low,close,volume,(optional amount)
     返回列：code,week_end,open,high,low,close,volume,(optional amount)
@@ -30,32 +30,50 @@ def _to_weekly_ohlcv(df_daily: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["code", "week_end", "open", "high", "low", "close", "volume"])
 
     work = df_daily.copy()
-    work["date"] = pd.to_datetime(work["date"], errors="coerce")
+    work["date_dt"] = pd.to_datetime(work["date"], errors="coerce")
     for col in ["open", "high", "low", "close", "volume", "amount"]:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
 
-    keep = [c for c in ["code", "date", "open", "high", "low", "close", "volume", "amount"] if c in work.columns]
-    work = work[keep].dropna(subset=["code", "date"]).copy()
+    keep = [
+        c
+        for c in ["code", "date", "date_dt", "open", "high", "low", "close", "volume", "amount"]
+        if c in work.columns
+    ]
+    work = work[keep].dropna(subset=["code", "date_dt"]).copy()
     if work.empty:
         return pd.DataFrame(columns=["code", "week_end", "open", "high", "low", "close", "volume"])
 
     out_parts = []
     for code, grp in work.groupby("code", sort=False):
-        g = grp.sort_values("date").set_index("date")
-        agg = {
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }
-        if "amount" in g.columns:
-            agg["amount"] = "sum"
+        grp = grp.sort_values("date_dt").copy()
+        grp["week_key"] = grp["date_dt"].dt.to_period("W-FRI")
 
-        wk = g.resample("W-FRI").agg(agg).dropna(subset=["open", "high", "low", "close"]).reset_index()
+        def _agg_week(g: pd.DataFrame) -> pd.Series:
+            g = g.sort_values("date_dt")
+            week_end_dt = g["date_dt"].iloc[-1]
+            week_end = week_end_dt.date().isoformat() if pd.notna(week_end_dt) else None
+            data = {
+                "open": g["open"].iloc[0],
+                "high": g["high"].max(),
+                "low": g["low"].min(),
+                "close": g["close"].iloc[-1],
+                "volume": g["volume"].sum(),
+                "week_end": week_end,
+            }
+            if "amount" in g.columns:
+                data["amount"] = g["amount"].sum()
+            return pd.Series(data)
+
+        wk = (
+            grp.groupby("week_key", sort=False)
+            .apply(_agg_week)
+            .dropna(subset=["open", "high", "low", "close"])
+            .reset_index(drop=True)
+        )
+        if wk.empty:
+            continue
         wk["code"] = str(code)
-        wk = wk.rename(columns={"date": "week_end"})
         out_parts.append(wk)
 
     if not out_parts:
@@ -63,6 +81,11 @@ def _to_weekly_ohlcv(df_daily: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.concat(out_parts, ignore_index=True)
     out = out.sort_values(["code", "week_end"]).reset_index(drop=True)
+
+    cols = ["code", "week_end", "open", "high", "low", "close", "volume"]
+    if "amount" in out.columns:
+        cols.append("amount")
+    out = out[[c for c in cols if c in out.columns]]
     return out
 
 

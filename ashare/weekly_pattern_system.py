@@ -628,10 +628,23 @@ class WeeklyPlanSystem:
         if df.empty:
             return plan
 
+        asof_raw = weekly_payload.get("weekly_asof_trade_date")
+        asof_ts = pd.to_datetime(asof_raw, errors="coerce") if asof_raw is not None else None
+        asof_str = asof_ts.date().isoformat() if asof_ts is not None and pd.notna(asof_ts) else None
+        asof_ts = pd.to_datetime(asof_str).normalize() if asof_str is not None else None
+        if asof_ts is not None:
+            df = df[df["week_end"] <= asof_ts].copy().reset_index(drop=True)
+            if df.empty:
+                return plan
+
         week_end = df["week_end"].iloc[-1]
         week_end_str = week_end.date().isoformat() if pd.notna(week_end) else None
-        weekly_closed = bool(weekly_payload.get("weekly_asof_week_closed", True))
+        if asof_str is None:
+            asof_str = week_end_str
         current_week_closed = bool(weekly_payload.get("weekly_current_week_closed", False))
+        weekly_closed = weekly_payload.get("weekly_asof_week_closed")
+        if weekly_closed is None:
+            weekly_closed = bool(current_week_closed and asof_str == week_end_str)
 
         slope_delta = weekly_payload.get("slope_change_4w")
         if slope_delta is None and isinstance(weekly_payload.get("context", {}), dict):
@@ -734,8 +747,8 @@ class WeeklyPlanSystem:
                 "weekly_plan_b_if": plan_b_if,
                 "weekly_plan_b_then": plan_b_then,
                 "weekly_plan_b_recover_if": plan_b_recover,
-                "weekly_asof_trade_date": week_end_str,
-                "weekly_week_closed": weekly_closed,
+                "weekly_asof_trade_date": asof_str,
+                "weekly_week_closed": bool(weekly_closed),
                 "weekly_current_week_closed": current_week_closed,
             }
         )
