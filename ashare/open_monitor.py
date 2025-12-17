@@ -875,6 +875,11 @@ class MA5MA20OpenMonitorRunner:
 
         self._ensure_indexable_columns(table)
 
+        # intraday_vol_ratio 在首次写入时可能因 dtype/object 被建成 TEXT，
+        # 会导致 SQL 侧的筛选/排序出现隐式转换或字符串比较问题。
+        # 这里强制修正为数值列，保持与代码中的 float 计算一致。
+        self._ensure_numeric_column(table, "intraday_vol_ratio", "DOUBLE NULL")
+
         index_name = "ux_open_monitor_dedupe"
         if not self._index_exists(table, index_name):
             self._cleanup_duplicate_snapshots(table)
@@ -1149,7 +1154,12 @@ class MA5MA20OpenMonitorRunner:
     def _load_recent_buy_signals(self) -> Tuple[str | None, List[str], pd.DataFrame]:
         table = self.params.signals_table
         monitor_date = dt.date.today().isoformat()
-        lookback = max(int(self.params.signal_lookback_days or 0), 1)
+        lookback = max(
+            int(self.params.signal_lookback_days or 0),
+            int(self.params.cross_valid_days or 0),
+            int(self.params.pullback_valid_days or 0),
+            1,
+        )
 
         try:
             with self.db_writer.engine.begin() as conn:

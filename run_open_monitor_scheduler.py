@@ -1,4 +1,4 @@
-"""定时调度执行开盘监测（每整 N 分钟触发一次）。
+"""定时调度执行开盘监测（每整 N 分钟触发一次，自动跳过非交易日）。
 
 用法：
   # 每整 5 分钟跑一次
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from datetime import timedelta
 import time
 
 from ashare.open_monitor import MA5MA20OpenMonitorRunner
@@ -68,9 +69,35 @@ def _in_trading_window(ts: dt.datetime) -> bool:
     return False
 
 
-def _next_trading_start(ts: dt.datetime) -> dt.datetime:
+def _is_trading_day(runner: MA5MA20OpenMonitorRunner, d: dt.date) -> bool:
+    """判断是否交易日：优先用 baostock 交易日历，失败则回退工作日。"""
+    try:
+        # 覆盖一小段范围，便于缓存复用
+        start = d - timedelta(days=30)
+        end = d + timedelta(days=30)
+        ok = runner._load_trading_calendar(start, end)  # 复用 runner 内置缓存（交易日已过滤）
+        if ok:
+            return d.isoformat() in runner._calendar_cache
+    except Exception:
+        pass
+    return d.weekday() < 5
+
+
+def _next_trading_day(d: dt.date, runner: MA5MA20OpenMonitorRunner) -> dt.date:
+    """返回 >=d 的下一个交易日。"""
+    cur = d
+    for _ in range(370):  # 最多兜底一年，避免死循环
+        if _is_trading_day(runner, cur):
+            return cur
+        cur = cur + timedelta(days=1)
+    return d
+
+
+def _next_trading_start(ts: dt.datetime, runner: MA5MA20OpenMonitorRunner) -> dt.datetime:
     today = ts.date()
     t = ts.time()
+
+    today = _next_trading_day(today, runner)
     for start, end in TRADING_WINDOWS:
         if t < start:
             return dt.datetime.combine(today, start)
@@ -107,7 +134,7 @@ def main() -> None:
             now = dt.datetime.now()
             run_at = _next_run_at(now, interval_min)
             if not _in_trading_window(run_at):
-                next_start = _next_trading_start(run_at)
+                next_start = _next_trading_start(run_at, runner)
                 if next_start > now:
                     logger.info(
                         "当前不在交易时段，下一交易窗口：%s", next_start.strftime("%Y-%m-%d %H:%M:%S")

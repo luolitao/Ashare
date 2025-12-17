@@ -692,7 +692,7 @@ class MA5MA20StrategyRunner:
             (out["close"] >= out["ma250"]) & yearline_enabled
         ).astype("boolean")
         prev_below_ma250 = (
-            below_ma250_mask.groupby(out["code"], sort=False).shift(1).fillna(False)
+            below_ma250_mask.groupby(out["code"], sort=False).shift(1).fillna(False).astype("boolean")
         )
         below_ma250_streak = (
             below_ma250_mask.groupby(out["code"], sort=False)
