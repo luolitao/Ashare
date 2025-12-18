@@ -2132,6 +2132,30 @@ class MA5MA20OpenMonitorRunner:
         merged = signals.merge(q, on="code", how="left", suffixes=("", "_q"))
 
         env_context = env_context or {}
+        if not env_context.get("index"):
+            env_context["index"] = self._load_index_trend(latest_trade_date)
+        if not env_context.get("boards"):
+            board_df = self._load_board_spot_strength(latest_trade_date, checked_at)
+            board_map: dict[str, Any] = {}
+            if not board_df.empty and "board_name" in board_df.columns:
+                total = len(board_df)
+                for _, row in board_df.iterrows():
+                    name = str(row.get("board_name") or "").strip()
+                    code = str(row.get("board_code") or "").strip()
+                    rank = _to_float(row.get("rank"))
+                    pct = _to_float(row.get("chg_pct"))
+                    status = "neutral"
+                    if total > 0 and rank:
+                        if rank <= max(1, int(total * 0.2)):
+                            status = "strong"
+                        elif rank >= max(1, int(total * 0.8)):
+                            status = "weak"
+                    payload = {"rank": rank, "chg_pct": pct, "status": status}
+                    for key in [name, code]:
+                        key_norm = str(key).strip()
+                        if key_norm:
+                            board_map[key_norm] = payload
+            env_context["boards"] = board_map
         industry_dim = self._load_stock_industry_dim()
         if not industry_dim.empty:
             rename_map = {}
@@ -2205,6 +2229,9 @@ class MA5MA20OpenMonitorRunner:
             rename_map = {c: f"asof_{c}" for c in snap.columns if c not in {"code"}}
             snap = snap.rename(columns=rename_map)
             merged = merged.merge(snap, on="code", how="left")
+
+        if "asof_close" in merged.columns and "sig_close" in merged.columns:
+            merged["asof_close"] = merged["asof_close"].fillna(merged.get("sig_close"))
 
         has_asof_cols = [c for c in ["asof_close", "asof_ma20"] if c in merged.columns]
         merged["_has_latest_snapshot"] = False

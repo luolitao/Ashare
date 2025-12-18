@@ -272,12 +272,24 @@ class WeeklyEnvironmentBuilder:
                 rename_map[col] = "board_name"
             if col in {"涨跌幅", "涨跌幅(%)", "chg_pct", "change_rate", "pct_chg"}:
                 rename_map[col] = "chg_pct"
+            if "排名" in col and "rank" not in rename_map:
+                rename_map[col] = "rank"
 
         df = df.rename(columns=rename_map)
         if "board_code" in df.columns:
             df["board_code"] = df["board_code"].astype(str)
         if "chg_pct" in df.columns:
+            if df["chg_pct"].dtype == object:
+                df["chg_pct"] = (
+                    df["chg_pct"]
+                    .astype(str)
+                    .str.replace("%", "", regex=False)
+                    .str.replace("％", "", regex=False)
+                    .str.strip()
+                )
             df["chg_pct"] = pd.to_numeric(df["chg_pct"], errors="coerce")
+        if "rank" in df.columns:
+            df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
 
         if "rank" not in df.columns or df["rank"].isna().all():
             if "chg_pct" in df.columns:
