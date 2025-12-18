@@ -187,6 +187,9 @@ class OpenMonitorParams:
     # 目的：避免同一批次出现重复 code（例如同一只股票在 12-09 与 12-11 都触发 BUY）。
     unique_code_latest_date_only: bool = True
 
+    # 输出模式：FULL 保留全部字段，COMPACT 只保留核心字段
+    output_mode: str = "COMPACT"
+
     @classmethod
     def from_config(cls) -> "OpenMonitorParams":
         sec = get_section("open_monitor") or {}
@@ -320,6 +323,8 @@ class OpenMonitorParams:
                 sec.get("env_snapshot_table", cls.env_snapshot_table)
             ).strip()
             or cls.env_snapshot_table,
+            output_mode=str(sec.get("output_mode", cls.output_mode)).strip().upper()
+            or cls.output_mode,
         )
 
 
@@ -1186,7 +1191,7 @@ class MA5MA20OpenMonitorRunner:
             "asof_atr14": "DOUBLE",
             "asof_stop_ref": "DOUBLE",
             "trade_stop_ref": "DOUBLE",
-            "stop_loss_ref": "DOUBLE",
+            "effective_stop_ref": "DOUBLE",
             "sig_kdj_k": "DOUBLE",
             "sig_kdj_d": "DOUBLE",
         }
@@ -2195,6 +2200,7 @@ class MA5MA20OpenMonitorRunner:
         cross_valid_days = self.params.cross_valid_days
         pullback_valid_days = self.params.pullback_valid_days
         vol_threshold = self.volume_ratio_threshold
+        weekly_gate_policy = self._resolve_env_weekly_gate_policy(env_context)
 
         actions: List[str] = []
         reasons: List[str] = []
@@ -2203,7 +2209,7 @@ class MA5MA20OpenMonitorRunner:
         signal_kinds: List[str] = []
         trade_stop_refs: List[float | None] = []
         sig_stop_refs: List[float | None] = []
-        stop_loss_refs: List[float | None] = []
+        effective_stop_refs: List[float | None] = []
         valid_days_list: List[int | None] = []
         entry_exposure_caps: List[float | None] = []
         env_index_scores: List[float | None] = []
@@ -2383,7 +2389,7 @@ class MA5MA20OpenMonitorRunner:
             )
         prev_strength_map = self._load_previous_strength(codes_all, as_of=checked_at_ts)
 
-        for _, row in merged.iterrows():
+        for idx, row in merged.iterrows():
             action = "EXECUTE"
             reason = "OK"
             status = "ACTIVE"
@@ -2392,6 +2398,22 @@ class MA5MA20OpenMonitorRunner:
             risk_tag_raw = str(row.get("risk_tag") or "").strip()
             risk_note = str(row.get("risk_note") or "").strip()
             risk_tags_split = [t.strip() for t in risk_tag_raw.split("|") if t.strip()]
+            weekly_gate_action = weekly_gate_policy or "NOT_APPLIED"
+
+            if (
+                pct is not None
+                and pct <= -0.04
+                and live_intraday_vol_ratio is not None
+                and live_intraday_vol_ratio >= 1.2
+            ):
+                if "BIG_DROP" not in risk_tags_split:
+                    risk_tags_split.append("BIG_DROP")
+                detail = (
+                    f"暴跌放量风险：跌幅 {pct*100:.2f}%"
+                    f"（阈值≤-4.00%），盘中量比 {live_intraday_vol_ratio:.2f}"
+                    "（阈值≥1.20）"
+                )
+                risk_note = f"{risk_note}|{detail}" if risk_note else detail
 
             open_px = row.get("live_open")
             latest_px = row.get("live_latest")
@@ -2478,12 +2500,12 @@ class MA5MA20OpenMonitorRunner:
             valid_days = pullback_valid_days if is_pullback else cross_valid_days
 
             # comment: feat: 止损参考价取 trade_stop_ref 与 signal_stop_ref 的更严格值 防止低开导致止损线被动放宽
-            stop_loss_ref = None
+            effective_stop_ref = None
             stop_candidates = [
                 v for v in (trade_stop_ref, signal_stop_ref) if v is not None
             ]
             if stop_candidates:
-                stop_loss_ref = max(stop_candidates)
+                effective_stop_ref = max(stop_candidates)
             structural_failure_reason = None
             structural_downgrade_reason = None
             if ma5 is not None and ma20 is not None and ma5 < ma20:
@@ -2506,7 +2528,11 @@ class MA5MA20OpenMonitorRunner:
                     structural_downgrade_reason = "盘中结构观察：MACD 柱子转负（回踩形态降级观察）"
                 else:
                     structural_failure_reason = "盘中结构失效：MACD 柱子转负"
-            elif price_now is not None and stop_loss_ref is not None and price_now <= stop_loss_ref:
+            elif (
+                price_now is not None
+                and effective_stop_ref is not None
+                and price_now <= effective_stop_ref
+            ):
                 stop_parts: list[str] = []
                 if trade_stop_ref is not None:
                     stop_parts.append(f"entry 止损 {trade_stop_ref:.2f}")
@@ -2515,7 +2541,7 @@ class MA5MA20OpenMonitorRunner:
                 stop_detail = "，".join(stop_parts)
                 detail_suffix = f"（取较高者：{stop_detail}）" if stop_detail else ""
                 structural_failure_reason = (
-                    f"盘中结构失效：最新价 {price_now:.2f} 跌破止损参考价 {stop_loss_ref:.2f}{detail_suffix}"
+                    f"盘中结构失效：最新价 {price_now:.2f} 跌破止损参考价 {effective_stop_ref:.2f}{detail_suffix}"
                 )
 
             if structural_failure_reason:
@@ -2541,6 +2567,44 @@ class MA5MA20OpenMonitorRunner:
                     else:
                         status = "INVALID"
                         status_reason = "价格跌破 MA20 且前一交易日放量"
+                post_sig_peak_candidates = [
+                    row.get("live_high"),
+                    row.get("live_latest"),
+                    row.get("asof_close"),
+                    signal_close,
+                ]
+                post_sig_peak_vals = [
+                    _to_float(v) for v in post_sig_peak_candidates if _to_float(v) is not None
+                ]
+                post_sig_peak = max(post_sig_peak_vals) if post_sig_peak_vals else None
+                overheat_reason = None
+                if (
+                    post_sig_peak is not None
+                    and ma5 is not None
+                    and max_entry_vs_ma5 > 0
+                    and post_sig_peak > ma5 * (1.0 + max_entry_vs_ma5)
+                ):
+                    overheat_reason = "相对MA5乖离过大"
+                elif (
+                    post_sig_peak is not None
+                    and signal_close is not None
+                    and post_sig_peak > signal_close
+                ):
+                    gain = (post_sig_peak - signal_close) / signal_close
+                    atr_base = atr14 if atr14 is not None else row.get("atr14")
+                    atr_gain = None
+                    if atr_base is not None and atr_base > 0:
+                        atr_gain = (post_sig_peak - signal_close) / atr_base
+                    if atr_gain is not None and atr_gain > expire_atr_mult:
+                        overheat_reason = f"信号后拉升超过 ATR×{expire_atr_mult:.2f}"
+                    elif gain > expire_pct_threshold:
+                        overheat_reason = f"信号后涨幅 {gain*100:.2f}% 超过阈值"
+
+                if overheat_reason:
+                    status = "EXPIRED"
+                    status_reason = overheat_reason
+                    action = "SKIP"
+                    reason = overheat_reason
                 elif valid_days > 0 and signal_age is not None and signal_age > valid_days:
                     if strength_trend == "ENHANCING" or (
                         strength_score is not None and strength_score >= 2
@@ -2696,7 +2760,10 @@ class MA5MA20OpenMonitorRunner:
                 reason = note_text
                 status_reason = note_text
 
-            weekly_gate_action = None
+            risk_tag_value = "|".join(risk_tags_split) if risk_tags_split else None
+            merged.at[idx, "risk_tag"] = risk_tag_value
+            merged.at[idx, "risk_note"] = risk_note or None
+
             entry_exposure_cap = env_weekly_plan_a_exposure_cap
 
             if env_regime:
@@ -2878,7 +2945,7 @@ class MA5MA20OpenMonitorRunner:
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
             trade_stop_refs.append(_to_float(trade_stop_ref))
             sig_stop_refs.append(_to_float(signal_stop_ref))
-            stop_loss_refs.append(_to_float(stop_loss_ref))
+            effective_stop_refs.append(_to_float(effective_stop_ref))
             valid_days_list.append(valid_days)
 
         merged["monitor_date"] = dt.date.today().isoformat()
@@ -2888,7 +2955,7 @@ class MA5MA20OpenMonitorRunner:
         merged["status_reason"] = status_reasons
         merged["trade_stop_ref"] = trade_stop_refs
         merged["sig_stop_ref"] = sig_stop_refs
-        merged["stop_loss_ref"] = stop_loss_refs
+        merged["effective_stop_ref"] = effective_stop_refs
         merged["valid_days"] = valid_days_list
         merged["entry_exposure_cap"] = entry_exposure_caps
         merged["checked_at"] = checked_at_ts
@@ -2947,7 +3014,7 @@ class MA5MA20OpenMonitorRunner:
                     "asof_ma250 计算为空：请检查 ma250 列合并/命名是否正确。"
                 )
 
-        keep_cols = [
+        full_keep_cols = [
             "monitor_date",
             "sig_date",
             "signal_age",
@@ -2974,7 +3041,7 @@ class MA5MA20OpenMonitorRunner:
             "sig_macd_hist",
             "sig_atr14",
             "sig_stop_ref",
-            "stop_loss_ref",
+            "effective_stop_ref",
             "asof_close",
             "asof_ma5",
             "asof_ma20",
@@ -3018,6 +3085,54 @@ class MA5MA20OpenMonitorRunner:
             "dedupe_bucket",
             "snapshot_hash",
         ]
+
+        compact_keep_cols = [
+            "monitor_date",
+            "sig_date",
+            "asof_trade_date",
+            "signal_age",
+            "valid_days",
+            "code",
+            "name",
+            "live_open",
+            "live_latest",
+            "live_high",
+            "live_low",
+            "live_pct_change",
+            "live_gap_pct",
+            "live_intraday_vol_ratio",
+            "sig_close",
+            "sig_ma5",
+            "sig_ma20",
+            "sig_ma60",
+            "sig_atr14",
+            "sig_vol_ratio",
+            "sig_macd_hist",
+            "sig_stop_ref",
+            "trade_stop_ref",
+            "effective_stop_ref",
+            "env_regime",
+            "env_position_hint",
+            "env_index_score",
+            "env_weekly_asof_trade_date",
+            "env_weekly_risk_level",
+            "env_weekly_scene",
+            "env_weekly_gate_action",
+            "candidate_status",
+            "status_reason",
+            "action",
+            "action_reason",
+            "signal_strength",
+            "strength_note",
+            "risk_tag",
+            "risk_note",
+            "checked_at",
+            "dedupe_bucket",
+            "snapshot_hash",
+        ]
+
+        output_mode = (self.params.output_mode or "COMPACT").upper()
+        keep_cols = full_keep_cols if output_mode == "FULL" else compact_keep_cols
 
         for col in keep_cols:
             if col not in merged.columns:
