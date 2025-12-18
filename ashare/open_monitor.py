@@ -35,6 +35,7 @@ from sqlalchemy import bindparam, text
 
 from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
+from .env_snapshot_utils import resolve_weekly_asof_date
 from .utils.convert import to_float as _to_float
 from .utils.logger import setup_logger
 from .weekly_env_builder import WeeklyEnvironmentBuilder
@@ -366,6 +367,7 @@ class MA5MA20OpenMonitorRunner:
             env_index_score_threshold=self.env_index_score_threshold,
             weekly_soft_gate_strength_threshold=self.weekly_soft_gate_strength_threshold,
         )
+        self.weekly_env_fallback_asof_date: str | None = None
 
     def _resolve_volume_ratio_threshold(self) -> float:
         strat = get_section("strategy_ma5_ma20_trend") or {}
@@ -1207,12 +1209,35 @@ class MA5MA20OpenMonitorRunner:
     ) -> dict[str, Any] | None:
         """公开的环境快照读取接口，必要时可回退到当日最新。"""
 
+        self.weekly_env_fallback_asof_date = None
         env_context = self._load_env_snapshot_context(monitor_date, dedupe_bucket)
         if env_context:
             return env_context
 
         if allow_fallback and dedupe_bucket is not None:
             return self._load_env_snapshot_context(monitor_date, None)
+
+        if allow_fallback:
+            try:
+                asof_date = resolve_weekly_asof_date(include_current_week=False)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("解析周线 asof_date 失败：%s", exc)
+                return None
+
+            if not asof_date:
+                return None
+
+            env_context = self._load_env_snapshot_context(
+                asof_date, f"WEEKLY_{asof_date}"
+            )
+            if env_context:
+                self.weekly_env_fallback_asof_date = asof_date
+                return env_context
+
+            env_context = self._load_env_snapshot_context(asof_date, None)
+            if env_context:
+                self.weekly_env_fallback_asof_date = asof_date
+                return env_context
 
         return None
 
@@ -3404,6 +3429,11 @@ class MA5MA20OpenMonitorRunner:
             monitor_date, dedupe_bucket, allow_fallback=True
         )
         if env_context:
+            if self.weekly_env_fallback_asof_date:
+                self.logger.info(
+                    "已回退到 asof_date=%s 的周线环境。",
+                    self.weekly_env_fallback_asof_date,
+                )
             loaded_bucket = str(env_context.get("dedupe_bucket") or "")
             env_snapshot_bucket = loaded_bucket or env_snapshot_bucket
             env_snapshot_matched_bucket = bool(loaded_bucket == str(dedupe_bucket))
