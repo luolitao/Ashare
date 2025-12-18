@@ -68,7 +68,6 @@ def main() -> None:
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
