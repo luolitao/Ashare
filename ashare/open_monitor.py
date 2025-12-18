@@ -1099,6 +1099,63 @@ class MA5MA20OpenMonitorRunner:
             "weekly_note": row.get("env_weekly_note"),
         }
 
+        def _is_empty_env_value(value: Any) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, str):
+                return value.strip() == ""
+            if isinstance(value, dict):
+                return len(value) == 0
+            if isinstance(value, (list, tuple, set)):
+                return len(value) == 0
+
+            size = getattr(value, "size", None)
+            if isinstance(size, int):
+                return size == 0
+
+            try:
+                return len(value) == 0  # type: ignore[arg-type]
+            except Exception:
+                return False
+
+        raw_plan_json = row.get("env_weekly_plan_json")
+        plan_dict: dict[str, Any] = {}
+        if isinstance(raw_plan_json, str):
+            plan_text = raw_plan_json.strip()
+            if plan_text:
+                try:
+                    parsed = json.loads(plan_text)
+                    if isinstance(parsed, dict):
+                        plan_dict = parsed
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.debug("解析 env_weekly_plan_json 失败：%s", exc)
+        elif isinstance(raw_plan_json, dict):
+            plan_dict = raw_plan_json
+
+        def _backfill(target_key: str, source_key: str | None = None) -> None:
+            if not isinstance(plan_dict, dict):
+                return
+            if not _is_empty_env_value(weekly_scenario.get(target_key)):
+                return
+            plan_key = source_key or target_key
+            value = plan_dict.get(plan_key)
+            if _is_empty_env_value(value):
+                return
+            weekly_scenario[target_key] = value
+
+        _backfill("weekly_current_week_closed")
+        _backfill("weekly_risk_score")
+        _backfill("weekly_key_levels_str")
+        _backfill("weekly_plan_a_if")
+        _backfill("weekly_plan_a_then")
+        _backfill("weekly_plan_a_confirm")
+        _backfill("weekly_plan_b_if")
+        _backfill("weekly_plan_b_then")
+        _backfill("weekly_plan_b_recover_if")
+        _backfill("weekly_structure_tags")
+        _backfill("weekly_confirm_tags")
+        _backfill("weekly_key_levels")
+
         env_context: dict[str, Any] = {
             "weekly_scenario": weekly_scenario,
             "weekly_asof_trade_date": weekly_scenario.get("weekly_asof_trade_date"),
@@ -3371,14 +3428,22 @@ class MA5MA20OpenMonitorRunner:
             plan_b_if = weekly_scenario.get("weekly_plan_b_if")
             plan_a_confirm = weekly_scenario.get("weekly_plan_a_confirm")
             plan_b_recover = weekly_scenario.get("weekly_plan_b_recover_if")
-            self.logger.info(
-                "周线 Plan tokens: A_if=%s A_then=%s A_confirm=%s B_if=%s B_recover=%s",
-                str(plan_a_if or "")[:120],
-                str(weekly_scenario.get("weekly_plan_a_then") or "")[:64],
-                str(plan_a_confirm or "")[:64],
-                str(plan_b_if or "")[:120],
-                str(plan_b_recover or "")[:120],
-            )
+            plan_tokens = [
+                plan_a_if,
+                weekly_scenario.get("weekly_plan_a_then"),
+                plan_a_confirm,
+                plan_b_if,
+                plan_b_recover,
+            ]
+            if any(str(token or "").strip() for token in plan_tokens):
+                self.logger.info(
+                    "周线 Plan tokens: A_if=%s A_then=%s A_confirm=%s B_if=%s B_recover=%s",
+                    str(plan_a_if or "")[:120],
+                    str(weekly_scenario.get("weekly_plan_a_then") or "")[:64],
+                    str(plan_a_confirm or "")[:64],
+                    str(plan_b_if or "")[:120],
+                    str(plan_b_recover or "")[:120],
+                )
         result = self._evaluate(
             signals,
             quotes,
