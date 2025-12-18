@@ -65,12 +65,19 @@ def _to_weekly_ohlcv(df_daily: pd.DataFrame) -> pd.DataFrame:
                 data["amount"] = g["amount"].sum()
             return pd.Series(data)
 
-        wk = (
-            grp.groupby("week_key", sort=False)
-            .apply(_agg_week)
-            .dropna(subset=["open", "high", "low", "close"])
-            .reset_index(drop=True)
-        )
+        grouped = grp.groupby("week_key", sort=False)
+        try:
+            wk = (
+                grouped.apply(_agg_week, include_groups=False)
+                .dropna(subset=["open", "high", "low", "close"])
+                .reset_index(drop=True)
+            )
+        except TypeError:
+            wk = (
+                grouped.apply(_agg_week)
+                .dropna(subset=["open", "high", "low", "close"])
+                .reset_index(drop=True)
+            )
         if wk.empty:
             continue
         wk["code"] = str(code)
