@@ -64,10 +64,7 @@ def _to_float(value: Any) -> float | None:  # noqa: ANN401
 SNAPSHOT_HASH_EXCLUDE = {
     "checked_at",
     "dedupe_bucket",
-    "live_checked_at",
 }
-
-VOLUME_UNIT_SHARES = "股"
 
 
 def _normalize_snapshot_value(value: Any) -> Any:  # noqa: ANN401
@@ -182,7 +179,7 @@ class OpenMonitorParams:
     expire_pct_threshold: float = 0.07
 
     # 风控：开盘入场价为基准的 ATR 止损
-    stop_atr_mult: float = 2.0         # stop_ref = entry - stop_atr_mult*ATR
+    stop_atr_mult: float = 2.0         # trade_stop_ref = entry - stop_atr_mult*ATR
 
     # 情绪过滤：信号日（昨日收盘）如果是接近涨停的大阳线，次日默认不追
     signal_day_limit_up_pct: float = 0.095  # 9.5%（兼容“接近涨停”）
@@ -865,9 +862,8 @@ class MA5MA20OpenMonitorRunner:
 
         required_cols = {
             "monitor_date",
-            "date",
+            "sig_date",
             "code",
-            "snapshot_hash",
             "dedupe_bucket",
             "checked_at",
         }
@@ -884,10 +880,9 @@ class MA5MA20OpenMonitorRunner:
                         FROM `{table}` t1
                         JOIN `{table}` t2
                           ON t1.`monitor_date` = t2.`monitor_date`
-                         AND t1.`date` = t2.`date`
+                         AND t1.`sig_date` = t2.`sig_date`
                          AND t1.`code` = t2.`code`
                          AND t1.`dedupe_bucket` = t2.`dedupe_bucket`
-                         AND t1.`snapshot_hash` = t2.`snapshot_hash`
                          AND (
                               (t1.`checked_at` < t2.`checked_at`)
                               OR (t1.`checked_at` IS NULL AND t2.`checked_at` IS NOT NULL)
@@ -949,10 +944,9 @@ class MA5MA20OpenMonitorRunner:
 
         self._ensure_indexable_columns(table)
 
-        # intraday_vol_ratio 在首次写入时可能因 dtype/object 被建成 TEXT，
+        # live_intraday_vol_ratio 在首次写入时可能因 dtype/object 被建成 TEXT，
         # 会导致 SQL 侧的筛选/排序出现隐式转换或字符串比较问题。
         # 这里强制修正为数值列，保持与代码中的 float 计算一致。
-        self._ensure_numeric_column(table, "intraday_vol_ratio", "DOUBLE NULL")
         self._ensure_numeric_column(table, "live_intraday_vol_ratio", "DOUBLE NULL")
 
         index_name = "ux_open_monitor_dedupe"
@@ -965,7 +959,7 @@ class MA5MA20OpenMonitorRunner:
                         text(
                             f"""
                             CREATE UNIQUE INDEX `{index_name}`
-                            ON `{table}` (`monitor_date`, `sig_date`, `code`, `dedupe_bucket`, `snapshot_hash`)
+                            ON `{table}` (`monitor_date`, `sig_date`, `code`, `dedupe_bucket`)
                             """
                         )
                     )
@@ -1017,36 +1011,16 @@ class MA5MA20OpenMonitorRunner:
             return
 
         extra_columns = {
+            "env_index_score": "DOUBLE",
             "env_regime": "VARCHAR(32)",
             "env_position_hint": "DOUBLE",
-            "env_weekly_state": "VARCHAR(32)",
-            "env_weekly_position_hint": "DOUBLE",
-            "env_weekly_note": "VARCHAR(255)",
             "env_weekly_asof_trade_date": "VARCHAR(10)",
-            "env_weekly_week_closed": "TINYINT(1)",
-            "env_weekly_current_week_closed": "TINYINT(1)",
-            "env_weekly_risk_score": "DOUBLE",
             "env_weekly_risk_level": "VARCHAR(16)",
-            "env_weekly_confirm": "TINYINT(1)",
-            "env_weekly_gating_enabled": "TINYINT(1)",
-            "env_weekly_plan_a": "VARCHAR(255)",
-            "env_weekly_plan_b": "VARCHAR(255)",
-            "env_weekly_money_proxy": "VARCHAR(255)",
-            "env_weekly_tags": "VARCHAR(255)",
             "env_weekly_scene": "VARCHAR(32)",
-            "env_weekly_key_levels": "VARCHAR(255)",
-            "env_weekly_plan_a_if": "VARCHAR(255)",
-            "env_weekly_plan_a_then": "VARCHAR(64)",
-            "env_weekly_plan_a_confirm": "VARCHAR(128)",
-            "env_weekly_plan_a_exposure_cap": "DOUBLE",
-            "env_weekly_plan_b_if": "VARCHAR(255)",
-            "env_weekly_plan_b_then": "VARCHAR(64)",
-            "env_weekly_plan_b_recover_if": "VARCHAR(128)",
-            "env_weekly_plan_json": "TEXT",
             "env_weekly_gate_action": "VARCHAR(16)",
+            "env_weekly_plan_json": "TEXT",
             "risk_tag": "VARCHAR(255)",
             "risk_note": "VARCHAR(255)",
-            "volume_unit": "VARCHAR(16)",
             "entry_exposure_cap": "DOUBLE",
             "sig_date": "VARCHAR(10)",
             "asof_trade_date": "VARCHAR(10)",
@@ -1061,6 +1035,8 @@ class MA5MA20OpenMonitorRunner:
             "sig_macd_hist": "DOUBLE",
             "sig_atr14": "DOUBLE",
             "sig_stop_ref": "DOUBLE",
+            "sig_signal": "VARCHAR(16)",
+            "sig_reason": "VARCHAR(255)",
             "asof_ma5": "DOUBLE",
             "asof_ma20": "DOUBLE",
             "asof_ma60": "DOUBLE",
@@ -1069,6 +1045,9 @@ class MA5MA20OpenMonitorRunner:
             "asof_macd_hist": "DOUBLE",
             "asof_atr14": "DOUBLE",
             "asof_stop_ref": "DOUBLE",
+            "trade_stop_ref": "DOUBLE",
+            "sig_kdj_k": "DOUBLE",
+            "sig_kdj_d": "DOUBLE",
         }
 
         with self.db_writer.engine.begin() as conn:
@@ -1083,7 +1062,7 @@ class MA5MA20OpenMonitorRunner:
 
     def _load_existing_snapshot_keys(
         self, table: str, monitor_date: str, codes: List[str], dedupe_bucket: str
-    ) -> set[tuple[str, str, str, str, str]]:
+    ) -> set[tuple[str, str, str, str]]:
         if not (
             table
             and monitor_date
@@ -1095,7 +1074,7 @@ class MA5MA20OpenMonitorRunner:
 
         stmt = text(
             f"""
-            SELECT `monitor_date`, `sig_date`, `code`, `dedupe_bucket`, `snapshot_hash`
+            SELECT `monitor_date`, `sig_date`, `code`, `dedupe_bucket`
             FROM `{table}`
             WHERE `monitor_date` = :d AND `code` IN :codes AND `dedupe_bucket` = :b
         """
@@ -1109,19 +1088,46 @@ class MA5MA20OpenMonitorRunner:
                     params={"d": monitor_date, "codes": codes, "b": dedupe_bucket},
                 )
         except Exception as exc:  # noqa: BLE001
-            self.logger.debug("读取已存在的 snapshot_hash 失败：%s", exc)
+            self.logger.debug("读取已存在的 dedupe keys 失败：%s", exc)
             return set()
 
-        existing: set[tuple[str, str, str, str, str]] = set()
+        existing: set[tuple[str, str, str, str]] = set()
         for _, row in df.iterrows():
-            snap = str(row.get("snapshot_hash") or "").strip()
             code = str(row.get("code") or "").strip()
-            date_val = str(row.get("date") or "").strip()
+            date_val = str(row.get("sig_date") or "").strip()
             monitor = str(row.get("monitor_date") or "").strip()
             bucket = str(row.get("dedupe_bucket") or "").strip()
-            if snap and code and date_val and monitor and bucket:
-                existing.add((monitor, date_val, code, bucket, snap))
+            if code and date_val and monitor and bucket:
+                existing.add((monitor, date_val, code, bucket))
         return existing
+
+    def _delete_existing_bucket_rows(
+        self, table: str, monitor_date: str, dedupe_bucket: str, codes: List[str]
+    ) -> int:
+        if not (
+            table
+            and monitor_date
+            and dedupe_bucket
+            and codes
+            and self._table_exists(table)
+        ):
+            return 0
+
+        stmt = text(
+            "DELETE FROM `{table}` WHERE `monitor_date` = :d AND `dedupe_bucket` = :b AND `code` IN :codes".format(
+                table=table
+            )
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                result = conn.execute(
+                    stmt, {"d": monitor_date, "b": dedupe_bucket, "codes": codes}
+                )
+                return int(getattr(result, "rowcount", 0) or 0)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("覆盖写入时清理旧快照失败：%s", exc)
+            return 0
 
     def _daily_table(self) -> str:
         """获取日线数据表名（用于补充计算“信号日涨幅”等信息）。"""
@@ -1417,8 +1423,12 @@ class MA5MA20OpenMonitorRunner:
             "ma250": "sig_ma250",
             "vol_ratio": "sig_vol_ratio",
             "macd_hist": "sig_macd_hist",
+            "kdj_k": "sig_kdj_k",
+            "kdj_d": "sig_kdj_d",
             "atr14": "sig_atr14",
             "stop_ref": "sig_stop_ref",
+            "signal": "sig_signal",
+            "reason": "sig_reason",
         }
         df = df.rename(columns={k: v for k, v in signal_prefix_map.items() if k in df.columns})
         for src, target in signal_prefix_map.items():
@@ -2030,7 +2040,6 @@ class MA5MA20OpenMonitorRunner:
             "pct_change": "live_pct_change",
             "gap_pct": "live_gap_pct",
             "intraday_vol_ratio": "live_intraday_vol_ratio",
-            "checked_at": "live_checked_at",
             "prev_close": "prev_close",
         }
         q = q.rename(columns={k: v for k, v in live_rename_map.items() if k in q.columns})
@@ -2053,8 +2062,6 @@ class MA5MA20OpenMonitorRunner:
             out["live_volume"] = None
             out["live_amount"] = None
             out["live_intraday_vol_ratio"] = None
-            out["live_checked_at"] = checked_at_ts
-            out["asof_trade_date"] = latest_trade_date
             out["asof_close"] = out.get("sig_close")
             out["asof_ma5"] = out.get("sig_ma5")
             out["asof_ma20"] = out.get("sig_ma20")
@@ -2062,7 +2069,7 @@ class MA5MA20OpenMonitorRunner:
             out["asof_ma250"] = out.get("sig_ma250")
             out["asof_vol_ratio"] = out.get("sig_vol_ratio")
             out["asof_macd_hist"] = out.get("sig_macd_hist")
-            out["volume_unit"] = VOLUME_UNIT_SHARES
+            out["asof_trade_date"] = out.get("sig_date")
             out["avg_volume_20"] = None
             out["action"] = "UNKNOWN"
             out["action_reason"] = "行情数据不可用"
@@ -2102,58 +2109,26 @@ class MA5MA20OpenMonitorRunner:
         if isinstance(env_context, dict):
             env_position_hint = _to_float(env_context.get("position_hint"))
 
-        env_weekly_state = None
-        env_weekly_position_hint = None
-        env_weekly_note = None
         env_weekly_asof_trade_date = None
-        env_weekly_week_closed = None
-        env_weekly_current_week_closed = None
-        env_weekly_risk_score = None
         env_weekly_risk_level = None
-        env_weekly_confirm = None
         env_weekly_gating_enabled = False
         env_weekly_plan_a = None
         env_weekly_plan_b = None
-        env_weekly_money_proxy = None
-        env_weekly_tags = None
         env_weekly_scene = None
-        env_weekly_key_levels = None
-        env_weekly_plan_a_if = None
-        env_weekly_plan_a_then = None
-        env_weekly_plan_a_confirm = None
         env_weekly_plan_a_exposure_cap = None
-        env_weekly_plan_b_if = None
-        env_weekly_plan_b_then = None
-        env_weekly_plan_b_recover_if = None
         env_weekly_plan_json = None
         env_weekly_bias = None
         env_weekly_status = None
         if isinstance(env_context, dict):
-            env_weekly_state = env_context.get("weekly_state")
-            env_weekly_position_hint = _to_float(env_context.get("weekly_position_hint"))
-            env_weekly_note = env_context.get("weekly_note")
             env_weekly_asof_trade_date = env_context.get("weekly_asof_trade_date")
-            env_weekly_week_closed = env_context.get("weekly_week_closed")
-            env_weekly_current_week_closed = env_context.get("weekly_current_week_closed")
-            env_weekly_risk_score = _to_float(env_context.get("weekly_risk_score"))
             env_weekly_risk_level = env_context.get("weekly_risk_level")
-            env_weekly_confirm = env_context.get("weekly_confirm")
             env_weekly_gating_enabled = bool(env_context.get("weekly_gating_enabled", False))
             env_weekly_plan_a = env_context.get("weekly_plan_a")
             env_weekly_plan_b = env_context.get("weekly_plan_b")
-            env_weekly_money_proxy = env_context.get("weekly_money_proxy")
-            env_weekly_tags = env_context.get("weekly_tags")
             env_weekly_scene = env_context.get("weekly_scene_code")
-            env_weekly_key_levels = env_context.get("weekly_key_levels_str")
-            env_weekly_plan_a_if = env_context.get("weekly_plan_a_if")
-            env_weekly_plan_a_then = env_context.get("weekly_plan_a_then")
-            env_weekly_plan_a_confirm = env_context.get("weekly_plan_a_confirm")
             env_weekly_plan_a_exposure_cap = _to_float(
                 env_context.get("weekly_plan_a_exposure_cap")
             )
-            env_weekly_plan_b_if = env_context.get("weekly_plan_b_if")
-            env_weekly_plan_b_then = env_context.get("weekly_plan_b_then")
-            env_weekly_plan_b_recover_if = env_context.get("weekly_plan_b_recover_if")
             env_weekly_plan_json = env_context.get("weekly_plan_json")
             env_weekly_bias = env_context.get("weekly_bias")
             env_weekly_status = env_context.get("weekly_status")
@@ -2169,7 +2144,10 @@ class MA5MA20OpenMonitorRunner:
             snap = snap.rename(columns=rename_map)
             merged = merged.merge(snap, on="code", how="left")
 
-        merged["asof_trade_date"] = latest_trade_date
+        has_asof_cols = [c for c in ["asof_close", "asof_ma20"] if c in merged.columns]
+        merged["_has_latest_snapshot"] = False
+        if has_asof_cols:
+            merged["_has_latest_snapshot"] = merged[has_asof_cols].notna().any(axis=1)
 
         if avg_volume_map:
             merged["avg_volume_20"] = merged["code"].map(avg_volume_map)
@@ -2184,6 +2162,8 @@ class MA5MA20OpenMonitorRunner:
             "sig_ma250",
             "sig_vol_ratio",
             "sig_macd_hist",
+            "sig_kdj_k",
+            "sig_kdj_d",
             "sig_atr14",
             "sig_stop_ref",
             "asof_close",
@@ -2296,36 +2276,16 @@ class MA5MA20OpenMonitorRunner:
         statuses: List[str] = []
         status_reasons: List[str] = []
         signal_kinds: List[str] = []
-        stop_refs: List[float | None] = []
+        trade_stop_refs: List[float | None] = []
         sig_stop_refs: List[float | None] = []
         valid_days_list: List[int | None] = []
         entry_exposure_caps: List[float | None] = []
         env_index_scores: List[float | None] = []
         env_regimes: List[str | None] = []
         env_position_hints: List[float | None] = []
-        env_weekly_states: List[str | None] = []
-        env_weekly_position_hints: List[float | None] = []
-        env_weekly_notes: List[str | None] = []
         env_weekly_asof_trade_dates: List[str | None] = []
-        env_weekly_week_closed_list: List[int | None] = []
-        env_weekly_current_week_closed_list: List[int | None] = []
-        env_weekly_risk_scores: List[float | None] = []
         env_weekly_risk_levels: List[str | None] = []
-        env_weekly_confirms: List[int | None] = []
-        env_weekly_gating_enabled_list: List[int] = []
-        env_weekly_plan_as: List[str | None] = []
-        env_weekly_plan_bs: List[str | None] = []
-        env_weekly_money_proxies: List[str | None] = []
-        env_weekly_tags_list: List[str | None] = []
         env_weekly_scene_list: List[str | None] = []
-        env_weekly_key_levels_list: List[str | None] = []
-        env_weekly_plan_a_if_list: List[str | None] = []
-        env_weekly_plan_a_then_list: List[str | None] = []
-        env_weekly_plan_a_confirm_list: List[str | None] = []
-        env_weekly_plan_a_exposure_cap_list: List[float | None] = []
-        env_weekly_plan_b_if_list: List[str | None] = []
-        env_weekly_plan_b_then_list: List[str | None] = []
-        env_weekly_plan_b_recover_if_list: List[str | None] = []
         env_weekly_plan_json_list: List[str | None] = []
         env_weekly_gate_action_list: List[str | None] = []
         board_statuses: List[str | None] = []
@@ -2372,6 +2332,7 @@ class MA5MA20OpenMonitorRunner:
         def _calc_signal_strength(
             row: pd.Series,
             price_now: float | None,
+            vol_ratio_val: float | None = None,
             board_status: str | None = None,
             idx_score: float | None = None,
         ) -> tuple[float | None, str]:
@@ -2381,7 +2342,8 @@ class MA5MA20OpenMonitorRunner:
             ma5 = _dec(row, "ma5")
             ma20 = _dec(row, "ma20")
             ma60 = _dec(row, "ma60")
-            vol_ratio_val = _vol_ratio_dec(row)
+            if vol_ratio_val is None:
+                vol_ratio_val = _vol_ratio_dec(row)
             atr14_val = _dec(row, "atr14")
             macd_hist_signal = _to_float(row.get("sig_macd_hist"))
             macd_hist_now = _to_float(row.get("live_macd_hist"))
@@ -2513,7 +2475,7 @@ class MA5MA20OpenMonitorRunner:
             ma5 = _dec(row, "ma5")
             ma60 = _dec(row, "ma60")
             ma250 = _dec(row, "ma250")
-            vol_ratio = _vol_ratio_dec(row)
+            vol_used = _vol_ratio_dec(row)
             macd_hist = _dec(row, "macd_hist")
             atr14 = _dec(row, "atr14")
 
@@ -2527,7 +2489,7 @@ class MA5MA20OpenMonitorRunner:
             gap = row.get("live_gap_pct")
             pct = row.get("live_pct_change")
             signal_day_pct = row.get("_signal_day_pct_change")
-            signal_reason = str(row.get("reason") or "")
+            signal_reason = str(row.get("sig_reason") or "")
             signal_age = row.get("signal_age")
             is_pullback = self._is_pullback_signal(signal_reason)
 
@@ -2541,9 +2503,9 @@ class MA5MA20OpenMonitorRunner:
                 else:
                     reason = "用最新价替代今开"
 
-            stop_ref = signal_stop_ref
+            trade_stop_ref = signal_stop_ref
             if entry_px is not None and atr14 is not None and atr14 > 0 and stop_atr_mult > 0:
-                stop_ref = entry_px - stop_atr_mult * atr14
+                trade_stop_ref = entry_px - stop_atr_mult * atr14
 
             price_now = _px_now(row)
 
@@ -2576,7 +2538,11 @@ class MA5MA20OpenMonitorRunner:
                 board_status = board_status.strip().lower()
 
             strength_score, strength_note = _calc_signal_strength(
-                row, price_now, board_status=board_status, idx_score=idx_score_float
+                row,
+                price_now,
+                vol_used,
+                board_status=board_status,
+                idx_score=idx_score_float,
             )
             prev_strength = prev_strength_map.get(str(row.get("code")))
             strength_delta = None
@@ -2586,9 +2552,11 @@ class MA5MA20OpenMonitorRunner:
 
             valid_days = pullback_valid_days if is_pullback else cross_valid_days
 
-            # comment: feat: 止损参考价取 stop_ref 与 signal_stop_ref 的更严格值 防止低开导致止损线被动放宽
+            # comment: feat: 止损参考价取 trade_stop_ref 与 signal_stop_ref 的更严格值 防止低开导致止损线被动放宽
             stop_loss_ref = None
-            stop_candidates = [v for v in (stop_ref, signal_stop_ref) if v is not None]
+            stop_candidates = [
+                v for v in (trade_stop_ref, signal_stop_ref) if v is not None
+            ]
             if stop_candidates:
                 stop_loss_ref = max(stop_candidates)
             structural_failure_reason = None
@@ -2615,8 +2583,8 @@ class MA5MA20OpenMonitorRunner:
                     structural_failure_reason = "盘中结构失效：MACD 柱子转负"
             elif price_now is not None and stop_loss_ref is not None and price_now <= stop_loss_ref:
                 stop_parts: list[str] = []
-                if stop_ref is not None:
-                    stop_parts.append(f"entry 止损 {stop_ref:.2f}")
+                if trade_stop_ref is not None:
+                    stop_parts.append(f"entry 止损 {trade_stop_ref:.2f}")
                 if signal_stop_ref is not None:
                     stop_parts.append(f"信号日止损 {signal_stop_ref:.2f}")
                 stop_detail = "，".join(stop_parts)
@@ -2638,8 +2606,8 @@ class MA5MA20OpenMonitorRunner:
                 if (
                     price_now is not None
                     and ma20 is not None
-                    and vol_ratio is not None
-                    and vol_ratio >= vol_threshold
+                    and vol_used is not None
+                    and vol_used >= vol_threshold
                     and price_now < ma20
                 ):
                     if is_pullback:
@@ -2690,7 +2658,7 @@ class MA5MA20OpenMonitorRunner:
                         and ma20 > ma60 > ma250
                     )
                     macd_ok = macd_hist is not None and macd_hist > 0
-                    vol_ok = vol_ratio is not None and vol_ratio >= vol_threshold
+                    vol_ok = vol_used is not None and vol_used >= vol_threshold
 
                     if not trend_ok:
                         status = "INVALID"
@@ -2953,9 +2921,6 @@ class MA5MA20OpenMonitorRunner:
             env_regimes.append(env_regime)
             env_position_hints.append(env_position_hint)
             env_index_scores.append(idx_score_float)
-            env_weekly_states.append(str(env_weekly_state) if env_weekly_state is not None else None)
-            env_weekly_position_hints.append(env_weekly_position_hint)
-            env_weekly_notes.append(str(env_weekly_note) if env_weekly_note is not None else None)
             board_statuses.append(board_status)
             board_ranks.append(board_rank)
             board_chg_pcts.append(board_chg)
@@ -2969,58 +2934,15 @@ class MA5MA20OpenMonitorRunner:
             asof_ma20_list.append(_to_float(ma20))
             asof_ma60_list.append(_to_float(ma60))
             asof_ma250_list.append(_to_float(ma250))
-            asof_vol_ratio_list.append(_to_float(vol_ratio))
+            asof_vol_ratio_list.append(
+                _to_float(_coalesce(row, "asof_vol_ratio", "sig_vol_ratio"))
+            )
             asof_macd_hist_list.append(_to_float(macd_hist))
 
             env_weekly_asof_trade_dates.append(env_weekly_asof_trade_date)
-            env_weekly_week_closed_list.append(
-                int(env_weekly_week_closed) if env_weekly_week_closed is not None else None
-            )
-            env_weekly_current_week_closed_list.append(
-                int(env_weekly_current_week_closed)
-                if env_weekly_current_week_closed is not None
-                else None
-            )
-            env_weekly_risk_scores.append(env_weekly_risk_score)
             env_weekly_risk_levels.append(env_weekly_risk_level)
-            env_weekly_confirms.append(
-                int(env_weekly_confirm) if env_weekly_confirm is not None else None
-            )
-            env_weekly_gating_enabled_list.append(1 if env_weekly_gating_enabled else 0)
-            env_weekly_plan_as.append(str(env_weekly_plan_a) if env_weekly_plan_a is not None else None)
-            env_weekly_plan_bs.append(str(env_weekly_plan_b) if env_weekly_plan_b is not None else None)
-            env_weekly_money_proxies.append(
-                str(env_weekly_money_proxy) if env_weekly_money_proxy is not None else None
-            )
-            env_weekly_tags_list.append(str(env_weekly_tags) if env_weekly_tags is not None else None)
             env_weekly_scene_list.append(
                 str(env_weekly_scene)[:32] if env_weekly_scene is not None else None
-            )
-            env_weekly_key_levels_list.append(
-                str(env_weekly_key_levels)[:255] if env_weekly_key_levels is not None else None
-            )
-            env_weekly_plan_a_if_list.append(
-                str(env_weekly_plan_a_if)[:255] if env_weekly_plan_a_if is not None else None
-            )
-            env_weekly_plan_a_then_list.append(
-                str(env_weekly_plan_a_then)[:64] if env_weekly_plan_a_then is not None else None
-            )
-            env_weekly_plan_a_confirm_list.append(
-                str(env_weekly_plan_a_confirm)[:128]
-                if env_weekly_plan_a_confirm is not None
-                else None
-            )
-            env_weekly_plan_a_exposure_cap_list.append(env_weekly_plan_a_exposure_cap)
-            env_weekly_plan_b_if_list.append(
-                str(env_weekly_plan_b_if)[:255] if env_weekly_plan_b_if is not None else None
-            )
-            env_weekly_plan_b_then_list.append(
-                str(env_weekly_plan_b_then)[:64] if env_weekly_plan_b_then is not None else None
-            )
-            env_weekly_plan_b_recover_if_list.append(
-                str(env_weekly_plan_b_recover_if)[:128]
-                if env_weekly_plan_b_recover_if is not None
-                else None
             )
             env_weekly_plan_json_list.append(
                 str(env_weekly_plan_json)[:2000]
@@ -3034,17 +2956,16 @@ class MA5MA20OpenMonitorRunner:
             statuses.append(status)
             status_reasons.append(status_reason)
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
-            stop_refs.append(_to_float(stop_ref))
+            trade_stop_refs.append(_to_float(trade_stop_ref))
             sig_stop_refs.append(_to_float(signal_stop_ref))
             valid_days_list.append(valid_days)
 
         merged["monitor_date"] = dt.date.today().isoformat()
-        merged["volume_unit"] = VOLUME_UNIT_SHARES
         merged["action"] = actions
         merged["action_reason"] = reasons
         merged["candidate_status"] = statuses
         merged["status_reason"] = status_reasons
-        merged["stop_ref"] = stop_refs
+        merged["trade_stop_ref"] = trade_stop_refs
         merged["sig_stop_ref"] = sig_stop_refs
         merged["valid_days"] = valid_days_list
         merged["entry_exposure_cap"] = entry_exposure_caps
@@ -3053,29 +2974,9 @@ class MA5MA20OpenMonitorRunner:
         merged["env_index_score"] = env_index_scores
         merged["env_regime"] = env_regimes
         merged["env_position_hint"] = env_position_hints
-        merged["env_weekly_state"] = env_weekly_states
-        merged["env_weekly_position_hint"] = env_weekly_position_hints
-        merged["env_weekly_note"] = env_weekly_notes
         merged["env_weekly_asof_trade_date"] = env_weekly_asof_trade_dates
-        merged["env_weekly_week_closed"] = env_weekly_week_closed_list
-        merged["env_weekly_current_week_closed"] = env_weekly_current_week_closed_list
-        merged["env_weekly_risk_score"] = env_weekly_risk_scores
         merged["env_weekly_risk_level"] = env_weekly_risk_levels
-        merged["env_weekly_confirm"] = env_weekly_confirms
-        merged["env_weekly_gating_enabled"] = env_weekly_gating_enabled_list
-        merged["env_weekly_plan_a"] = env_weekly_plan_as
-        merged["env_weekly_plan_b"] = env_weekly_plan_bs
-        merged["env_weekly_money_proxy"] = env_weekly_money_proxies
-        merged["env_weekly_tags"] = env_weekly_tags_list
         merged["env_weekly_scene"] = env_weekly_scene_list
-        merged["env_weekly_key_levels"] = env_weekly_key_levels_list
-        merged["env_weekly_plan_a_if"] = env_weekly_plan_a_if_list
-        merged["env_weekly_plan_a_then"] = env_weekly_plan_a_then_list
-        merged["env_weekly_plan_a_confirm"] = env_weekly_plan_a_confirm_list
-        merged["env_weekly_plan_a_exposure_cap"] = env_weekly_plan_a_exposure_cap_list
-        merged["env_weekly_plan_b_if"] = env_weekly_plan_b_if_list
-        merged["env_weekly_plan_b_then"] = env_weekly_plan_b_then_list
-        merged["env_weekly_plan_b_recover_if"] = env_weekly_plan_b_recover_if_list
         merged["env_weekly_plan_json"] = env_weekly_plan_json_list
         merged["env_weekly_gate_action"] = env_weekly_gate_action_list
         merged["board_status"] = board_statuses
@@ -3087,7 +2988,12 @@ class MA5MA20OpenMonitorRunner:
         merged["strength_note"] = strength_notes
         merged["signal_kind"] = signal_kinds
 
-        merged["asof_trade_date"] = latest_trade_date
+        def _resolve_asof_trade_date(row: pd.Series) -> str | None:
+            has_latest = bool(row.get("_has_latest_snapshot"))
+            sig_date_val = str(row.get("sig_date") or "").strip() or None
+            return latest_trade_date if has_latest else sig_date_val
+
+        merged["asof_trade_date"] = merged.apply(_resolve_asof_trade_date, axis=1)
         merged["asof_ma5"] = asof_ma5_list
         merged["asof_ma20"] = asof_ma20_list
         merged["asof_ma60"] = asof_ma60_list
@@ -3128,7 +3034,6 @@ class MA5MA20OpenMonitorRunner:
             "code",
             "name",
             "asof_trade_date",
-            "volume_unit",
             "avg_volume_20",
             "live_open",
             "live_high",
@@ -3139,7 +3044,6 @@ class MA5MA20OpenMonitorRunner:
             "live_gap_pct",
             "live_pct_change",
             "live_intraday_vol_ratio",
-            "live_checked_at",
             "sig_close",
             "sig_ma5",
             "sig_ma20",
@@ -3158,36 +3062,16 @@ class MA5MA20OpenMonitorRunner:
             "asof_macd_hist",
             "asof_atr14",
             "asof_stop_ref",
-            "kdj_k",
-            "kdj_d",
-            "stop_ref",
+            "sig_kdj_k",
+            "sig_kdj_d",
+            "trade_stop_ref",
             "entry_exposure_cap",
             "env_index_score",
             "env_regime",
             "env_position_hint",
-            "env_weekly_state",
-            "env_weekly_position_hint",
-            "env_weekly_note",
             "env_weekly_asof_trade_date",
-            "env_weekly_week_closed",
-            "env_weekly_current_week_closed",
-            "env_weekly_risk_score",
             "env_weekly_risk_level",
-            "env_weekly_confirm",
-            "env_weekly_gating_enabled",
-            "env_weekly_plan_a",
-            "env_weekly_plan_b",
-            "env_weekly_money_proxy",
-            "env_weekly_tags",
             "env_weekly_scene",
-            "env_weekly_key_levels",
-            "env_weekly_plan_a_if",
-            "env_weekly_plan_a_then",
-            "env_weekly_plan_a_confirm",
-            "env_weekly_plan_a_exposure_cap",
-            "env_weekly_plan_b_if",
-            "env_weekly_plan_b_then",
-            "env_weekly_plan_b_recover_if",
             "env_weekly_plan_json",
             "env_weekly_gate_action",
             "industry",
@@ -3203,8 +3087,8 @@ class MA5MA20OpenMonitorRunner:
             "risk_tag",
             "risk_note",
             "signal_kind",
-            "signal",
-            "reason",
+            "sig_signal",
+            "sig_reason",
             "candidate_status",
             "status_reason",
             "action",
@@ -3232,6 +3116,7 @@ class MA5MA20OpenMonitorRunner:
 
         monitor_date = str(df.iloc[0].get("monitor_date") or "").strip()
         codes = df["code"].dropna().astype(str).unique().tolist()
+        table_exists = self._table_exists(table)
 
         for col in ["signal_strength", "strength_delta"]:
             if col in df.columns:
@@ -3243,7 +3128,13 @@ class MA5MA20OpenMonitorRunner:
             self._calc_dedupe_bucket(dt.datetime.now())
         )
 
-        for col in ["risk_tag", "risk_note", "reason", "action_reason", "status_reason"]:
+        for col in [
+            "risk_tag",
+            "risk_note",
+            "sig_reason",
+            "action_reason",
+            "status_reason",
+        ]:
             if col in df.columns:
                 df[col] = (
                     df[col]
@@ -3252,18 +3143,18 @@ class MA5MA20OpenMonitorRunner:
                     .str.slice(0, 250)
                 )
 
-        if self._table_exists(table):
+        if table_exists:
             self._ensure_snapshot_schema(table)
             self._ensure_strength_schema(table)
             self._ensure_monitor_columns(table)
 
         df["snapshot_hash"] = df.apply(lambda row: make_snapshot_hash(row.to_dict()), axis=1)
         df = df.drop_duplicates(
-            subset=["monitor_date", "sig_date", "code", "dedupe_bucket", "snapshot_hash"]
+            subset=["monitor_date", "sig_date", "code", "dedupe_bucket"]
         )
 
         # 增量模式：不删除旧记录，保留每次运行的历史快照（checked_at 会区分）
-        if (not self.params.incremental_write) and monitor_date and codes and self._table_exists(table):
+        if (not self.params.incremental_write) and monitor_date and codes and table_exists:
             delete_stmt = text(
                 "DELETE FROM `{table}` WHERE `monitor_date` = :d AND `code` IN :codes".format(
                     table=table
@@ -3275,29 +3166,21 @@ class MA5MA20OpenMonitorRunner:
             except Exception as exc:  # noqa: BLE001
                 self.logger.warning("开盘监测表去重删除失败，将直接追加：%s", exc)
 
-        if self._table_exists(table):
-            bucket = str(df["dedupe_bucket"].iloc[0] or "").strip()
-            existing_keys = self._load_existing_snapshot_keys(
-                table, monitor_date, codes, bucket
+        if table_exists and monitor_date and codes:
+            deleted_total = 0
+            buckets = (
+                df["dedupe_bucket"].dropna().astype(str).unique().tolist()
+                if "dedupe_bucket" in df.columns
+                else []
             )
-            if existing_keys:
-                before = len(df)
-                df = df[
-                    ~df.apply(
-                        lambda row: (
-                            str(row.get("monitor_date") or "").strip(),
-                            str(row.get("date") or "").strip(),
-                            str(row.get("code") or "").strip(),
-                            str(row.get("dedupe_bucket") or "").strip(),
-                            str(row.get("snapshot_hash") or "").strip(),
-                        )
-                        in existing_keys,
-                        axis=1,
-                    )
-                ]
-                dropped = before - len(df)
-                if dropped > 0:
-                    self.logger.info("检测到 %s 条完全相同快照，已跳过重复写入。", dropped)
+            for bucket in buckets:
+                if not bucket:
+                    continue
+                deleted_total += self._delete_existing_bucket_rows(
+                    table, monitor_date, bucket, codes
+                )
+            if deleted_total > 0:
+                self.logger.info("检测到同 bucket 旧快照：已覆盖删除 %s 条。", deleted_total)
 
         if df.empty:
             self.logger.info("本次开盘监测结果全部为重复快照，跳过写入。")
