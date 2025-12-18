@@ -201,6 +201,9 @@ class OpenMonitorParams:
     interval_minutes: int = 5
     dedupe_bucket_minutes: int = 5
 
+    # 环境快照表：存储周线计划等“批次级别”信息，避免在每条标的记录里重复。
+    env_snapshot_table: str = "strategy_ma5_ma20_open_monitor_env"
+
     # 同一批次内同一 code 只保留“最新 date（信号日）”那条 BUY 信号。
     # 目的：避免同一批次出现重复 code（例如同一只股票在 12-09 与 12-11 都触发 BUY）。
     unique_code_latest_date_only: bool = True
@@ -334,6 +337,10 @@ class OpenMonitorParams:
             unique_code_latest_date_only=_get_bool(
                 "unique_code_latest_date_only", cls.unique_code_latest_date_only
             ),
+            env_snapshot_table=str(
+                sec.get("env_snapshot_table", cls.env_snapshot_table)
+            ).strip()
+            or cls.env_snapshot_table,
         )
 
 
@@ -978,33 +985,151 @@ class MA5MA20OpenMonitorRunner:
         self._ensure_column(table, "strength_trend", "VARCHAR(16) NULL")
         self._ensure_column(table, "strength_note", "VARCHAR(512) NULL")
 
-        self._ensure_indexable_columns(table)
+    def _ensure_env_snapshot_schema(self, table: str) -> None:
+        if not table:
+            return
 
-        index_name = "idx_open_monitor_strength_time"
+        if not self._table_exists(table):
+            ddl = text(
+                f"""
+                CREATE TABLE `{table}` (
+                    `monitor_date` VARCHAR(10) NOT NULL,
+                    `dedupe_bucket` VARCHAR(32) NOT NULL,
+                    `checked_at` DATETIME NULL,
+                    `env_weekly_asof_trade_date` VARCHAR(10) NULL,
+                    `env_weekly_risk_level` VARCHAR(16) NULL,
+                    `env_weekly_scene` VARCHAR(32) NULL,
+                    `env_weekly_gate_action` VARCHAR(16) NULL,
+                    `env_weekly_plan_json` TEXT NULL,
+                    `env_weekly_plan_a` VARCHAR(255) NULL,
+                    `env_weekly_plan_b` VARCHAR(255) NULL,
+                    `env_weekly_plan_a_exposure_cap` DOUBLE NULL,
+                    `env_weekly_bias` VARCHAR(16) NULL,
+                    `env_weekly_status` VARCHAR(32) NULL,
+                    `env_weekly_tags` VARCHAR(255) NULL,
+                    `env_weekly_money_proxy` VARCHAR(255) NULL,
+                    `env_weekly_note` VARCHAR(255) NULL,
+                    `env_regime` VARCHAR(32) NULL,
+                    `env_position_hint` DOUBLE NULL,
+                    PRIMARY KEY (`monitor_date`, `dedupe_bucket`)
+                )
+                """
+            )
+            try:
+                with self.db_writer.engine.begin() as conn:
+                    conn.execute(ddl)
+                self.logger.info("已创建环境快照表 %s。", table)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("创建环境快照表 %s 失败：%s", table, exc)
+                return
+
+        self._ensure_datetime_column(table, "checked_at")
+        for col, ddl in {
+            "env_weekly_plan_a": "VARCHAR(255)",
+            "env_weekly_plan_b": "VARCHAR(255)",
+            "env_weekly_plan_a_exposure_cap": "DOUBLE",
+            "env_weekly_tags": "VARCHAR(255)",
+            "env_weekly_money_proxy": "VARCHAR(255)",
+            "env_weekly_note": "VARCHAR(255)",
+            "env_regime": "VARCHAR(32)",
+            "env_position_hint": "DOUBLE",
+        }.items():
+            self._ensure_column(table, col, f"{ddl} NULL")
+
+        index_name = "ux_env_snapshot_bucket"
         if not self._index_exists(table, index_name):
             try:
                 with self.db_writer.engine.begin() as conn:
                     conn.execute(
                         text(
-                            f"CREATE INDEX `{index_name}` ON `{table}` (`monitor_date`, `code`, `checked_at`)"
+                            f"""
+                            CREATE UNIQUE INDEX `{index_name}`
+                            ON `{table}` (`monitor_date`, `dedupe_bucket`)
+                            """
                         )
                     )
-                self.logger.info("表 %s 已新增索引 %s 加速强度历史查询。", table, index_name)
+                self.logger.info("表 %s 已创建唯一索引 %s。", table, index_name)
             except Exception as exc:  # noqa: BLE001
-                self.logger.warning("创建索引 %s 失败：%s", index_name, exc)
+                self.logger.warning("创建环境快照唯一索引失败：%s", exc)
 
-        code_time_index = "idx_open_monitor_code_time"
-        if not self._index_exists(table, code_time_index):
-            try:
-                with self.db_writer.engine.begin() as conn:
-                    conn.execute(
-                        text(
-                            f"CREATE INDEX `{code_time_index}` ON `{table}` (`code`, `checked_at`)"
-                        )
-                    )
-                self.logger.info("表 %s 已新增索引 %s 以优化跨日强度查询。", table, code_time_index)
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning("创建索引 %s 失败：%s", code_time_index, exc)
+    def _delete_existing_env_snapshot(self, table: str, monitor_date: str, bucket: str) -> None:
+        if not (table and monitor_date and bucket and self._table_exists(table)):
+            return
+
+        stmt = text(
+            f"DELETE FROM `{table}` WHERE `monitor_date` = :d AND `dedupe_bucket` = :b"
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                res = conn.execute(stmt, {"d": monitor_date, "b": bucket})
+            if getattr(res, "rowcount", 0) and res.rowcount > 0:
+                self.logger.info("环境快照表 %s 旧记录已删除：%s 条。", table, res.rowcount)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("删除环境快照旧记录失败：%s", exc)
+
+    def _persist_env_snapshot(
+        self,
+        env_context: dict[str, Any] | None,
+        monitor_date: str,
+        dedupe_bucket: str,
+        checked_at: dt.datetime,
+        env_weekly_gate_action: str | None,
+    ) -> None:
+        if not env_context:
+            return
+
+        table = self.params.env_snapshot_table
+        if not table:
+            return
+
+        payload = {}
+        weekly_scenario = (
+            env_context.get("weekly_scenario") if isinstance(env_context, dict) else {}
+        )
+        if not isinstance(weekly_scenario, dict):
+            weekly_scenario = {}
+
+        def _get_env(key: str) -> Any:  # noqa: ANN401
+            if isinstance(env_context, dict) and key in env_context:
+                return env_context.get(key)
+            return weekly_scenario.get(key)
+
+        payload["monitor_date"] = monitor_date
+        payload["dedupe_bucket"] = dedupe_bucket
+        payload["checked_at"] = checked_at
+        payload["env_weekly_asof_trade_date"] = _get_env("weekly_asof_trade_date")
+        payload["env_weekly_risk_level"] = _get_env("weekly_risk_level")
+        payload["env_weekly_scene"] = _get_env("weekly_scene_code")
+        payload["env_weekly_gate_action"] = env_weekly_gate_action
+        payload["env_weekly_plan_json"] = _get_env("weekly_plan_json")
+        payload["env_weekly_plan_a"] = _get_env("weekly_plan_a")
+        payload["env_weekly_plan_b"] = _get_env("weekly_plan_b")
+        payload["env_weekly_plan_a_exposure_cap"] = _to_float(
+            _get_env("weekly_plan_a_exposure_cap")
+        )
+        payload["env_weekly_bias"] = _get_env("weekly_bias")
+        payload["env_weekly_status"] = _get_env("weekly_status")
+        payload["env_weekly_tags"] = _get_env("weekly_tags")
+        payload["env_weekly_money_proxy"] = _get_env("weekly_money_proxy")
+        payload["env_weekly_note"] = _get_env("weekly_note")
+        payload["env_regime"] = _get_env("regime")
+        payload["env_position_hint"] = _to_float(_get_env("position_hint"))
+
+        df = pd.DataFrame([payload])
+
+        self._ensure_env_snapshot_schema(table)
+        self._delete_existing_env_snapshot(table, monitor_date, dedupe_bucket)
+
+        try:
+            self.db_writer.write_dataframe(df, table, if_exists="append")
+            self.logger.info(
+                "环境快照已写入表 %s（monitor_date=%s, dedupe_bucket=%s）",
+                table,
+                monitor_date,
+                dedupe_bucket,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("写入环境快照失败：%s", exc)
 
     def _ensure_monitor_columns(self, table: str) -> None:
         if not table or not self._table_exists(table):
@@ -1018,7 +1143,6 @@ class MA5MA20OpenMonitorRunner:
             "env_weekly_risk_level": "VARCHAR(16)",
             "env_weekly_scene": "VARCHAR(32)",
             "env_weekly_gate_action": "VARCHAR(16)",
-            "env_weekly_plan_json": "TEXT",
             "risk_tag": "VARCHAR(255)",
             "risk_note": "VARCHAR(255)",
             "entry_exposure_cap": "DOUBLE",
@@ -1046,6 +1170,7 @@ class MA5MA20OpenMonitorRunner:
             "asof_atr14": "DOUBLE",
             "asof_stop_ref": "DOUBLE",
             "trade_stop_ref": "DOUBLE",
+            "stop_loss_ref": "DOUBLE",
             "sig_kdj_k": "DOUBLE",
             "sig_kdj_d": "DOUBLE",
         }
@@ -1059,6 +1184,34 @@ class MA5MA20OpenMonitorRunner:
                     self.logger.info("表 %s 已新增列 %s", table, col)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.warning("为表 %s 添加列 %s 失败：%s", table, col, exc)
+
+        self._ensure_indexable_columns(table)
+
+        index_name = "idx_open_monitor_strength_time"
+        if not self._index_exists(table, index_name):
+            try:
+                with self.db_writer.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"CREATE INDEX `{index_name}` ON `{table}` (`monitor_date`, `code`, `checked_at`)"
+                        )
+                    )
+                self.logger.info("表 %s 已新增索引 %s 加速强度历史查询。", table, index_name)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("创建索引 %s 失败：%s", index_name, exc)
+
+        code_time_index = "idx_open_monitor_code_time"
+        if not self._index_exists(table, code_time_index):
+            try:
+                with self.db_writer.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"CREATE INDEX `{code_time_index}` ON `{table}` (`code`, `checked_at`)"
+                        )
+                    )
+                self.logger.info("表 %s 已新增索引 %s 以优化跨日强度查询。", table, code_time_index)
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning("创建索引 %s 失败：%s", code_time_index, exc)
 
     def _load_existing_snapshot_keys(
         self, table: str, monitor_date: str, codes: List[str], dedupe_bucket: str
@@ -2025,6 +2178,8 @@ class MA5MA20OpenMonitorRunner:
         latest_snapshots: pd.DataFrame,
         latest_trade_date: str,
         env_context: dict[str, Any] | None = None,
+        *,
+        checked_at: dt.datetime | None = None,
     ) -> pd.DataFrame:
         if signals.empty:
             return pd.DataFrame()
@@ -2043,7 +2198,7 @@ class MA5MA20OpenMonitorRunner:
             "prev_close": "prev_close",
         }
         q = q.rename(columns={k: v for k, v in live_rename_map.items() if k in q.columns})
-        checked_at_ts = dt.datetime.now()
+        checked_at_ts = checked_at or dt.datetime.now()
         dedupe_bucket = self._calc_dedupe_bucket(checked_at_ts)
         avg_volume_map = self._load_avg_volume(
             latest_trade_date, signals["code"].dropna().astype(str).unique().tolist()
@@ -2116,7 +2271,6 @@ class MA5MA20OpenMonitorRunner:
         env_weekly_plan_b = None
         env_weekly_scene = None
         env_weekly_plan_a_exposure_cap = None
-        env_weekly_plan_json = None
         env_weekly_bias = None
         env_weekly_status = None
         if isinstance(env_context, dict):
@@ -2129,7 +2283,6 @@ class MA5MA20OpenMonitorRunner:
             env_weekly_plan_a_exposure_cap = _to_float(
                 env_context.get("weekly_plan_a_exposure_cap")
             )
-            env_weekly_plan_json = env_context.get("weekly_plan_json")
             env_weekly_bias = env_context.get("weekly_bias")
             env_weekly_status = env_context.get("weekly_status")
         index_score = None
@@ -2278,6 +2431,7 @@ class MA5MA20OpenMonitorRunner:
         signal_kinds: List[str] = []
         trade_stop_refs: List[float | None] = []
         sig_stop_refs: List[float | None] = []
+        stop_loss_refs: List[float | None] = []
         valid_days_list: List[int | None] = []
         entry_exposure_caps: List[float | None] = []
         env_index_scores: List[float | None] = []
@@ -2286,7 +2440,6 @@ class MA5MA20OpenMonitorRunner:
         env_weekly_asof_trade_dates: List[str | None] = []
         env_weekly_risk_levels: List[str | None] = []
         env_weekly_scene_list: List[str | None] = []
-        env_weekly_plan_json_list: List[str | None] = []
         env_weekly_gate_action_list: List[str | None] = []
         board_statuses: List[str | None] = []
         board_ranks: List[float | None] = []
@@ -2944,11 +3097,6 @@ class MA5MA20OpenMonitorRunner:
             env_weekly_scene_list.append(
                 str(env_weekly_scene)[:32] if env_weekly_scene is not None else None
             )
-            env_weekly_plan_json_list.append(
-                str(env_weekly_plan_json)[:2000]
-                if env_weekly_plan_json is not None
-                else None
-            )
             env_weekly_gate_action_list.append(weekly_gate_action)
 
             actions.append(action)
@@ -2958,6 +3106,7 @@ class MA5MA20OpenMonitorRunner:
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
             trade_stop_refs.append(_to_float(trade_stop_ref))
             sig_stop_refs.append(_to_float(signal_stop_ref))
+            stop_loss_refs.append(_to_float(stop_loss_ref))
             valid_days_list.append(valid_days)
 
         merged["monitor_date"] = dt.date.today().isoformat()
@@ -2967,6 +3116,7 @@ class MA5MA20OpenMonitorRunner:
         merged["status_reason"] = status_reasons
         merged["trade_stop_ref"] = trade_stop_refs
         merged["sig_stop_ref"] = sig_stop_refs
+        merged["stop_loss_ref"] = stop_loss_refs
         merged["valid_days"] = valid_days_list
         merged["entry_exposure_cap"] = entry_exposure_caps
         merged["checked_at"] = checked_at_ts
@@ -2977,7 +3127,6 @@ class MA5MA20OpenMonitorRunner:
         merged["env_weekly_asof_trade_date"] = env_weekly_asof_trade_dates
         merged["env_weekly_risk_level"] = env_weekly_risk_levels
         merged["env_weekly_scene"] = env_weekly_scene_list
-        merged["env_weekly_plan_json"] = env_weekly_plan_json_list
         merged["env_weekly_gate_action"] = env_weekly_gate_action_list
         merged["board_status"] = board_statuses
         merged["board_rank"] = board_ranks
@@ -3053,6 +3202,7 @@ class MA5MA20OpenMonitorRunner:
             "sig_macd_hist",
             "sig_atr14",
             "sig_stop_ref",
+            "stop_loss_ref",
             "asof_close",
             "asof_ma5",
             "asof_ma20",
@@ -3072,7 +3222,6 @@ class MA5MA20OpenMonitorRunner:
             "env_weekly_asof_trade_date",
             "env_weekly_risk_level",
             "env_weekly_scene",
-            "env_weekly_plan_json",
             "env_weekly_gate_action",
             "industry",
             "board_name",
@@ -3258,6 +3407,8 @@ class MA5MA20OpenMonitorRunner:
         if force and (not self.params.enabled):
             self.logger.info("open_monitor.enabled=false，但 force=True，仍将执行开盘监测。")
 
+        checked_at = dt.datetime.now()
+
         latest_trade_date, signal_dates, signals = self._load_recent_buy_signals()
         if not latest_trade_date or signals.empty:
             return
@@ -3312,8 +3463,29 @@ class MA5MA20OpenMonitorRunner:
                 str(plan_b_recover or "")[:120],
             )
         result = self._evaluate(
-            signals, quotes, latest_snapshots, latest_trade_date, env_context
+            signals,
+            quotes,
+            latest_snapshots,
+            latest_trade_date,
+            env_context,
+            checked_at=checked_at,
         )
+
+        dedupe_bucket = self._calc_dedupe_bucket(checked_at)
+        monitor_date = dt.date.today().isoformat()
+        weekly_gate_action = None
+        if not result.empty and "dedupe_bucket" in result.columns:
+            dedupe_bucket_val = str(result.iloc[0].get("dedupe_bucket") or "").strip()
+            dedupe_bucket = dedupe_bucket_val or dedupe_bucket
+        if not result.empty and "env_weekly_gate_action" in result.columns:
+            gate_series = result["env_weekly_gate_action"].dropna().astype(str)
+            if not gate_series.empty:
+                weekly_gate_action = gate_series.mode().iloc[0]
+
+        self._persist_env_snapshot(
+            env_context, monitor_date, dedupe_bucket, checked_at, weekly_gate_action
+        )
+
         if result.empty:
             return
 
