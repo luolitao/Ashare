@@ -148,7 +148,7 @@ class WeeklyEnvironmentBuilder:
             return {"score": None, "detail": {}, "regime": None, "position_hint": None}
 
         end_date = dt.datetime.strptime(latest_trade_date, "%Y-%m-%d").date()
-        start_date = (end_date - dt.timedelta(days=200)).isoformat()
+        start_date = (end_date - dt.timedelta(days=600)).isoformat()
 
         stmt = text(
             """
@@ -397,6 +397,22 @@ class WeeklyEnvironmentBuilder:
                     if key_norm:
                         board_map[key_norm] = payload
 
+        position_hint_raw = None
+        weekly_cap = None
+        if isinstance(index_trend, dict):
+            position_hint_raw = to_float(index_trend.get("position_hint"))
+        if isinstance(weekly_scenario, dict):
+            weekly_cap = to_float(weekly_scenario.get("weekly_plan_a_exposure_cap"))
+        gating_enabled = bool(weekly_scenario.get("weekly_gating_enabled", False))
+
+        effective_position_hint = position_hint_raw
+        if gating_enabled and weekly_cap is not None:
+            effective_position_hint = (
+                weekly_cap
+                if position_hint_raw is None
+                else min(position_hint_raw, weekly_cap)
+            )
+
         env_context = {
             "index": index_trend,
             "weekly": weekly_channel,
@@ -404,7 +420,9 @@ class WeeklyEnvironmentBuilder:
             "weekly_windows_by_code": weekly_channel.get("weekly_windows_by_code"),
             "boards": board_map,
             "regime": index_trend.get("regime"),
-            "position_hint": index_trend.get("position_hint"),
+            "position_hint": effective_position_hint,
+            "position_hint_raw": position_hint_raw,
+            "effective_position_hint": effective_position_hint,
             "weekly_state": weekly_channel.get("state") if isinstance(weekly_channel, dict) else None,
             "weekly_position_hint": weekly_channel.get("position_hint") if isinstance(weekly_channel, dict) else None,
             "weekly_note": weekly_channel.get("note") if isinstance(weekly_channel, dict) else None,
@@ -415,7 +433,7 @@ class WeeklyEnvironmentBuilder:
             "weekly_risk_score": weekly_scenario.get("weekly_risk_score"),
             "weekly_risk_level": weekly_scenario.get("weekly_risk_level"),
             "weekly_confirm": weekly_scenario.get("weekly_confirm"),
-            "weekly_gating_enabled": weekly_scenario.get("weekly_gating_enabled", False),
+            "weekly_gating_enabled": gating_enabled,
             "weekly_plan_a": weekly_scenario.get("weekly_plan_a"),
             "weekly_plan_b": weekly_scenario.get("weekly_plan_b"),
             "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),

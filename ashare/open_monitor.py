@@ -916,6 +916,7 @@ class MA5MA20OpenMonitorRunner:
                     `env_weekly_note` VARCHAR(255) NULL,
                     `env_regime` VARCHAR(32) NULL,
                     `env_position_hint` DOUBLE NULL,
+                    `env_position_hint_raw` DOUBLE NULL,
                     PRIMARY KEY (`monitor_date`, `dedupe_bucket`)
                 )
                 """
@@ -938,6 +939,7 @@ class MA5MA20OpenMonitorRunner:
             "env_weekly_note": "VARCHAR(255)",
             "env_regime": "VARCHAR(32)",
             "env_position_hint": "DOUBLE",
+            "env_position_hint_raw": "DOUBLE",
             "env_weekly_gating_enabled": "TINYINT(1)",
             "env_weekly_gate_policy": "VARCHAR(16)",
         }.items():
@@ -1013,7 +1015,11 @@ class MA5MA20OpenMonitorRunner:
         payload["env_weekly_money_proxy"] = _get_env("weekly_money_proxy")
         payload["env_weekly_note"] = _get_env("weekly_note")
         payload["env_regime"] = _get_env("regime")
-        payload["env_position_hint"] = _to_float(_get_env("position_hint"))
+        env_position_hint = _to_float(_get_env("effective_position_hint"))
+        if env_position_hint is None:
+            env_position_hint = _to_float(_get_env("position_hint"))
+        payload["env_position_hint"] = env_position_hint
+        payload["env_position_hint_raw"] = _to_float(_get_env("position_hint_raw"))
 
         self._ensure_env_snapshot_schema(table)
         columns = list(payload.keys())
@@ -2100,9 +2106,15 @@ class MA5MA20OpenMonitorRunner:
 
         board_map: dict[str, Any] = env_context.get("boards", {}) if isinstance(env_context, dict) else {}
         env_regime = env_context.get("regime") if isinstance(env_context, dict) else None
+        env_position_hint_raw = None
         env_position_hint = None
         if isinstance(env_context, dict):
-            env_position_hint = _to_float(env_context.get("position_hint"))
+            env_position_hint_raw = _to_float(env_context.get("position_hint_raw"))
+            env_position_hint = _to_float(
+                env_context.get("effective_position_hint")
+            )
+            if env_position_hint is None:
+                env_position_hint = _to_float(env_context.get("position_hint"))
 
         env_weekly_asof_trade_date = None
         env_weekly_risk_level = None
@@ -2126,14 +2138,14 @@ class MA5MA20OpenMonitorRunner:
             env_weekly_bias = env_context.get("weekly_bias")
             env_weekly_status = env_context.get("weekly_status")
 
-        if (
-            env_weekly_gating_enabled
-            and env_weekly_plan_a_exposure_cap is not None
-            and env_position_hint is not None
-        ):
-            env_position_hint = min(env_position_hint, env_weekly_plan_a_exposure_cap)
-        elif env_weekly_gating_enabled and env_weekly_plan_a_exposure_cap is not None:
-            env_position_hint = env_weekly_plan_a_exposure_cap
+        if env_position_hint is None:
+            env_position_hint = env_position_hint_raw
+
+        if env_weekly_gating_enabled and env_weekly_plan_a_exposure_cap is not None:
+            if env_position_hint is None:
+                env_position_hint = env_weekly_plan_a_exposure_cap
+            else:
+                env_position_hint = min(env_position_hint, env_weekly_plan_a_exposure_cap)
         index_score = None
         if isinstance(env_context, dict):
             index_section = env_context.get("index", {}) if isinstance(env_context.get("index"), dict) else {}
