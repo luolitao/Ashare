@@ -1119,7 +1119,7 @@ class MA5MA20OpenMonitorRunner:
             self.logger.warning("写入环境快照失败：%s", exc)
 
     def _load_env_snapshot_context(
-        self, monitor_date: str, dedupe_bucket: str
+        self, monitor_date: str, dedupe_bucket: str | None = None
     ) -> dict[str, Any] | None:
         table = self.params.env_snapshot_table
         if not (
@@ -1132,20 +1132,31 @@ class MA5MA20OpenMonitorRunner:
 
         self._ensure_env_snapshot_schema(table)
 
-        stmt = text(
-            f"""
-            SELECT * FROM `{table}`
-            WHERE `monitor_date` = :d AND `dedupe_bucket` = :b
-            ORDER BY `checked_at` DESC
-            LIMIT 1
-            """
-        )
+        def _load_latest(match_bucket: bool) -> pd.DataFrame:
+            if match_bucket and not dedupe_bucket:
+                return pd.DataFrame()
+
+            bucket_clause = "`dedupe_bucket` = :b AND" if match_bucket else ""
+            stmt = text(
+                f"""
+                SELECT * FROM `{table}`
+                WHERE {bucket_clause} `monitor_date` = :d
+                ORDER BY `checked_at` DESC
+                LIMIT 1
+                """
+            )
+
+            params: dict[str, Any] = {"d": monitor_date}
+            if match_bucket:
+                params["b"] = dedupe_bucket
+
+            with self.db_writer.engine.begin() as conn:
+                return pd.read_sql_query(stmt, conn, params=params)
 
         try:
-            with self.db_writer.engine.begin() as conn:
-                df = pd.read_sql_query(
-                    stmt, conn, params={"d": monitor_date, "b": dedupe_bucket}
-                )
+            df = _load_latest(match_bucket=True)
+            if df.empty:
+                df = _load_latest(match_bucket=False)
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取环境快照失败：%s", exc)
             return None
@@ -2100,6 +2111,38 @@ class MA5MA20OpenMonitorRunner:
         ]:
             if isinstance(index_trend, dict) and key in index_trend:
                 env_context[key] = index_trend[key]
+
+        return env_context
+
+    def build_and_persist_env_snapshot(
+        self,
+        latest_trade_date: str,
+        *,
+        monitor_date: str | None = None,
+        dedupe_bucket: str | None = None,
+        checked_at: dt.datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """计算周线环境并写入快照表（供低频任务调用）。"""
+
+        if checked_at is None:
+            checked_at = dt.datetime.now()
+        if monitor_date is None:
+            monitor_date = checked_at.date().isoformat()
+        if dedupe_bucket is None:
+            dedupe_bucket = self._calc_dedupe_bucket(checked_at)
+
+        env_context = self._build_environment_context(latest_trade_date)
+        weekly_gate_policy = self._resolve_env_weekly_gate_policy(env_context)
+        if isinstance(env_context, dict):
+            env_context["weekly_gate_policy"] = weekly_gate_policy
+
+        self._persist_env_snapshot(
+            env_context,
+            monitor_date,
+            dedupe_bucket,
+            checked_at,
+            weekly_gate_policy,
+        )
 
         return env_context
 
@@ -3543,7 +3586,20 @@ class MA5MA20OpenMonitorRunner:
                 dedupe_bucket,
             )
         else:
-            env_context = self._build_environment_context(latest_trade_date)
+            env_context = self._load_env_snapshot_context(monitor_date, None)
+            if env_context:
+                self.logger.info(
+                    "已加载当日最新环境快照（monitor_date=%s，未匹配 dedupe_bucket=%s）",
+                    monitor_date,
+                    dedupe_bucket,
+                )
+        if not env_context:
+            self.logger.warning(
+                "未找到环境快照（monitor_date=%s, dedupe_bucket=%s），请先运行 run_index_weekly_channel 产出环境。",
+                monitor_date,
+                dedupe_bucket,
+            )
+            return
         weekly_scenario = env_context.get("weekly_scenario", {}) if isinstance(env_context, dict) else {}
         if isinstance(weekly_scenario, dict):
             struct_tags = ",".join(weekly_scenario.get("weekly_structure_tags", []) or [])
