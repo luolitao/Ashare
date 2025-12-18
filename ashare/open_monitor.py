@@ -1830,8 +1830,10 @@ class MA5MA20OpenMonitorRunner:
             df["code"] = df["code"].astype(str)
         return df
 
-    def _load_board_spot_strength(self) -> pd.DataFrame:
-        return self.env_builder.load_board_spot_strength()
+    def _load_board_spot_strength(
+        self, latest_trade_date: str, checked_at: dt.datetime | None = None
+    ) -> pd.DataFrame:
+        return self.env_builder.load_board_spot_strength(latest_trade_date, checked_at)
 
     def _load_index_trend(self, latest_trade_date: str) -> dict[str, Any]:
         return self.env_builder.load_index_trend(latest_trade_date)
@@ -1844,8 +1846,10 @@ class MA5MA20OpenMonitorRunner:
     ) -> dict[str, Any]:
         return self.env_builder.build_weekly_scenario(weekly_payload, index_trend)
 
-    def _build_environment_context(self, latest_trade_date: str) -> dict[str, Any]:
-        return self.env_builder.build_environment_context(latest_trade_date)
+    def _build_environment_context(
+        self, latest_trade_date: str, *, checked_at: dt.datetime | None = None
+    ) -> dict[str, Any]:
+        return self.env_builder.build_environment_context(latest_trade_date, checked_at=checked_at)
 
     def build_and_persist_env_snapshot(
         self,
@@ -1864,7 +1868,9 @@ class MA5MA20OpenMonitorRunner:
         if dedupe_bucket is None:
             dedupe_bucket = self._calc_dedupe_bucket(checked_at)
 
-        env_context = self._build_environment_context(latest_trade_date)
+        env_context = self._build_environment_context(
+            latest_trade_date, checked_at=checked_at
+        )
         weekly_gate_policy = self._resolve_env_weekly_gate_policy(env_context)
         if isinstance(env_context, dict):
             env_context["weekly_gate_policy"] = weekly_gate_policy
@@ -2110,6 +2116,8 @@ class MA5MA20OpenMonitorRunner:
             out["asof_ma250"] = out.get("sig_ma250")
             out["asof_vol_ratio"] = out.get("sig_vol_ratio")
             out["asof_macd_hist"] = out.get("sig_macd_hist")
+            out["asof_atr14"] = out.get("sig_atr14")
+            out["asof_stop_ref"] = out.get("sig_stop_ref")
             out["asof_trade_date"] = out.get("sig_date")
             out["avg_volume_20"] = None
             out["action"] = "UNKNOWN"
@@ -2124,6 +2132,30 @@ class MA5MA20OpenMonitorRunner:
         merged = signals.merge(q, on="code", how="left", suffixes=("", "_q"))
 
         env_context = env_context or {}
+        if not env_context.get("index"):
+            env_context["index"] = self._load_index_trend(latest_trade_date)
+        if not env_context.get("boards"):
+            board_df = self._load_board_spot_strength(latest_trade_date, checked_at)
+            board_map: dict[str, Any] = {}
+            if not board_df.empty and "board_name" in board_df.columns:
+                total = len(board_df)
+                for _, row in board_df.iterrows():
+                    name = str(row.get("board_name") or "").strip()
+                    code = str(row.get("board_code") or "").strip()
+                    rank = _to_float(row.get("rank"))
+                    pct = _to_float(row.get("chg_pct"))
+                    status = "neutral"
+                    if total > 0 and rank:
+                        if rank <= max(1, int(total * 0.2)):
+                            status = "strong"
+                        elif rank >= max(1, int(total * 0.8)):
+                            status = "weak"
+                    payload = {"rank": rank, "chg_pct": pct, "status": status}
+                    for key in [name, code]:
+                        key_norm = str(key).strip()
+                        if key_norm:
+                            board_map[key_norm] = payload
+            env_context["boards"] = board_map
         industry_dim = self._load_stock_industry_dim()
         if not industry_dim.empty:
             rename_map = {}
@@ -2197,6 +2229,9 @@ class MA5MA20OpenMonitorRunner:
             rename_map = {c: f"asof_{c}" for c in snap.columns if c not in {"code"}}
             snap = snap.rename(columns=rename_map)
             merged = merged.merge(snap, on="code", how="left")
+
+        if "asof_close" in merged.columns and "sig_close" in merged.columns:
+            merged["asof_close"] = merged["asof_close"].fillna(merged.get("sig_close"))
 
         has_asof_cols = [c for c in ["asof_close", "asof_ma20"] if c in merged.columns]
         merged["_has_latest_snapshot"] = False
@@ -2356,6 +2391,8 @@ class MA5MA20OpenMonitorRunner:
         asof_ma250_list: List[float | None] = []
         asof_vol_ratio_list: List[float | None] = []
         asof_macd_hist_list: List[float | None] = []
+        asof_atr14_list: List[float | None] = []
+        asof_stop_ref_list: List[float | None] = []
 
         def _coalesce(row: pd.Series, *cols: str) -> float | None:
             for col in cols:
@@ -3056,6 +3093,8 @@ class MA5MA20OpenMonitorRunner:
                 _to_float(_coalesce(row, "asof_vol_ratio", "sig_vol_ratio"))
             )
             asof_macd_hist_list.append(_to_float(macd_hist))
+            asof_atr14_list.append(_to_float(atr14))
+            asof_stop_ref_list.append(_to_float(signal_stop_ref))
 
             env_weekly_asof_trade_dates.append(env_weekly_asof_trade_date)
             env_weekly_risk_levels.append(env_weekly_risk_level)
@@ -3114,6 +3153,8 @@ class MA5MA20OpenMonitorRunner:
         merged["asof_ma250"] = asof_ma250_list
         merged["asof_macd_hist"] = asof_macd_hist_list
         merged["asof_vol_ratio"] = asof_vol_ratio_list
+        merged["asof_atr14"] = asof_atr14_list
+        merged["asof_stop_ref"] = asof_stop_ref_list
         if "asof_close" not in merged.columns:
             merged["asof_close"] = merged.get("sig_close")
 
