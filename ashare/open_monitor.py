@@ -999,7 +999,7 @@ class MA5MA20OpenMonitorRunner:
                     `env_weekly_asof_trade_date` VARCHAR(10) NULL,
                     `env_weekly_risk_level` VARCHAR(16) NULL,
                     `env_weekly_scene` VARCHAR(32) NULL,
-                    `env_weekly_gate_action` VARCHAR(16) NULL,
+                    `env_weekly_gate_policy` VARCHAR(16) NULL,
                     `env_weekly_plan_json` TEXT NULL,
                     `env_weekly_plan_a` VARCHAR(255) NULL,
                     `env_weekly_plan_b` VARCHAR(255) NULL,
@@ -1035,23 +1035,9 @@ class MA5MA20OpenMonitorRunner:
             "env_regime": "VARCHAR(32)",
             "env_position_hint": "DOUBLE",
             "env_weekly_gating_enabled": "TINYINT(1)",
+            "env_weekly_gate_policy": "VARCHAR(16)",
         }.items():
             self._ensure_column(table, col, f"{ddl} NULL")
-
-    def _delete_existing_env_snapshot(self, table: str, monitor_date: str, bucket: str) -> None:
-        if not (table and monitor_date and bucket and self._table_exists(table)):
-            return
-
-        stmt = text(
-            f"DELETE FROM `{table}` WHERE `monitor_date` = :d AND `dedupe_bucket` = :b"
-        )
-        try:
-            with self.db_writer.engine.begin() as conn:
-                res = conn.execute(stmt, {"d": monitor_date, "b": bucket})
-            if getattr(res, "rowcount", 0) and res.rowcount > 0:
-                self.logger.info("环境快照表 %s 旧记录已删除：%s 条。", table, res.rowcount)
-        except Exception as exc:  # noqa: BLE001
-            self.logger.warning("删除环境快照旧记录失败：%s", exc)
 
     def _persist_env_snapshot(
         self,
@@ -1059,7 +1045,7 @@ class MA5MA20OpenMonitorRunner:
         monitor_date: str,
         dedupe_bucket: str,
         checked_at: dt.datetime,
-        env_weekly_gate_action: str | None,
+        env_weekly_gate_policy: str | None,
     ) -> None:
         if not env_context:
             return
@@ -1076,8 +1062,10 @@ class MA5MA20OpenMonitorRunner:
             weekly_scenario = {}
 
         def _get_env(key: str) -> Any:  # noqa: ANN401
-            if isinstance(env_context, dict) and key in env_context:
-                return env_context.get(key)
+            if isinstance(env_context, dict):
+                value = env_context.get(key, None)
+                if value not in (None, "", [], {}):
+                    return value
             return weekly_scenario.get(key)
 
         payload["monitor_date"] = monitor_date
@@ -1086,7 +1074,7 @@ class MA5MA20OpenMonitorRunner:
         payload["env_weekly_asof_trade_date"] = _get_env("weekly_asof_trade_date")
         payload["env_weekly_risk_level"] = _get_env("weekly_risk_level")
         payload["env_weekly_scene"] = _get_env("weekly_scene_code")
-        payload["env_weekly_gate_action"] = env_weekly_gate_action
+        payload["env_weekly_gate_policy"] = env_weekly_gate_policy
         payload["env_weekly_plan_json"] = _get_env("weekly_plan_json")
         payload["env_weekly_plan_a"] = _get_env("weekly_plan_a")
         payload["env_weekly_plan_b"] = _get_env("weekly_plan_b")
@@ -1130,14 +1118,114 @@ class MA5MA20OpenMonitorRunner:
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("写入环境快照失败：%s", exc)
 
+    def _load_env_snapshot_context(
+        self, monitor_date: str, dedupe_bucket: str
+    ) -> dict[str, Any] | None:
+        table = self.params.env_snapshot_table
+        if not (
+            table
+            and monitor_date
+            and dedupe_bucket
+            and self._table_exists(table)
+        ):
+            return None
+
+        self._ensure_env_snapshot_schema(table)
+
+        stmt = text(
+            f"""
+            SELECT * FROM `{table}`
+            WHERE `monitor_date` = :d AND `dedupe_bucket` = :b
+            ORDER BY `checked_at` DESC
+            LIMIT 1
+            """
+        )
+
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt, conn, params={"d": monitor_date, "b": dedupe_bucket}
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取环境快照失败：%s", exc)
+            return None
+
+        if df.empty:
+            return None
+
+        row = df.iloc[0]
+        weekly_scenario = {
+            "weekly_asof_trade_date": row.get("env_weekly_asof_trade_date"),
+            "weekly_risk_level": row.get("env_weekly_risk_level"),
+            "weekly_scene_code": row.get("env_weekly_scene"),
+            "weekly_plan_json": row.get("env_weekly_plan_json"),
+            "weekly_plan_a": row.get("env_weekly_plan_a"),
+            "weekly_plan_b": row.get("env_weekly_plan_b"),
+            "weekly_plan_a_exposure_cap": row.get("env_weekly_plan_a_exposure_cap"),
+            "weekly_bias": row.get("env_weekly_bias"),
+            "weekly_status": row.get("env_weekly_status"),
+            "weekly_gating_enabled": row.get("env_weekly_gating_enabled"),
+            "weekly_tags": row.get("env_weekly_tags"),
+            "weekly_money_proxy": row.get("env_weekly_money_proxy"),
+            "weekly_note": row.get("env_weekly_note"),
+        }
+
+        env_context: dict[str, Any] = {
+            "weekly_scenario": weekly_scenario,
+            "weekly_asof_trade_date": weekly_scenario.get("weekly_asof_trade_date"),
+            "weekly_risk_level": weekly_scenario.get("weekly_risk_level"),
+            "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),
+            "weekly_plan_json": weekly_scenario.get("weekly_plan_json"),
+            "weekly_plan_a": weekly_scenario.get("weekly_plan_a"),
+            "weekly_plan_b": weekly_scenario.get("weekly_plan_b"),
+            "weekly_plan_a_exposure_cap": weekly_scenario.get(
+                "weekly_plan_a_exposure_cap"
+            ),
+            "weekly_bias": weekly_scenario.get("weekly_bias"),
+            "weekly_status": weekly_scenario.get("weekly_status"),
+            "weekly_gating_enabled": bool(
+                weekly_scenario.get("weekly_gating_enabled", False)
+            ),
+            "weekly_tags": weekly_scenario.get("weekly_tags"),
+            "weekly_money_proxy": weekly_scenario.get("weekly_money_proxy"),
+            "weekly_note": weekly_scenario.get("weekly_note"),
+            "regime": row.get("env_regime"),
+            "position_hint": row.get("env_position_hint"),
+            "weekly_gate_policy": (
+                row.get("env_weekly_gate_policy")
+                or row.get("env_weekly_gate_action")
+            ),
+        }
+
+        return env_context
+
     @staticmethod
     def _resolve_env_weekly_gate_policy(env_context: dict[str, Any] | None) -> str | None:
         if not env_context:
             return None
 
-        gating_enabled = bool(env_context.get("weekly_gating_enabled"))
-        risk_level = str(env_context.get("weekly_risk_level") or "").upper()
-        status = str(env_context.get("weekly_status") or "").upper()
+        weekly_scenario = (
+            env_context.get("weekly_scenario") if isinstance(env_context, dict) else {}
+        )
+        if not isinstance(weekly_scenario, dict):
+            weekly_scenario = {}
+
+        existing_policy = None
+        if isinstance(env_context, dict):
+            existing_policy = env_context.get("weekly_gate_policy")
+            if existing_policy:
+                return str(existing_policy)
+
+        def _get_env(key: str) -> Any:  # noqa: ANN401
+            if isinstance(env_context, dict):
+                value = env_context.get(key, None)
+                if value not in (None, "", [], {}):
+                    return value
+            return weekly_scenario.get(key)
+
+        gating_enabled = bool(_get_env("weekly_gating_enabled"))
+        risk_level = str(_get_env("weekly_risk_level") or "").upper()
+        status = str(_get_env("weekly_status") or "").upper()
 
         if not gating_enabled:
             return "ALLOW"
@@ -3430,6 +3518,8 @@ class MA5MA20OpenMonitorRunner:
             self.logger.info("open_monitor.enabled=false，但 force=True，仍将执行开盘监测。")
 
         checked_at = dt.datetime.now()
+        monitor_date = checked_at.date().isoformat()
+        dedupe_bucket = self._calc_dedupe_bucket(checked_at)
 
         latest_trade_date, signal_dates, signals = self._load_recent_buy_signals()
         if not latest_trade_date or signals.empty:
@@ -3445,7 +3535,15 @@ class MA5MA20OpenMonitorRunner:
             self.logger.info("实时行情已获取：%s 条", len(quotes))
 
         latest_snapshots = self._load_latest_snapshots(latest_trade_date, codes)
-        env_context = self._build_environment_context(latest_trade_date)
+        env_context = self._load_env_snapshot_context(monitor_date, dedupe_bucket)
+        if env_context:
+            self.logger.info(
+                "已加载环境快照（monitor_date=%s, dedupe_bucket=%s）",
+                monitor_date,
+                dedupe_bucket,
+            )
+        else:
+            env_context = self._build_environment_context(latest_trade_date)
         weekly_scenario = env_context.get("weekly_scenario", {}) if isinstance(env_context, dict) else {}
         if isinstance(weekly_scenario, dict):
             struct_tags = ",".join(weekly_scenario.get("weekly_structure_tags", []) or [])
@@ -3493,16 +3591,21 @@ class MA5MA20OpenMonitorRunner:
             checked_at=checked_at,
         )
 
-        dedupe_bucket = self._calc_dedupe_bucket(checked_at)
-        monitor_date = dt.date.today().isoformat()
-        weekly_gate_action = self._resolve_env_weekly_gate_policy(env_context)
+        weekly_gate_policy = self._resolve_env_weekly_gate_policy(env_context)
+        if isinstance(env_context, dict):
+            env_context["weekly_gate_policy"] = weekly_gate_policy
         if not result.empty and "dedupe_bucket" in result.columns:
             dedupe_bucket_val = str(result.iloc[0].get("dedupe_bucket") or "").strip()
             dedupe_bucket = dedupe_bucket_val or dedupe_bucket
 
-        self._persist_env_snapshot(
-            env_context, monitor_date, dedupe_bucket, checked_at, weekly_gate_action
-        )
+        if env_context:
+            self._persist_env_snapshot(
+                env_context,
+                monitor_date,
+                dedupe_bucket,
+                checked_at,
+                weekly_gate_policy,
+            )
 
         if result.empty:
             return
