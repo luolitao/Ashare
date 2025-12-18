@@ -552,7 +552,7 @@ class WeeklyPlanSystem:
 
         if bias == "BEARISH":
             plan_b_if.append("IF_RISK_HIGH")
-        if not confirmed:
+        if not direction_confirmed:
             plan_b_if.append("IF_CONFIRM_MISSING")
 
         if "ma_fast" in key_levels:
@@ -768,8 +768,8 @@ class WeeklyPlanSystem:
                 "weekly_current_week_closed": current_week_closed,
             }
         )
-        plan_payload = dict(plan)
-        plan_payload.pop("weekly_plan_json", None)
+        plan_payload = {k: v for k, v in plan.items() if k != "weekly_plan_json"}
+        assert "weekly_plan_json" not in plan_payload
         plan["weekly_plan_json"] = _clip_text(
             pd.Series(plan_payload).to_json(force_ascii=False), 2000
         )
