@@ -189,7 +189,7 @@ class OpenMonitorParams:
     unique_code_latest_date_only: bool = True
 
     # 输出模式：FULL 保留全部字段，COMPACT 只保留核心字段
-    output_mode: str = "COMPACT"
+    output_mode: str = "FULl"
 
     # 环境快照持久化：默认关闭，防止 open_monitor 写入 env 表
     persist_env_snapshot: bool = False
