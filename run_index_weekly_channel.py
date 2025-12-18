@@ -7,7 +7,7 @@
   - 从数据库 history_index_daily_kline 读取配置里的指数日线数据
   - 聚合成周线后，默认只输出最近一个“已收盘周”（避免周内未来日期）；
     若指定 --include-current-week，则会包含当前形成中的周线
-  - 该脚本不写库，只用于你手动核对与调参
+  - 会调用开盘监测的环境构建逻辑，计算周线计划并写入环境快照表，供 open_monitor 复用
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from ashare.baostock_core import BaostockDataFetcher
 from ashare.baostock_session import BaostockSession
 from ashare.config import get_section
 from ashare.db import DatabaseConfig, MySQLWriter
-from ashare.weekly_channel_regime import WeeklyChannelClassifier
+from ashare.open_monitor import MA5MA20OpenMonitorRunner
 
 
 def _parse_date(val: str) -> dt.date | None:
@@ -137,49 +137,19 @@ def main() -> None:
     asof_date = latest_date_str if args.include_current_week else week_end_asof
     _, current_week_closed_asof = _resolve_latest_closed_week_end(asof_date)
 
-    start_date = None
-    try:
-        end_dt = dt.datetime.strptime(asof_date, "%Y-%m-%d").date()
-        start_date = (end_dt - dt.timedelta(days=900)).isoformat()
-    except Exception:  # noqa: BLE001
-        start_date = None
-
-    stmt = (
-        text(
-            """
-            SELECT `code`, `date`, `open`, `high`, `low`, `close`, `volume`, `amount`
-            FROM history_index_daily_kline
-            WHERE `code` IN :codes AND `date` <= :end_date
-            {start_cond}
-            ORDER BY `code`, `date`
-            """.format(
-                start_cond="AND `date` >= :start_date" if start_date is not None else ""
-            )
-        )
-        .bindparams(bindparam("codes", expanding=True))
+    runner = MA5MA20OpenMonitorRunner()
+    checked_at = dt.datetime.now()
+    monitor_date = checked_at.date().isoformat()
+    dedupe_bucket = f"daily_{asof_date}"
+    env_context = runner.build_and_persist_env_snapshot(
+        asof_date,
+        monitor_date=monitor_date,
+        dedupe_bucket=dedupe_bucket,
+        checked_at=checked_at,
     )
 
-    params = {"codes": codes, "end_date": asof_date}
-    if start_date is not None:
-        params["start_date"] = start_date
-
-    with db.engine.begin() as conn:
-        df = pd.read_sql_query(stmt, conn, params=params)
-
-    if df.empty:
-        print("history_index_daily_kline 为空或未找到指定指数。")
-        return
-
-    classifier = WeeklyChannelClassifier(primary_code="sh.000001")
-    result = classifier.classify(df).to_payload()
-    result.update(
-        {
-            "weekly_asof_trade_date": asof_date,
-            "weekly_current_week_closed": current_week_closed_asof,
-            "weekly_asof_week_closed": bool(current_week_closed_asof) or not args.include_current_week,
-        }
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    output = {"env_snapshot": env_context or {}, "asof_trade_date": asof_date}
+    print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
