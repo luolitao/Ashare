@@ -1014,6 +1014,17 @@ class MA5MA20StrategyRunner:
         except Exception:
             pass
 
+    def _table_exists(self, table: str) -> bool:
+        if not table:
+            return False
+        try:
+            with self.db_writer.engine.begin() as conn:
+                conn.execute(text(f"SELECT 1 FROM `{table}` LIMIT 1"))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("检查表 %s 是否存在失败：%s", table, exc)
+            return False
+
     def _write_signals(
         self, latest_date: dt.date, signals: pd.DataFrame, codes: List[str]
     ) -> None:
