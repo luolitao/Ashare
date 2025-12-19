@@ -1325,7 +1325,7 @@ class MA5MA20OpenMonitorRunner:
                 return None
 
             self.logger.info(
-                "当日环境快照缺失，尝试回退到最近已收盘周 asof_date=%s",
+                "最近已收盘周 asof_date=%s",
                 asof_date,
             )
 
@@ -2385,17 +2385,22 @@ class MA5MA20OpenMonitorRunner:
 
         if not latest_snapshots.empty:
             snap = latest_snapshots.copy()
-            rename_map = {c: f"asof_{c}" for c in snap.columns if c not in {"code"}}
+            snap["_has_latest_snapshot"] = True
+            rename_map = {
+                c: f"asof_{c}"
+                for c in snap.columns
+                if c not in {"code", "_has_latest_snapshot"}
+            }
             snap = snap.rename(columns=rename_map)
             merged = merged.merge(snap, on="code", how="left")
 
+        if "_has_latest_snapshot" not in merged.columns:
+            merged["_has_latest_snapshot"] = False
+        else:
+            merged["_has_latest_snapshot"] = merged["_has_latest_snapshot"].eq(True)
+
         if "asof_close" in merged.columns and "sig_close" in merged.columns:
             merged["asof_close"] = merged["asof_close"].fillna(merged.get("sig_close"))
-
-        has_asof_cols = [c for c in ["asof_close", "asof_ma20"] if c in merged.columns]
-        merged["_has_latest_snapshot"] = False
-        if has_asof_cols:
-            merged["_has_latest_snapshot"] = merged[has_asof_cols].notna().any(axis=1)
 
         if avg_volume_map:
             merged["avg_volume_20"] = merged["code"].map(avg_volume_map)
@@ -2440,16 +2445,16 @@ class MA5MA20OpenMonitorRunner:
             if col in merged.columns:
                 merged[col] = merged.get(col).apply(_to_float)
 
+        def _resolve_ref_close(row: pd.Series) -> tuple[str, float] | tuple[None, None]:
+            for key in ("prev_close", "asof_close", "sig_close"):
+                val = row.get(key)
+                if val is not None and val > 0:
+                    return key, float(val)
+            return None, None
+
         def _resolve_live_pct_change(row: pd.Series) -> float | None:
             latest_px = row.get("live_latest")
-            prev_close_val = row.get("prev_close")
-            asof_close_val = row.get("asof_close")
-
-            base_close = None
-            if prev_close_val is not None and prev_close_val > 0:
-                base_close = prev_close_val
-            elif asof_close_val is not None and asof_close_val > 0:
-                base_close = asof_close_val
+            base_key, base_close = _resolve_ref_close(row)
 
             reported_pct = row.get("live_pct_change")
             if base_close is None or latest_px is None or latest_px <= 0:
@@ -2457,7 +2462,7 @@ class MA5MA20OpenMonitorRunner:
 
             computed_pct = (latest_px / base_close - 1.0) * 100.0
             if reported_pct is not None and abs(computed_pct - reported_pct) > 0.5:
-                base_label = "prev_close" if prev_close_val is not None else "asof_close"
+                base_label = base_key or "unknown"
                 self.logger.debug(
                     "live_pct_change 偏差超过 0.5%%，按计算值覆盖：code=%s latest=%.4f %s=%.4f reported=%.4f computed=%.4f",
                     row.get("code"),
@@ -2471,30 +2476,37 @@ class MA5MA20OpenMonitorRunner:
 
         merged["live_pct_change"] = merged.apply(_resolve_live_pct_change, axis=1)
 
-        def _normalize_intraday_volume(vol: float | None, avg_vol: float | None) -> float | None:
-            if vol is None or avg_vol is None or avg_vol <= 0:
-                return vol
+        def _infer_volume_scale_factor(df: pd.DataFrame) -> float:
+            if "live_volume" not in df.columns or "avg_volume_20" not in df.columns:
+                return 1.0
 
-            ratio = vol / avg_vol
-            multiplied = (vol * 100.0) / avg_vol
-            divided = (vol / 100.0) / avg_vol
+            sample = df[["live_volume", "avg_volume_20"]].dropna()
+            sample = sample[(sample["live_volume"] > 0) & (sample["avg_volume_20"] > 0)]
+            if sample.empty:
+                return 1.0
 
-            if ratio < 0.02 <= multiplied <= 200:
-                self.logger.debug(
-                    "检测到成交量单位可能为“手”，已按股处理（乘以 100）。"
-                )
-                return vol * 100.0
+            ratio = (sample["live_volume"] / sample["avg_volume_20"]).median()
+            ratio_mul = ((sample["live_volume"] * 100.0) / sample["avg_volume_20"]).median()
+            ratio_div = ((sample["live_volume"] / 100.0) / sample["avg_volume_20"]).median()
 
-            if ratio > 200 >= divided >= 0.02:
-                self.logger.debug(
-                    "检测到成交量单位可能已按股存储，已按“手”还原（除以 100）。"
-                )
-                return vol / 100.0
+            if ratio < 0.02 <= ratio_mul <= 200:
+                return 100.0
+            if ratio > 200 >= ratio_div >= 0.02:
+                return 0.01
+            return 1.0
 
-            return vol
+        live_vol_scale = _infer_volume_scale_factor(merged)
+        if live_vol_scale != 1.0 and "live_volume" in merged.columns:
+            self.logger.debug(
+                "统一成交量口径：live_volume *= %.2f（用于匹配 avg_volume_20）。",
+                live_vol_scale,
+            )
+            merged["live_volume"] = merged["live_volume"].apply(
+                lambda x: None if x is None else x * live_vol_scale
+            )
 
         def _calc_intraday_vol_ratio(row: pd.Series) -> float | None:
-            vol = _normalize_intraday_volume(row.get("live_volume"), row.get("avg_volume_20"))
+            vol = row.get("live_volume")
             avg_vol = row.get("avg_volume_20")
             effective_minutes = max(minutes_elapsed, 5)
             if (
@@ -2518,9 +2530,7 @@ class MA5MA20OpenMonitorRunner:
             merged["asof_vol_ratio"] = None
 
         def _calc_gap(row: pd.Series) -> float | None:
-            ref_close = row.get("prev_close")
-            if ref_close is None:
-                ref_close = row.get("sig_close")
+            _, ref_close = _resolve_ref_close(row)
 
             px = row.get("live_open")
             if px is None or px <= 0:
@@ -2797,9 +2807,7 @@ class MA5MA20OpenMonitorRunner:
             signal_stop_ref = _dec(row, "stop_ref")
             signal_close = row.get("sig_close")
             current_close = _coalesce(row, "asof_close", "sig_close")
-            ref_close = row.get("prev_close")
-            if ref_close is None:
-                ref_close = signal_close
+            _, ref_close = _resolve_ref_close(row)
 
             gap = row.get("live_gap_pct")
             signal_day_pct = row.get("_signal_day_pct_change")
