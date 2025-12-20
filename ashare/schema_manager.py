@@ -10,14 +10,13 @@ from sqlalchemy.engine import Engine
 from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
 
+STRATEGY_CODE_MA5_MA20_TREND = "MA5_MA20_TREND"
+
 # 统一策略信号体系表命名：把旧的 strategy_ma5_ma20_* 收敛到 strategy_*
 TABLE_STRATEGY_SIGNALS = "strategy_signals"
 TABLE_STRATEGY_SIGNAL_INDICATORS = "strategy_signal_indicators"
 TABLE_STRATEGY_SIGNAL_CANDIDATES = "strategy_signal_candidates"
 VIEW_STRATEGY_SIGNAL_CANDIDATES = "v_strategy_signal_candidates"
-
-# 遗留视图（历史版本创建过）：表/字段重命名后可能变成“失效 view”，导致 JDBC/IDE 读取元数据时报错。
-LEGACY_VIEW_STRATEGY_MA5_MA20_CANDIDATES = "v_strategy_ma5_ma20_candidates"
 
 # 开盘监测输出
 TABLE_STRATEGY_OPEN_MONITOR = "strategy_open_monitor"
