@@ -2058,9 +2058,80 @@ class AshareApp:
 
             universe_snapshot_table = TABLE_A_SHARE_UNIVERSE
             self.logger.info(
-                "已生成候选池（表快照目标 %s，基于基础表计算得到）：内存行数=%s",
+                "已生成候选池 行数=%s",
                 universe_snapshot_table,
                 len(universe_df),
+            )
+
+            # 4.1) 将候选池写入 Universe 表快照（按 date 覆盖；避免 replace 破坏索引/主键）
+            if universe_df.empty:
+                self.logger.warning("候选池为空，跳过 Universe 表落库与后续选股。")
+                return
+
+            if not self._table_exists(universe_snapshot_table):
+                self.logger.error(
+                    "Universe 表 %s 不存在（SchemaManager 未完成建表？），跳过落库与后续选股。",
+                    universe_snapshot_table,
+                )
+                return
+
+            df = universe_df.copy()
+            if "tradestatus" in df.columns and "tradeStatus" not in df.columns:
+                df = df.rename(columns={"tradestatus": "tradeStatus"})
+
+            universe_columns = [
+                "date",
+                "code",
+                "code_name",
+                "tradeStatus",
+                "amount",
+                "volume",
+                "open",
+                "high",
+                "low",
+                "close",
+                "ipoDate",
+                "type",
+                "status",
+                "in_hs300",
+                "in_zz500",
+                "in_sz50",
+            ]
+            for col in universe_columns:
+                if col not in df.columns:
+                    df[col] = None
+            df = df[universe_columns]
+
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            df["ipoDate"] = pd.to_datetime(df["ipoDate"], errors="coerce").dt.date
+
+            dates = sorted(set(df["date"].dropna().astype(str)))
+            if not dates:
+                self.logger.warning(
+                    "候选池缺少有效 date 字段，跳过 Universe 表落库与后续选股。"
+                )
+                return
+
+            delete_stmt = text(
+                f"DELETE FROM `{universe_snapshot_table}` WHERE `date` IN :dates"
+            ).bindparams(bindparam("dates", expanding=True))
+
+            with self.db_writer.engine.begin() as conn:
+                conn.execute(delete_stmt, {"dates": dates})
+                df.to_sql(
+                    universe_snapshot_table,
+                    conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                    chunksize=1000,
+                )
+
+            self.logger.info(
+                "Universe 表快照已写入 %s：rows=%s, dates=%s",
+                universe_snapshot_table,
+                len(df),
+                dates,
             )
 
             try:
