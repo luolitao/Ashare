@@ -10,8 +10,6 @@ from sqlalchemy.engine import Engine
 from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
 
-STRATEGY_CODE_MA5_MA20_TREND = "MA5_MA20_TREND"
-
 # 统一策略信号体系表命名：把旧的 strategy_ma5_ma20_* 收敛到 strategy_*
 TABLE_STRATEGY_SIGNALS = "strategy_signals"
 TABLE_STRATEGY_SIGNAL_INDICATORS = "strategy_signal_indicators"
@@ -58,21 +56,6 @@ class SchemaManager:
         self._ensure_open_monitor_table(tables.open_monitor_table)
         self._ensure_env_snapshot_table(tables.env_snapshot_table)
         self._ensure_env_index_snapshot_table(tables.env_index_snapshot_table)
-
-        # 清理遗留对象：避免旧 view 引用已不存在的旧表/字段，从而触发 MySQL ER_VIEW_INVALID（1356）。
-        self._drop_legacy_views(active_candidates_view=tables.candidates_view)
-
-    def _drop_legacy_views(self, *, active_candidates_view: str) -> None:
-        legacy_views = [
-            LEGACY_VIEW_STRATEGY_MA5_MA20_CANDIDATES,
-        ]
-        for view in legacy_views:
-            # 如果用户仍然把候选视图配置成旧名字，就不要删；此时会被 _ensure_candidates_view 重新创建为正确引用。
-            if view == str(active_candidates_view).strip():
-                continue
-            with self.engine.begin() as conn:
-                conn.execute(text(f"DROP VIEW IF EXISTS `{view}`"))
-            self.logger.info("已删除遗留视图 %s。", view)
 
     def _resolve_table_names(self) -> TableNames:
         strat_cfg = get_section("strategy_ma5_ma20_trend") or {}
