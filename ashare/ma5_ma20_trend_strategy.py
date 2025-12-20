@@ -6,7 +6,7 @@
   history_daily_kline（全量日线表；运行时按日期窗口截取，避免依赖 history_recent_xxx_days VIEW）
 
 输出：
-  - market_indicator_daily：指标明细（按信号计算窗口写入）
+  - strategy_indicator_daily：指标明细（按信号计算窗口写入）
   - strategy_signal_events：信号事件（signal/reason/risk/stop 等）
       - signals_write_scope=latest：仅写入最新交易日（默认）
       - signals_write_scope=window：写入本次计算窗口内的全部交易日（用于回填历史/回测）
@@ -34,7 +34,7 @@ from .db import DatabaseConfig, MySQLWriter
 from .indicator_utils import consecutive_true
 from .schema_manager import (
     STRATEGY_CODE_MA5_MA20_TREND,
-    TABLE_MARKET_INDICATOR_DAILY,
+    TABLE_STRATEGY_INDICATOR_DAILY,
     TABLE_STRATEGY_SIGNAL_CANDIDATES,
     TABLE_STRATEGY_SIGNAL_EVENTS,
     VIEW_STRATEGY_SIGNAL_CANDIDATES,
@@ -69,7 +69,7 @@ class MA5MA20Params:
     kdj_low_threshold: float = 30.0
 
     # 输出表/视图
-    indicator_table: str = TABLE_MARKET_INDICATOR_DAILY
+    indicator_table: str = TABLE_STRATEGY_INDICATOR_DAILY
     signal_events_table: str = TABLE_STRATEGY_SIGNAL_EVENTS
     candidates_table: str = (
         TABLE_STRATEGY_SIGNAL_CANDIDATES

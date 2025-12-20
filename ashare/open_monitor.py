@@ -41,7 +41,7 @@ from .env_snapshot_utils import resolve_weekly_asof_date
 from .ma5_ma20_trend_strategy import _atr, _macd
 from .schema_manager import (
     TABLE_ENV_INDEX_SNAPSHOT,
-    TABLE_MARKET_INDICATOR_DAILY,
+    TABLE_STRATEGY_INDICATOR_DAILY,
     TABLE_STRATEGY_OPEN_MONITOR_ENV,
     TABLE_STRATEGY_OPEN_MONITOR_EVAL,
     TABLE_STRATEGY_OPEN_MONITOR_QUOTE,
@@ -55,7 +55,7 @@ from .weekly_env_builder import WeeklyEnvironmentBuilder
 
 SNAPSHOT_HASH_EXCLUDE = {
     "checked_at",
-    "dedupe_bucket",
+    "run_id",
 }
 
 
@@ -219,7 +219,7 @@ class OpenMonitorParams:
 
     # 信号来源表：默认使用 strategy_signal_events
     signal_events_table: str = TABLE_STRATEGY_SIGNAL_EVENTS
-    indicator_table: str = TABLE_MARKET_INDICATOR_DAILY
+    indicator_table: str = TABLE_STRATEGY_INDICATOR_DAILY
     quote_table: str = TABLE_STRATEGY_OPEN_MONITOR_QUOTE
     strategy_code: str = STRATEGY_CODE_MA5_MA20_TREND
 
@@ -280,7 +280,7 @@ class OpenMonitorParams:
     export_top_n: int = 100
     output_subdir: str = "open_monitor"
     interval_minutes: int = 5
-    dedupe_bucket_minutes: int = 5
+    run_id_minutes: int = 5
 
     # 环境快照表：存储周线计划等“批次级别”信息，避免在每条标的记录里重复。
     env_snapshot_table: str = TABLE_STRATEGY_OPEN_MONITOR_ENV
@@ -370,10 +370,10 @@ class OpenMonitorParams:
 
         interval_minutes = _get_int("interval_minutes", cls.interval_minutes)
 
-        dedupe_bucket_configured = sec.get("dedupe_bucket_minutes")
-        dedupe_bucket_minutes = (
-            _get_int("dedupe_bucket_minutes", interval_minutes)
-            if dedupe_bucket_configured is not None
+        run_id_configured = sec.get("run_id_minutes")
+        run_id_minutes = (
+            _get_int("run_id_minutes", interval_minutes)
+            if run_id_configured is not None
             else interval_minutes
         )
 
@@ -449,7 +449,7 @@ class OpenMonitorParams:
             export_top_n=_get_int("export_top_n", cls.export_top_n),
             output_subdir=str(sec.get("output_subdir", cls.output_subdir)).strip() or cls.output_subdir,
             interval_minutes=interval_minutes,
-            dedupe_bucket_minutes=dedupe_bucket_minutes,
+            run_id_minutes=run_id_minutes,
             unique_code_latest_date_only=_get_bool(
                 "unique_code_latest_date_only", cls.unique_code_latest_date_only
             ),
@@ -549,8 +549,8 @@ class MA5MA20OpenMonitorRunner:
             return 120 + int(delta.total_seconds() // 60)
         return 240
 
-    def _calc_dedupe_bucket(self, ts: dt.datetime) -> str:
-        bucket_minutes = max(int(self.params.dedupe_bucket_minutes or 5), 1)
+    def _calc_run_id(self, ts: dt.datetime) -> str:
+        bucket_minutes = max(int(self.params.run_id_minutes or 5), 1)
 
         auction_start = dt.time(9, 15)
         lunch_break_start = dt.time(11, 30)
@@ -663,7 +663,7 @@ class MA5MA20OpenMonitorRunner:
         self,
         env_context: dict[str, Any] | None,
         monitor_date: str,
-        dedupe_bucket: str,
+        run_id: str,
         checked_at: dt.datetime,
         env_weekly_gate_policy: str | None,
     ) -> None:
@@ -673,6 +673,9 @@ class MA5MA20OpenMonitorRunner:
         table = self.params.env_snapshot_table
         if not table:
             return
+
+        monitor_dt = pd.to_datetime(monitor_date, errors="coerce")
+        monitor_date_val = monitor_dt.date() if not pd.isna(monitor_dt) else monitor_date
 
         payload: dict[str, Any] = {}
         weekly_scenario = env_context.get("weekly_scenario") if isinstance(env_context, dict) else {}
@@ -684,10 +687,14 @@ class MA5MA20OpenMonitorRunner:
                 return env_context.get(key)
             return weekly_scenario.get(key)
 
-        payload["monitor_date"] = monitor_date
-        payload["dedupe_bucket"] = dedupe_bucket
+        payload["monitor_date"] = monitor_date_val
+        payload["run_id"] = run_id
         payload["checked_at"] = checked_at
-        payload["env_weekly_asof_trade_date"] = _get_env("weekly_asof_trade_date")
+        env_weekly_asof = _get_env("weekly_asof_trade_date")
+        if env_weekly_asof is not None:
+            parsed_weekly = pd.to_datetime(env_weekly_asof, errors="coerce")
+            env_weekly_asof = parsed_weekly.date() if not pd.isna(parsed_weekly) else env_weekly_asof
+        payload["env_weekly_asof_trade_date"] = env_weekly_asof
         payload["env_weekly_risk_level"] = _get_env("weekly_risk_level")
         payload["env_weekly_scene"] = _get_env("weekly_scene_code")
         payload["env_weekly_gate_policy"] = env_weekly_gate_policy
@@ -707,7 +714,7 @@ class MA5MA20OpenMonitorRunner:
             self.logger.error("环境快照表 %s 不存在，已跳过写入。", table)
             return
         columns = list(payload.keys())
-        update_cols = [c for c in columns if c not in {"monitor_date", "dedupe_bucket"}]
+        update_cols = [c for c in columns if c not in {"monitor_date", "run_id"}]
         col_clause = ", ".join(f"`{c}`" for c in columns)
         value_clause = ", ".join(f":{c}" for c in columns)
         update_clause = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)
@@ -723,10 +730,10 @@ class MA5MA20OpenMonitorRunner:
             with self.db_writer.engine.begin() as conn:
                 conn.execute(stmt, payload)
             self.logger.info(
-                "环境快照已写入表 %s（monitor_date=%s, dedupe_bucket=%s）",
+                "环境快照已写入表 %s（monitor_date=%s, run_id=%s）",
                 table,
                 monitor_date,
-                dedupe_bucket,
+                run_id,
             )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("写入环境快照失败：%s", exc)
@@ -743,6 +750,11 @@ class MA5MA20OpenMonitorRunner:
         if not self._table_exists(table):
             self.logger.error("指数环境快照表 %s 不存在，已跳过写入。", table)
             return None
+
+        for date_col in ["monitor_date", "asof_trade_date", "live_trade_date"]:
+            if date_col in snapshot:
+                parsed = pd.to_datetime(snapshot.get(date_col), errors="coerce")
+                snapshot[date_col] = parsed.date() if not pd.isna(parsed) else snapshot.get(date_col)
 
         columns = list(snapshot.keys())
         if "snapshot_hash" not in columns:
@@ -822,14 +834,14 @@ class MA5MA20OpenMonitorRunner:
         return normalized
 
     def _load_env_snapshot_context(
-        self, monitor_date: str, dedupe_bucket: str | None = None
+        self, monitor_date: str, run_id: str | None = None
     ) -> dict[str, Any] | None:
         table = self.params.env_snapshot_table
         if not (table and monitor_date and self._table_exists(table)):
             return None
 
         def _load_latest(match_bucket: bool) -> pd.DataFrame:
-            bucket_clause = "`dedupe_bucket` = :b AND" if match_bucket else ""
+            bucket_clause = "`run_id` = :b AND" if match_bucket else ""
             stmt = text(
                 f"""
                 SELECT * FROM `{table}`
@@ -840,8 +852,8 @@ class MA5MA20OpenMonitorRunner:
             )
 
             params: dict[str, Any] = {"d": monitor_date}
-            if match_bucket and dedupe_bucket is not None:
-                params["b"] = dedupe_bucket
+            if match_bucket and run_id is not None:
+                params["b"] = run_id
             elif match_bucket:
                 return pd.DataFrame()
 
@@ -849,7 +861,7 @@ class MA5MA20OpenMonitorRunner:
                 return pd.read_sql_query(stmt, conn, params=params)
 
         try:
-            if dedupe_bucket is None:
+            if run_id is None:
                 df = _load_latest(match_bucket=False)
             else:
                 df = _load_latest(match_bucket=True)
@@ -970,7 +982,7 @@ class MA5MA20OpenMonitorRunner:
                 row.get("env_weekly_gate_policy")
                 or row.get("env_weekly_gate_action")
             ),
-            "dedupe_bucket": row.get("dedupe_bucket"),
+            "run_id": row.get("run_id"),
             "env_index_snapshot_hash": index_snapshot_hash,
         }
         index_snapshot = loaded_index_snapshot or {
@@ -1006,18 +1018,18 @@ class MA5MA20OpenMonitorRunner:
     def load_env_snapshot_context(
         self,
         monitor_date: str,
-        dedupe_bucket: str | None = None,
+        run_id: str | None = None,
         *,
         allow_fallback: bool = True,
     ) -> dict[str, Any] | None:
         """公开的环境快照读取接口，必要时可回退到当日最新。"""
 
         self.weekly_env_fallback_asof_date = None
-        env_context = self._load_env_snapshot_context(monitor_date, dedupe_bucket)
+        env_context = self._load_env_snapshot_context(monitor_date, run_id)
         if env_context:
             return env_context
 
-        if allow_fallback and dedupe_bucket is not None:
+        if allow_fallback and run_id is not None:
             env_context = self._load_env_snapshot_context(monitor_date, None)
             if env_context:
                 return env_context
@@ -1057,22 +1069,22 @@ class MA5MA20OpenMonitorRunner:
         return self.env_builder.resolve_env_weekly_gate_policy(env_context)
 
     def _load_existing_snapshot_keys(
-        self, table: str, monitor_date: str, codes: List[str], dedupe_bucket: str
+        self, table: str, monitor_date: str, codes: List[str], run_id: str
     ) -> set[tuple[str, str, str, str]]:
         if not (
             table
             and monitor_date
             and codes
-            and dedupe_bucket
+            and run_id
             and self._table_exists(table)
         ):
             return set()
 
         stmt = text(
             f"""
-            SELECT `monitor_date`, `sig_date`, `code`, `dedupe_bucket`
+            SELECT `monitor_date`, `sig_date`, `code`, `run_id`
             FROM `{table}`
-            WHERE `monitor_date` = :d AND `code` IN :codes AND `dedupe_bucket` = :b
+            WHERE `monitor_date` = :d AND `code` IN :codes AND `run_id` = :b
         """
         ).bindparams(bindparam("codes", expanding=True))
 
@@ -1081,10 +1093,10 @@ class MA5MA20OpenMonitorRunner:
                 df = pd.read_sql_query(
                     stmt,
                     conn,
-                    params={"d": monitor_date, "codes": codes, "b": dedupe_bucket},
+                    params={"d": monitor_date, "codes": codes, "b": run_id},
                 )
         except Exception as exc:  # noqa: BLE001
-            self.logger.debug("读取已存在的 dedupe keys 失败：%s", exc)
+            self.logger.debug("读取已存在的 run_id 键失败：%s", exc)
             return set()
 
         existing: set[tuple[str, str, str, str]] = set()
@@ -1092,25 +1104,25 @@ class MA5MA20OpenMonitorRunner:
             code = str(row.get("code") or "").strip()
             date_val = str(row.get("sig_date") or "").strip()
             monitor = str(row.get("monitor_date") or "").strip()
-            bucket = str(row.get("dedupe_bucket") or "").strip()
+            bucket = str(row.get("run_id") or "").strip()
             if code and date_val and monitor and bucket:
                 existing.add((monitor, date_val, code, bucket))
         return existing
 
     def _delete_existing_bucket_rows(
-        self, table: str, monitor_date: str, dedupe_bucket: str, codes: List[str]
+        self, table: str, monitor_date: str, run_id: str, codes: List[str]
     ) -> int:
         if not (
             table
             and monitor_date
-            and dedupe_bucket
+            and run_id
             and codes
             and self._table_exists(table)
         ):
             return 0
 
         stmt = text(
-            "DELETE FROM `{table}` WHERE `monitor_date` = :d AND `dedupe_bucket` = :b AND `code` IN :codes".format(
+            "DELETE FROM `{table}` WHERE `monitor_date` = :d AND `run_id` = :b AND `code` IN :codes".format(
                 table=table
             )
         ).bindparams(bindparam("codes", expanding=True))
@@ -1118,7 +1130,7 @@ class MA5MA20OpenMonitorRunner:
         try:
             with self.db_writer.engine.begin() as conn:
                 result = conn.execute(
-                    stmt, {"d": monitor_date, "b": dedupe_bucket, "codes": codes}
+                    stmt, {"d": monitor_date, "b": run_id, "codes": codes}
                 )
                 return int(getattr(result, "rowcount", 0) or 0)
         except Exception as exc:  # noqa: BLE001
@@ -1841,7 +1853,7 @@ class MA5MA20OpenMonitorRunner:
         latest_trade_date: str,
         *,
         monitor_date: str | None = None,
-        dedupe_bucket: str | None = None,
+        run_id: str | None = None,
         checked_at: dt.datetime | None = None,
     ) -> dict[str, Any] | None:
         """计算周线环境并写入快照表（供低频任务调用）。"""
@@ -1850,8 +1862,8 @@ class MA5MA20OpenMonitorRunner:
             checked_at = dt.datetime.now()
         if monitor_date is None:
             monitor_date = checked_at.date().isoformat()
-        if dedupe_bucket is None:
-            dedupe_bucket = self._calc_dedupe_bucket(checked_at)
+        if run_id is None:
+            run_id = self._calc_run_id(checked_at)
 
         env_context = self._build_environment_context(
             latest_trade_date, checked_at=checked_at
@@ -1863,7 +1875,7 @@ class MA5MA20OpenMonitorRunner:
         self._persist_env_snapshot(
             env_context,
             monitor_date,
-            dedupe_bucket,
+            run_id,
             checked_at,
             weekly_gate_policy,
         )
@@ -2198,7 +2210,7 @@ class MA5MA20OpenMonitorRunner:
         }
         q = q.rename(columns={k: v for k, v in live_rename_map.items() if k in q.columns})
         checked_at_ts = checked_at or dt.datetime.now()
-        dedupe_bucket = self._calc_dedupe_bucket(checked_at_ts)
+        run_id = self._calc_run_id(checked_at_ts)
         avg_volume_map = self._load_avg_volume(
             latest_trade_date, signals["code"].dropna().astype(str).unique().tolist()
         )
@@ -2246,7 +2258,7 @@ class MA5MA20OpenMonitorRunner:
             out["candidate_status"] = "UNKNOWN"
             out["status_reason"] = "行情数据不可用"
             out["checked_at"] = checked_at_ts
-            out["dedupe_bucket"] = dedupe_bucket
+            out["run_id"] = run_id
             return out
 
         q["code"] = q["code"].astype(str)
@@ -3443,7 +3455,7 @@ class MA5MA20OpenMonitorRunner:
         merged["valid_days"] = valid_days_list
         merged["entry_exposure_cap"] = entry_exposure_caps
         merged["checked_at"] = checked_at_ts
-        merged["dedupe_bucket"] = dedupe_bucket
+        merged["run_id"] = run_id
         merged["env_index_score"] = env_index_scores
         merged["env_regime"] = env_regimes
         merged["env_position_hint"] = env_position_hints
@@ -3595,7 +3607,7 @@ class MA5MA20OpenMonitorRunner:
             "action",
             "action_reason",
             "checked_at",
-            "dedupe_bucket",
+            "run_id",
             "snapshot_hash",
         ]
 
@@ -3656,7 +3668,7 @@ class MA5MA20OpenMonitorRunner:
             "primary_status",
             "summary_line",
             "checked_at",
-            "dedupe_bucket",
+            "run_id",
             "snapshot_hash",
         ]
 
@@ -3681,7 +3693,7 @@ class MA5MA20OpenMonitorRunner:
 
         keep_cols = [
             "monitor_date",
-            "dedupe_bucket",
+            "run_id",
             "code",
             "live_trade_date",
             "live_open",
@@ -3700,8 +3712,8 @@ class MA5MA20OpenMonitorRunner:
         quotes = df[keep_cols].copy()
         quotes["monitor_date"] = pd.to_datetime(quotes["monitor_date"]).dt.date
         quotes["live_trade_date"] = pd.to_datetime(quotes["live_trade_date"]).dt.date
-        quotes["dedupe_bucket"] = quotes["dedupe_bucket"].fillna(
-            self._calc_dedupe_bucket(dt.datetime.now())
+        quotes["run_id"] = quotes["run_id"].fillna(
+            self._calc_run_id(dt.datetime.now())
         )
         quotes["code"] = quotes["code"].astype(str)
 
@@ -3709,7 +3721,7 @@ class MA5MA20OpenMonitorRunner:
         if self._table_exists(table) and monitor_dates:
             for monitor in monitor_dates:
                 buckets = (
-                    quotes.loc[quotes["monitor_date"].astype(str) == monitor, "dedupe_bucket"]
+                    quotes.loc[quotes["monitor_date"].astype(str) == monitor, "run_id"]
                     .dropna()
                     .astype(str)
                     .unique()
@@ -3718,7 +3730,7 @@ class MA5MA20OpenMonitorRunner:
                 for bucket in buckets:
                     bucket_codes = quotes.loc[
                         (quotes["monitor_date"].astype(str) == monitor)
-                        & (quotes["dedupe_bucket"].astype(str) == bucket),
+                        & (quotes["run_id"].astype(str) == bucket),
                         "code",
                     ].dropna().astype(str).unique().tolist()
                     if bucket_codes:
@@ -3743,7 +3755,6 @@ class MA5MA20OpenMonitorRunner:
         if not self.params.write_to_db:
             return
 
-        monitor_date = str(df.iloc[0].get("monitor_date") or "").strip()
         codes = df["code"].dropna().astype(str).unique().tolist()
         table_exists = self._table_exists(table)
         table_columns = set(self._get_table_columns(table))
@@ -3752,11 +3763,18 @@ class MA5MA20OpenMonitorRunner:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        if "dedupe_bucket" not in df.columns:
-            df["dedupe_bucket"] = None
-        df["dedupe_bucket"] = df["dedupe_bucket"].fillna(
-            self._calc_dedupe_bucket(dt.datetime.now())
+        if "run_id" not in df.columns:
+            df["run_id"] = None
+        df["run_id"] = df["run_id"].fillna(
+            self._calc_run_id(dt.datetime.now())
         )
+
+        for col in ["monitor_date", "sig_date", "asof_trade_date", "live_trade_date"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+
+        monitor_date_val = df["monitor_date"].iloc[0] if "monitor_date" in df.columns and not df.empty else None
+        monitor_date = monitor_date_val.isoformat() if monitor_date_val is not None else ""
 
         for col in [
             "risk_tag",
@@ -3799,7 +3817,7 @@ class MA5MA20OpenMonitorRunner:
 
         df["snapshot_hash"] = df.apply(lambda row: make_snapshot_hash(row.to_dict()), axis=1)
         df = df.drop_duplicates(
-            subset=["monitor_date", "sig_date", "code", "dedupe_bucket"]
+            subset=["monitor_date", "sig_date", "code", "run_id"]
         )
 
         self._persist_quote_snapshots(df)
@@ -3824,8 +3842,8 @@ class MA5MA20OpenMonitorRunner:
         if table_exists and monitor_date and codes:
             deleted_total = 0
             buckets = (
-                df["dedupe_bucket"].dropna().astype(str).unique().tolist()
-                if "dedupe_bucket" in df.columns
+                df["run_id"].dropna().astype(str).unique().tolist()
+                if "run_id" in df.columns
                 else []
             )
             for bucket in buckets:
@@ -3947,8 +3965,8 @@ class MA5MA20OpenMonitorRunner:
 
         checked_at = dt.datetime.now()
         monitor_date = checked_at.date().isoformat()
-        dedupe_bucket = self._calc_dedupe_bucket(checked_at)
-        env_snapshot_bucket = dedupe_bucket
+        run_id = self._calc_run_id(checked_at)
+        env_snapshot_bucket = run_id
         env_snapshot_matched_bucket = False
 
         latest_trade_date, signal_dates, signals = self._load_recent_buy_signals()
@@ -3966,36 +3984,36 @@ class MA5MA20OpenMonitorRunner:
 
         latest_snapshots = self._load_latest_snapshots(latest_trade_date, codes)
         env_context = self.load_env_snapshot_context(
-            monitor_date, dedupe_bucket, allow_fallback=True
+            monitor_date, run_id, allow_fallback=True
         )
         if env_context:
-            loaded_bucket = str(env_context.get("dedupe_bucket") or "")
+            loaded_bucket = str(env_context.get("run_id") or "")
             env_snapshot_bucket = loaded_bucket or env_snapshot_bucket
-            env_snapshot_matched_bucket = bool(loaded_bucket == str(dedupe_bucket))
+            env_snapshot_matched_bucket = bool(loaded_bucket == str(run_id))
             if self.weekly_env_fallback_asof_date:
                 self.logger.info(
-                    "已加载周线回退环境（asof_date=%s，dedupe_bucket=%s）",
+                    "已加载周线回退环境（asof_date=%s，run_id=%s）",
                     self.weekly_env_fallback_asof_date,
                     env_snapshot_bucket,
                 )
             elif env_snapshot_matched_bucket:
                 self.logger.info(
-                    "已加载环境快照（monitor_date=%s, dedupe_bucket=%s）",
+                    "已加载环境快照（monitor_date=%s, run_id=%s）",
                     monitor_date,
                     env_snapshot_bucket,
                 )
             else:
                 self.logger.info(
-                    "已加载当日最新环境快照（monitor_date=%s，未匹配 dedupe_bucket=%s，实际=%s）",
+                    "已加载当日最新环境快照（monitor_date=%s，未匹配 run_id=%s，实际=%s）",
                     monitor_date,
-                    dedupe_bucket,
+                    run_id,
                     env_snapshot_bucket,
                 )
         if not env_context:
             self.logger.warning(
-                "未找到环境快照（monitor_date=%s, dedupe_bucket=%s），请先运行 run_index_weekly_channel 产出环境。",
+                "未找到环境快照（monitor_date=%s, run_id=%s），请先运行 run_index_weekly_channel 产出环境。",
                 monitor_date,
-                dedupe_bucket,
+                run_id,
             )
             return
         weekly_scenario = env_context.get("weekly_scenario", {}) if isinstance(env_context, dict) else {}
@@ -4051,7 +4069,7 @@ class MA5MA20OpenMonitorRunner:
         if index_env_snapshot:
             index_snapshot_payload = {
                 "monitor_date": monitor_date,
-                "dedupe_bucket": dedupe_bucket,
+                "run_id": run_id,
                 "checked_at": checked_at,
                 "index_code": index_env_snapshot.get("env_index_code"),
                 "asof_trade_date": index_env_snapshot.get("env_index_asof_trade_date"),
@@ -4121,12 +4139,12 @@ class MA5MA20OpenMonitorRunner:
         weekly_gate_policy = self._resolve_env_weekly_gate_policy(env_context)
         if isinstance(env_context, dict):
             env_context["weekly_gate_policy"] = weekly_gate_policy
-        if not result.empty and "dedupe_bucket" in result.columns:
-            dedupe_bucket_val = str(result.iloc[0].get("dedupe_bucket") or "").strip()
-            dedupe_bucket = dedupe_bucket_val or dedupe_bucket
+        if not result.empty and "run_id" in result.columns:
+            run_id_val = str(result.iloc[0].get("run_id") or "").strip()
+            run_id = run_id_val or run_id
             env_snapshot_matched_bucket = bool(
                 env_context
-                and str(env_context.get("dedupe_bucket") or "") == str(dedupe_bucket)
+                and str(env_context.get("run_id") or "") == str(run_id)
             )
 
         if (
@@ -4137,7 +4155,7 @@ class MA5MA20OpenMonitorRunner:
             self._persist_env_snapshot(
                 env_context,
                 monitor_date,
-                dedupe_bucket or env_snapshot_bucket,
+                run_id or env_snapshot_bucket,
                 checked_at,
                 weekly_gate_policy,
             )
