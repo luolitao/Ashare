@@ -13,7 +13,7 @@ from .db import DatabaseConfig, MySQLWriter
 STRATEGY_CODE_MA5_MA20_TREND = "MA5_MA20_TREND"
 
 # 统一策略信号体系表命名：按单一职责拆分
-TABLE_MARKET_INDICATOR_DAILY = "market_indicator_daily"
+TABLE_STRATEGY_INDICATOR_DAILY = "strategy_indicator_daily"
 TABLE_STRATEGY_SIGNAL_EVENTS = "strategy_signal_events"
 TABLE_STRATEGY_SIGNAL_CANDIDATES = "strategy_signal_candidates"
 VIEW_STRATEGY_SIGNAL_CANDIDATES = "v_strategy_signal_candidates"
@@ -75,10 +75,10 @@ class SchemaManager:
         strat_cfg = get_section("strategy_ma5_ma20_trend") or {}
         open_monitor_cfg = get_section("open_monitor") or {}
 
-        default_indicator = strat_cfg.get("indicator_table", TABLE_MARKET_INDICATOR_DAILY)
+        default_indicator = strat_cfg.get("indicator_table", TABLE_STRATEGY_INDICATOR_DAILY)
         indicator_table = (
             str(open_monitor_cfg.get("indicator_table", default_indicator)).strip()
-            or TABLE_MARKET_INDICATOR_DAILY
+            or TABLE_STRATEGY_INDICATOR_DAILY
         )
         default_events = (
             strat_cfg.get("signal_events_table")
@@ -272,6 +272,18 @@ class SchemaManager:
                 )
             self.logger.info("表 %s.%s 已调整为 DATETIME(6)。", table, column)
 
+    def _ensure_date_column(self, table: str, column: str, *, not_null: bool) -> None:
+        meta = self._column_meta(table)
+        info = meta.get(column)
+        target_def = "DATE NOT NULL" if not_null else "DATE NULL"
+        if not info:
+            self._add_missing_columns(table, {column: target_def})
+            return
+        if info["data_type"] != "date":
+            with self.engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` {target_def}"))
+            self.logger.info("表 %s.%s 已调整为 DATE。", table, column)
+
     def _create_table(
         self,
         table: str,
@@ -344,6 +356,18 @@ class SchemaManager:
         self._ensure_varchar_length(table, "risk_tag", 255)
         self._ensure_varchar_length(table, "risk_note", 255)
         self._ensure_varchar_length(table, "reason", 255)
+        unique_name = "ux_signal_events_strategy_date_code"
+        if not self._index_exists(table, unique_name):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE UNIQUE INDEX `{unique_name}`
+                        ON `{table}` (`strategy_code`, `sig_date`, `code`)
+                        """
+                    )
+                )
+            self.logger.info("信号事件表 %s 已新增唯一索引 %s。", table, unique_name)
 
     def _ensure_candidates_table(self, table: str) -> None:
         columns = {
@@ -379,12 +403,21 @@ class SchemaManager:
             SELECT
               e.`sig_date`,
               e.`code`,
+              e.`strategy_code`,
+              e.`signal` AS `sig_signal`,
+              e.`reason` AS `sig_reason`,
+              e.`reason`,
+              DATEDIFF(CURDATE(), e.`sig_date`) AS `signal_age`,
+              CASE
+                WHEN e.`reason` LIKE '%回踩%' THEN 5
+                ELSE 3
+              END AS `valid_days`,
               ind.`close`,
               ind.`ma5`,ind.`ma20`,ind.`ma60`,ind.`ma250`,
               ind.`vol_ratio`,ind.`macd_hist`,ind.`kdj_k`,ind.`kdj_d`,ind.`atr14`,
               e.`stop_ref`,
               ind.`yearline_state`,e.`risk_tag`,e.`risk_note`,
-              e.`reason`
+              e.`extra_json`
             FROM `{events_table}` e
             LEFT JOIN `{indicator_table}` ind
               ON e.`sig_date` = ind.`trade_date` AND e.`code` = ind.`code`
@@ -399,7 +432,7 @@ class SchemaManager:
     def _ensure_open_monitor_quote_table(self, table: str) -> None:
         columns = {
             "monitor_date": "DATE NOT NULL",
-            "dedupe_bucket": "VARCHAR(32) NOT NULL",
+            "run_id": "VARCHAR(64) NOT NULL",
             "code": "VARCHAR(20) NOT NULL",
             "live_trade_date": "DATE NULL",
             "live_open": "DOUBLE NULL",
@@ -416,19 +449,34 @@ class SchemaManager:
             self._create_table(
                 table,
                 columns,
-                primary_key=("monitor_date", "dedupe_bucket", "code"),
+                primary_key=("monitor_date", "run_id", "code"),
             )
             return
         self._add_missing_columns(table, columns)
-        self._ensure_varchar_length(table, "dedupe_bucket", 32)
+        self._ensure_varchar_length(table, "run_id", 64)
+        self._ensure_date_column(table, "monitor_date", not_null=True)
+        self._ensure_date_column(table, "live_trade_date", not_null=False)
+
+        unique_name = "ux_open_monitor_quote_run"
+        if not self._index_exists(table, unique_name):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE UNIQUE INDEX `{unique_name}`
+                        ON `{table}` (`monitor_date`, `run_id`, `code`)
+                        """
+                    )
+                )
+            self.logger.info("行情快照表 %s 已新增唯一索引 %s。", table, unique_name)
 
     def _ensure_open_monitor_eval_table(self, table: str) -> None:
         columns = {
-            "monitor_date": "VARCHAR(10) NOT NULL",
-            "sig_date": "VARCHAR(10) NOT NULL",
-            "dedupe_bucket": "VARCHAR(32) NOT NULL",
-            "asof_trade_date": "VARCHAR(10) NULL",
-            "live_trade_date": "VARCHAR(10) NULL",
+            "monitor_date": "DATE NOT NULL",
+            "sig_date": "DATE NOT NULL",
+            "run_id": "VARCHAR(64) NOT NULL",
+            "asof_trade_date": "DATE NULL",
+            "live_trade_date": "DATE NULL",
             "signal_age": "INT NULL",
             "valid_days": "INT NULL",
             "code": "VARCHAR(20) NOT NULL",
@@ -474,13 +522,17 @@ class SchemaManager:
             self._create_table(
                 table,
                 columns,
-                primary_key=("monitor_date", "sig_date", "code", "dedupe_bucket"),
+                primary_key=("monitor_date", "sig_date", "code", "run_id"),
             )
         else:
             self._add_missing_columns(table, columns)
 
-        for col in ["monitor_date", "sig_date", "code", "snapshot_hash", "dedupe_bucket", "env_index_snapshot_hash"]:
-            self._ensure_varchar_length(table, col, 64 if col == "snapshot_hash" else 32)
+        for col in ["code", "snapshot_hash", "run_id", "env_index_snapshot_hash"]:
+            self._ensure_varchar_length(table, col, 64 if col == "snapshot_hash" else 64)
+        self._ensure_date_column(table, "monitor_date", not_null=True)
+        self._ensure_date_column(table, "sig_date", not_null=True)
+        self._ensure_date_column(table, "asof_trade_date", not_null=False)
+        self._ensure_date_column(table, "live_trade_date", not_null=False)
 
         self._ensure_datetime_column(table, "checked_at")
         self._ensure_numeric_column(table, "live_intraday_vol_ratio", "DOUBLE NULL")
@@ -490,7 +542,7 @@ class SchemaManager:
         self._ensure_open_monitor_indexes(table)
 
     def _cleanup_duplicate_snapshots(self, table: str) -> None:
-        dedupe_cols = {"monitor_date", "sig_date", "code", "dedupe_bucket", "checked_at"}
+        dedupe_cols = {"monitor_date", "sig_date", "code", "run_id", "checked_at"}
         if not dedupe_cols.issubset(set(self._column_meta(table).keys())):
             return
         stmt = text(
@@ -501,7 +553,7 @@ class SchemaManager:
               ON t1.`monitor_date` = t2.`monitor_date`
              AND t1.`sig_date` = t2.`sig_date`
              AND t1.`code` = t2.`code`
-             AND t1.`dedupe_bucket` = t2.`dedupe_bucket`
+             AND t1.`run_id` = t2.`run_id`
              AND (
                   (t1.`checked_at` < t2.`checked_at`)
                   OR (t1.`checked_at` IS NULL AND t2.`checked_at` IS NOT NULL)
@@ -514,7 +566,7 @@ class SchemaManager:
             self.logger.info("表 %s 已清理 %s 条重复快照。", table, res.rowcount)
 
     def _ensure_open_monitor_indexes(self, table: str) -> None:
-        unique_index = "ux_open_monitor_dedupe"
+        unique_index = "ux_open_monitor_run"
         if not self._index_exists(table, unique_index):
             self._cleanup_duplicate_snapshots(table)
             with self.engine.begin() as conn:
@@ -523,7 +575,7 @@ class SchemaManager:
                         text(
                             f"""
                             CREATE UNIQUE INDEX `{unique_index}`
-                            ON `{table}` (`monitor_date`, `sig_date`, `code`, `dedupe_bucket`)
+                            ON `{table}` (`monitor_date`, `sig_date`, `code`, `run_id`)
                             """
                         )
                     )
@@ -552,10 +604,10 @@ class SchemaManager:
     # ---------- Environment snapshots ----------
     def _ensure_env_snapshot_table(self, table: str) -> None:
         columns = {
-            "monitor_date": "VARCHAR(10) NOT NULL",
-            "dedupe_bucket": "VARCHAR(32) NOT NULL",
+            "monitor_date": "DATE NOT NULL",
+            "run_id": "VARCHAR(64) NOT NULL",
             "checked_at": "DATETIME(6) NULL",
-            "env_weekly_asof_trade_date": "VARCHAR(10) NULL",
+            "env_weekly_asof_trade_date": "DATE NULL",
             "env_weekly_risk_level": "VARCHAR(16) NULL",
             "env_weekly_scene": "VARCHAR(32) NULL",
             "env_weekly_gate_action": "VARCHAR(16) NULL",
@@ -564,16 +616,32 @@ class SchemaManager:
             "env_index_snapshot_hash": "VARCHAR(32) NULL",
         }
         if not self._table_exists(table):
-            self._create_table(table, columns, primary_key=("monitor_date", "dedupe_bucket"))
+            self._create_table(table, columns, primary_key=("monitor_date", "run_id"))
         else:
             self._add_missing_columns(table, columns)
         self._ensure_datetime_column(table, "checked_at")
+        self._ensure_date_column(table, "monitor_date", not_null=True)
+        self._ensure_date_column(table, "env_weekly_asof_trade_date", not_null=False)
+        self._ensure_varchar_length(table, "run_id", 64)
+
+        unique_name = "ux_env_snapshot_run"
+        if not self._index_exists(table, unique_name):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE UNIQUE INDEX `{unique_name}`
+                        ON `{table}` (`monitor_date`, `run_id`)
+                        """
+                    )
+                )
+            self.logger.info("环境快照表 %s 已新增唯一索引 %s。", table, unique_name)
 
     def _ensure_env_index_snapshot_table(self, table: str) -> None:
         columns = {
             "snapshot_hash": "VARCHAR(32) NOT NULL",
-            "monitor_date": "VARCHAR(10) NULL",
-            "dedupe_bucket": "VARCHAR(16) NULL",
+            "monitor_date": "DATE NULL",
+            "run_id": "VARCHAR(64) NULL",
             "checked_at": "DATETIME(6) NULL",
             "index_code": "VARCHAR(16) NULL",
             "asof_trade_date": "DATE NULL",
@@ -600,6 +668,8 @@ class SchemaManager:
         else:
             self._add_missing_columns(table, columns)
         self._ensure_datetime_column(table, "checked_at")
+        self._ensure_date_column(table, "monitor_date", not_null=False)
+        self._ensure_varchar_length(table, "run_id", 64)
 
         unique_name = "uk_env_index_snapshot"
         if not self._index_exists(table, unique_name):
@@ -608,7 +678,7 @@ class SchemaManager:
                     text(
                         f"""
                         CREATE UNIQUE INDEX `{unique_name}`
-                        ON `{table}` (`monitor_date`, `dedupe_bucket`, `index_code`, `checked_at`)
+                        ON `{table}` (`monitor_date`, `run_id`, `index_code`, `checked_at`)
                         """
                     )
                 )
@@ -647,7 +717,7 @@ class SchemaManager:
             SELECT
               e.`monitor_date`,
               e.`sig_date`,
-              e.`dedupe_bucket`,
+              e.`run_id`,
               e.`code`,
               {name_expr} AS `name`,
               {industry_expr} AS `industry`,
@@ -719,7 +789,7 @@ class SchemaManager:
               idx.`position_cap` AS `env_index_position_cap`
             FROM `{eval_table}` e
             LEFT JOIN `{env_table}` env
-              ON e.`monitor_date` = env.`monitor_date` AND e.`dedupe_bucket` = env.`dedupe_bucket`
+              ON e.`monitor_date` = env.`monitor_date` AND e.`run_id` = env.`run_id`
             LEFT JOIN `{env_index_table}` idx
               ON e.`env_index_snapshot_hash` = idx.`snapshot_hash`
             {stock_join}

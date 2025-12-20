@@ -44,11 +44,11 @@ def main() -> None:
 
     # 将周线环境按“周线截止交易日”落表，避免每次运行都覆盖最新一条记录。
     monitor_date = asof_date
-    dedupe_bucket = f"WEEKLY_{asof_date}"
+    run_id = f"WEEKLY_{asof_date}"
     env_context = runner.build_and_persist_env_snapshot(
         asof_date,
         monitor_date=monitor_date,
-        dedupe_bucket=dedupe_bucket,
+        run_id=run_id,
         checked_at=checked_at,
     )
 
