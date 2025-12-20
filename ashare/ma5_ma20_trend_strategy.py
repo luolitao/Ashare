@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -177,6 +178,17 @@ def _atr(high: pd.Series, low: pd.Series, preclose: pd.Series, n: int = 14) -> p
     tr3 = (low - preclose).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.rolling(n, min_periods=1).mean().rename("atr14")
+
+
+def _rsi(close: pd.Series, n: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = (-delta).clip(lower=0)
+    avg_gain = gain.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    avg_loss = loss.ewm(alpha=1 / n, adjust=False, min_periods=n).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.rename("rsi14")
 
 
 def _split_exchange_symbol(code: str) -> Tuple[str, str]:
@@ -503,15 +515,18 @@ class MA5MA20StrategyRunner:
             dif, dea, hist = _macd(close)
             k, d, j = _kdj(high, low, close)
             atr = _atr(high, low, preclose)
+            rsi = _rsi(close)
 
             sub = sub.copy()
             sub["macd_dif"] = dif
             sub["macd_dea"] = dea
             sub["macd_hist"] = hist
+            sub["prev_macd_hist"] = hist.shift(1)
             sub["kdj_k"] = k
             sub["kdj_d"] = d
             sub["kdj_j"] = j
             sub["atr14"] = atr
+            sub["rsi14"] = rsi
             # pandas>=2.2, include_groups=False 会去掉分组列，主动恢复 code
             if "code" not in sub.columns:
                 sub["code"] = group_code
@@ -681,6 +696,9 @@ class MA5MA20StrategyRunner:
         prev_ma5_gt_ma20 = _prev_state(ma5_gt_ma20)
         cross_up = ma5_gt_ma20 & (~prev_ma5_gt_ma20)
         cross_down = (~ma5_gt_ma20) & prev_ma5_gt_ma20
+        prev_macd_hist = pd.to_numeric(df.get("prev_macd_hist"), errors="coerce")
+        hist_cross_up = (df["macd_hist"] > 0) & (prev_macd_hist <= 0)
+        hist_cross_down = (df["macd_hist"] < 0) & (prev_macd_hist >= 0)
 
         # 3) 放量确认
         vol_ok = df["vol_ratio"] >= float(p.volume_ratio_threshold)
@@ -690,6 +708,11 @@ class MA5MA20StrategyRunner:
         prev_macd_gt = _prev_state(macd_gt)
         macd_cross_up = macd_gt & (~prev_macd_gt)
         macd_ok = macd_cross_up | (df["macd_hist"] > 0)
+        macd_event = np.select(
+            [hist_cross_up, hist_cross_down],
+            ["MACD_HIST_CROSS_UP", "MACD_HIST_CROSS_DOWN"],
+            default="",
+        )
 
         # 5) KDJ 低位金叉（可选增强：只作为 reason 标记）
         kdj_gt = (df["kdj_k"] > df["kdj_d"]).astype(bool)
@@ -705,9 +728,12 @@ class MA5MA20StrategyRunner:
 
         buy_cross = trend_ok & cross_up & vol_ok & macd_ok
         buy_pullback = trend_ok & pullback_near & ma5_up & macd_ok
+        buy_macd_confirm = hist_cross_up & (df["close"] >= df["ma20"])
 
         # 卖出：死叉 或 跌破 MA20 且放量（趋势破坏）
-        sell = cross_down | ((df["close"] < df["ma20"]) & vol_ok)
+        sell_without_hist = cross_down | ((df["close"] < df["ma20"]) & vol_ok)
+        sell = sell_without_hist | hist_cross_down
+        reduce_mask = (df["ma5"] < df["ma20"]) & (df["vol_ratio"] < 1.0)
 
         # 用 pandas Series 拼接原因，避免 numpy.ndarray 没有 strip 的问题
         reason = pd.Series("", index=df.index, dtype="object")
@@ -719,12 +745,19 @@ class MA5MA20StrategyRunner:
 
         reason = _append(reason, buy_pullback, "趋势回踩MA20")
         reason = _append(reason, kdj_ok & (buy_cross | buy_pullback), "KDJ低位金叉")
+        reason = _append(reason, buy_macd_confirm, "MACD柱翻红")
 
         # 卖出原因优先覆盖
-        reason = reason.mask(sell, "MA5下穿MA20（死叉）或跌破MA20放量")
+        reason = reason.mask(sell_without_hist, "MA5下穿MA20（死叉）或跌破MA20放量")
+        reason = reason.mask(hist_cross_down, "MACD柱翻绿/死叉")
+        reason = reason.mask(reduce_mask, "死叉+缩量")
         reason = reason.mask(reason.eq(""), "观望")
 
-        signal = np.where(sell, "SELL", np.where(buy_cross | buy_pullback, "BUY", "HOLD"))
+        signal = np.select(
+            [sell, reduce_mask, buy_cross | buy_pullback, buy_macd_confirm],
+            ["SELL", "REDUCE", "BUY", "BUY_CONFIRM"],
+            default="HOLD",
+        )
 
         out = df.copy()
         out["signal"] = signal
@@ -887,6 +920,291 @@ class MA5MA20StrategyRunner:
         out["yearline_state"] = yearline_state
         out["risk_tag"] = risk_tags
         out["risk_note"] = risk_notes
+        out["runup_pct"] = out.groupby("code", sort=False)["close"].pct_change(periods=5)
+        fear_score = ((out["kdj_k"] - 50.0) / 50.0) * out["vol_ratio"]
+        out["fear_score"] = fear_score.clip(-3, 3)
+        wave_type = np.select(
+            [
+                (out["rsi14"] < 30) & (out["ma20_bias"] < -0.05),
+                out["ma20_bias"].abs() < 0.02,
+            ],
+            ["OVERSOLD_REVERT", "RANGE"],
+            default="TREND_PULLBACK",
+        )
+        out["wave_type"] = wave_type
+        out["pattern_tag"] = self._detect_price_patterns(out)
+        out["macd_event"] = macd_event
+        out["hist_cross_up"] = hist_cross_up
+        out["hist_cross_down"] = hist_cross_down
+
+        out = self._attach_chip_factors(out)
+        out = self._decide_final_action(out)
+
+        extras: List[str] = []
+        for _, row in out.iterrows():
+            payload = {
+                "raw_signal": row.get("raw_signal"),
+                "macd_event": row.get("macd_event"),
+                "hist_cross_up": bool(row.get("hist_cross_up", False)),
+                "hist_cross_down": bool(row.get("hist_cross_down", False)),
+                "chip_ok": row.get("chip_ok"),
+                "chip_reason": row.get("chip_reason"),
+                "gdhs_delta_pct": row.get("gdhs_delta_pct"),
+                "gdhs_announce_date": (
+                    row.get("gdhs_announce_date").isoformat()
+                    if isinstance(row.get("gdhs_announce_date"), (dt.date, pd.Timestamp))
+                    else None
+                ),
+                "fear_score": row.get("fear_score"),
+                "wave_type": row.get("wave_type"),
+                "pattern_tag": row.get("pattern_tag"),
+                "runup_pct": row.get("runup_pct"),
+            }
+            payload = {k: v for k, v in payload.items() if v is not None and not pd.isna(v)}
+            extras.append(json.dumps(payload, ensure_ascii=False))
+        out["extra_json"] = extras
+        return out
+
+    def _detect_price_patterns(self, df: pd.DataFrame) -> pd.Series:
+        if df.empty:
+            return pd.Series(dtype="object")
+
+        pattern = pd.Series("", index=df.index, dtype="object")
+        grouped = df.groupby("code", sort=False)
+        for code, sub in grouped:
+            lows = pd.to_numeric(sub.get("low"), errors="coerce")
+            highs = pd.to_numeric(sub.get("high"), errors="coerce")
+            closes = pd.to_numeric(sub.get("close"), errors="coerce")
+            vol_ratio = pd.to_numeric(sub.get("vol_ratio"), errors="coerce")
+
+            neckline = highs.rolling(15, min_periods=5).max()
+            valley_recent = lows.rolling(20, min_periods=10).min()
+            valley_prev = valley_recent.shift(5)
+            valley_close = (valley_recent.notna()) & (valley_prev.notna())
+            w_bottom = valley_close & ((valley_recent - valley_prev).abs() / valley_prev.clip(lower=1e-6) <= 0.03)
+            confirm = closes > neckline
+            if not vol_ratio.isna().all():
+                confirm = confirm & (vol_ratio > 1.2)
+            pattern.loc[sub.index] = np.where(confirm & w_bottom, "W_BOTTOM_CONFIRMED", "")
+
+            flag_slope = closes.diff().rolling(5, min_periods=5).mean()
+            flag_std = closes.rolling(5, min_periods=5).std()
+            flag_range_ok = (flag_std / closes.replace(0, np.nan)) < 0.02
+            flag_body = flag_slope.abs() < (closes.abs() * 0.001)
+            breakout = closes > closes.rolling(10, min_periods=5).max()
+            if not vol_ratio.isna().all():
+                breakout = breakout & (vol_ratio > 1.2)
+            pattern.loc[sub.index] = np.where(
+                breakout & flag_range_ok & flag_body,
+                "FLAG_BREAKOUT",
+                pattern.loc[sub.index],
+            )
+        return pattern
+
+    def _attach_chip_factors(self, signals: pd.DataFrame) -> pd.DataFrame:
+        table = "a_share_gdhs_detail"
+        if signals.empty or (not self._table_exists(table)):
+            signals["chip_ok"] = np.nan
+            signals["gdhs_delta_pct"] = np.nan
+            signals["gdhs_announce_date"] = pd.NaT
+            signals["chip_reason"] = None
+            return signals
+
+        codes = signals["code"].dropna().astype(str).unique().tolist()
+        if not codes:
+            return signals
+
+        select_stmt = f"SELECT * FROM `{table}` LIMIT 0"
+        with self.db_writer.engine.begin() as conn:
+            meta_df = pd.read_sql_query(text(select_stmt), conn)
+
+        columns = set(meta_df.columns)
+        code_col = "code" if "code" in columns else None
+        announce_candidates = [
+            "公告日期",
+            "股东户数公告日期",
+            "股东户数统计截止日",
+            "period",
+        ]
+        delta_pct_candidates = [
+            "股东户数-增减比例",
+            "增减比例",
+            "holder_change_ratio",
+        ]
+        delta_abs_candidates = [
+            "股东户数-变动数量",
+            "股东户数-上次",
+            "holder_change",
+        ]
+        announce_col = next((c for c in announce_candidates if c in columns), None)
+        delta_pct_col = next((c for c in delta_pct_candidates if c in columns), None)
+        delta_abs_col = next((c for c in delta_abs_candidates if c in columns), None)
+
+        if code_col is None or announce_col is None:
+            signals["chip_ok"] = np.nan
+            signals["gdhs_delta_pct"] = np.nan
+            signals["gdhs_announce_date"] = pd.NaT
+            signals["chip_reason"] = "DATA_MISSING"
+            return signals
+
+        select_cols = [code_col, announce_col]
+        for col in [delta_pct_col, delta_abs_col]:
+            if col:
+                select_cols.append(col)
+        latest_date = signals["date"].max()
+        latest_iso = latest_date.date().isoformat() if isinstance(latest_date, pd.Timestamp) else str(latest_date)
+        stmt = (
+            text(
+                f"""
+                SELECT {",".join(f"`{c}`" for c in select_cols)}
+                FROM `{table}`
+                WHERE `{code_col}` IN :codes
+                  AND `{announce_col}` <= :latest
+                """
+            ).bindparams(bindparam("codes", expanding=True))
+        )
+        with self.db_writer.engine.begin() as conn:
+            try:
+                chip_df = pd.read_sql_query(stmt, conn, params={"codes": codes, "latest": latest_iso})
+            except Exception:
+                chip_df = pd.DataFrame()
+
+        if chip_df.empty:
+            signals["chip_ok"] = np.nan
+            signals["gdhs_delta_pct"] = np.nan
+            signals["gdhs_announce_date"] = pd.NaT
+            signals["chip_reason"] = "DATA_MISSING"
+            return signals
+
+        chip_df = chip_df.rename(
+            columns={
+                code_col: "code",
+                announce_col: "announce_date",
+                delta_pct_col or "": "gdhs_delta_pct",
+                delta_abs_col or "": "gdhs_delta_raw",
+            }
+        )
+        chip_df["code"] = chip_df["code"].astype(str)
+        chip_df["announce_date"] = pd.to_datetime(chip_df["announce_date"], errors="coerce")
+        chip_df = chip_df.dropna(subset=["announce_date"]).sort_values(["announce_date", "code"])
+        signals["date"] = pd.to_datetime(signals["date"], errors="coerce")
+        signals = signals.dropna(subset=["date"]).sort_values(["date", "code"])
+
+        merged = pd.merge_asof(
+            signals,
+            chip_df,
+            by="code",
+            left_on="date",
+            right_on="announce_date",
+            direction="backward",
+            allow_exact_matches=True,
+        )
+        merged["gdhs_delta_pct"] = pd.to_numeric(merged.get("gdhs_delta_pct"), errors="coerce")
+        merged["gdhs_delta_raw"] = pd.to_numeric(merged.get("gdhs_delta_raw"), errors="coerce")
+        merged["gdhs_announce_date"] = merged.get("announce_date")
+        outlier = (
+            (merged["gdhs_delta_raw"].abs() < 1000)
+            | (merged["gdhs_delta_pct"].abs() > 80)
+        )
+        chip_reason = pd.Series("", index=merged.index, dtype="object")
+        chip_reason = chip_reason.mask(outlier, "DATA_OUTLIER_GDHS")
+        chip_reason = chip_reason.mask(
+            merged["gdhs_delta_pct"].isna() & merged["announce_date"].isna(), "DATA_MISSING"
+        )
+        chip_ok = np.where(
+            outlier,
+            False,
+            np.where(
+                (merged["gdhs_delta_pct"] < -5) & (merged["vol_ratio"] > 1.5),
+                True,
+                np.nan,
+            ),
+        )
+        merged["chip_ok"] = chip_ok
+        merged["chip_reason"] = chip_reason.replace("", None)
+        return merged
+
+    def _decide_final_action(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+
+        out = df.copy()
+        out["raw_signal"] = out["signal"]
+        final_action = pd.Series(out["signal"], index=out.index, dtype="object")
+        final_reason = pd.Series(out["reason"], index=out.index, dtype="object")
+        base_cap = 0.5
+        final_cap = pd.Series(base_cap, index=out.index, dtype=float)
+
+        required_cols = ["close", "ma20", "ma5", "vol_ratio", "macd_hist"]
+        missing_core = out[required_cols].isna().any(axis=1)
+        final_action = final_action.mask(missing_core, "HOLD")
+        final_reason = final_reason.mask(missing_core, "DATA_MISSING")
+        final_cap = final_cap.mask(missing_core, 0.0)
+
+        rsi = pd.to_numeric(out.get("rsi14"), errors="coerce")
+        bias = pd.to_numeric(out.get("ma20_bias"), errors="coerce")
+        env_gate = out.get("env_final_gate_action")
+        oversold = (rsi < 30) & (bias < -0.05)
+        final_cap = final_cap.mask(oversold, 0.2)
+
+        if env_gate is not None:
+            env_gate_upper = out["env_final_gate_action"].astype(str).str.upper()
+            gate_stop = env_gate_upper == "STOP"
+            gate_wait = env_gate_upper == "WAIT"
+            entry_mask = ~final_action.isin(["SELL", "REDUCE"])
+            final_cap = final_cap.mask(gate_stop | gate_wait, 0.0)
+            final_action = final_action.mask(
+                (gate_stop | gate_wait) & entry_mask,
+                "WAIT",
+            )
+            final_reason = final_reason.mask((gate_stop | gate_wait) & entry_mask, "ENV_GATE")
+
+        runup_pct = pd.to_numeric(out.get("runup_pct"), errors="coerce")
+        runup_exit = runup_pct > 0.15
+        final_action = final_action.mask(runup_exit, "REDUCE")
+        final_reason = final_reason.mask(runup_exit, "RUNUP>15%")
+        final_cap = final_cap.mask(runup_exit, 0.0)
+
+        prev_hist = pd.to_numeric(out.get("prev_macd_hist"), errors="coerce")
+        macd_hist = pd.to_numeric(out.get("macd_hist"), errors="coerce")
+        hist_diff = macd_hist - prev_hist
+        macd_shrink = (
+            hist_diff.groupby(out["code"], sort=False)
+            .rolling(3, min_periods=3)
+            .apply(lambda x: (x < 0).all(), raw=True)
+            .reset_index(level=0, drop=True)
+        )
+        soft_stop = (out["close"] > out["ma20"]) & (out["vol_ratio"] < 1.0) & (
+            macd_shrink.fillna(False) | out.get("hist_cross_down", False)
+        )
+        final_action = final_action.mask(soft_stop, "SELL")
+        final_reason = final_reason.mask(soft_stop, "动能衰减/缩量")
+        final_cap = final_cap.mask(soft_stop, 0.0)
+
+        reduce_mask = (out["ma5"] < out["ma20"]) & (out["vol_ratio"] < 1.0)
+        final_action = final_action.mask(reduce_mask & ~soft_stop, "REDUCE")
+        final_reason = final_reason.mask(reduce_mask & ~soft_stop, "死叉+缩量")
+        final_cap = final_cap.mask(reduce_mask, 0.0)
+
+        chip_ok = out.get("chip_ok")
+        chip_reason = out.get("chip_reason")
+        has_chip = chip_ok.notna() if isinstance(chip_ok, pd.Series) else pd.Series(False, index=out.index)
+        chip_reject = has_chip & (chip_ok == False)  # noqa: E712
+        final_action = final_action.mask(chip_reject, "WAIT")
+        final_reason = final_reason.mask(chip_reject, chip_reason.fillna("DATA_OUTLIER_GDHS"))
+        final_cap = final_cap.mask(chip_reject, 0.0)
+
+        chip_missing = chip_reason == "DATA_MISSING"
+        final_action = final_action.mask(chip_missing & ~chip_reject, "HOLD")
+        final_reason = final_reason.mask(chip_missing & ~chip_reject, "DATA_MISSING")
+        final_cap = final_cap.mask(chip_missing, 0.0)
+
+        exit_mask = final_action.isin(["SELL", "REDUCE"])
+        final_cap = final_cap.mask(exit_mask, 0.0)
+
+        out["final_action"] = final_action.fillna("HOLD")
+        out["final_reason"] = final_reason.fillna("观望")
+        out["final_cap"] = final_cap
         return out
 
     def _clear_table(self, table: str) -> None:
@@ -936,10 +1254,12 @@ class MA5MA20StrategyRunner:
             "macd_dif",
             "macd_dea",
             "macd_hist",
+            "prev_macd_hist",
             "kdj_k",
             "kdj_d",
             "kdj_j",
             "atr14",
+            "rsi14",
             "ret_10",
             "ret_20",
             "limit_up_cnt_20",
@@ -1016,10 +1336,20 @@ class MA5MA20StrategyRunner:
             "date",
             "code",
             "signal",
+            "final_action",
+            "final_reason",
+            "final_cap",
             "reason",
             "risk_tag",
             "risk_note",
             "stop_ref",
+            "macd_event",
+            "chip_ok",
+            "gdhs_delta_pct",
+            "gdhs_announce_date",
+            "fear_score",
+            "wave_type",
+            "extra_json",
         ]
         events_df = base[keep_cols].copy()
         events_df = events_df.rename(columns={"date": "sig_date"})
@@ -1034,7 +1364,26 @@ class MA5MA20StrategyRunner:
                     .astype(str)
                     .str.slice(0, 250)
                 )
+        for col in ["final_reason", "macd_event", "wave_type"]:
+            if col in events_df.columns:
+                events_df[col] = (
+                    events_df[col]
+                    .fillna("")
+                    .astype(str)
+                    .str.slice(0, 255)
+                )
+        events_df["gdhs_announce_date"] = pd.to_datetime(
+            events_df.get("gdhs_announce_date"), errors="coerce"
+        ).dt.date
         events_df["extra_json"] = None
+        if "extra_json" in base.columns:
+            events_df["extra_json"] = base["extra_json"].fillna("").astype(str)
+        if "chip_ok" in events_df.columns:
+            events_df["chip_ok"] = (
+                events_df["chip_ok"]
+                .astype("Int64")
+                .where(events_df["chip_ok"].notna(), other=pd.NA)
+            )
 
         if scope == "latest":
             delete_stmt = (
@@ -1113,7 +1462,8 @@ class MA5MA20StrategyRunner:
             self.logger.warning("最新交易日 %s 无任何信号行，已跳过 candidates。", latest_date)
             return
 
-        cands = latest[latest["signal"] == "BUY"].copy()
+        action_col = "final_action" if "final_action" in latest.columns else "signal"
+        cands = latest[latest[action_col].isin(["BUY", "BUY_CONFIRM"])].copy()
         if cands.empty:
             self._clear_table(tbl)
             self.logger.info("最新交易日 %s 未筛出 BUY 候选（低频策略：空仓等待）。", latest_date)
@@ -1138,6 +1488,9 @@ class MA5MA20StrategyRunner:
             "risk_tag",
             "risk_note",
             "reason",
+            "final_action",
+            "final_reason",
+            "final_cap",
         ]
         cands = cands[keep_cols].copy()
         cands = cands.rename(columns={"date": "sig_date"})
@@ -1208,6 +1561,8 @@ class MA5MA20StrategyRunner:
             snapshot_mask = sig_for_write["code"].isin(snapshot_only_codes)
             latest_mask = sig_for_write["date"].dt.date == latest_date
             sig_for_write.loc[snapshot_mask, "signal"] = "SNAPSHOT"
+            sig_for_write.loc[snapshot_mask, "final_action"] = "SNAPSHOT"
+            sig_for_write.loc[snapshot_mask, "final_reason"] = "SNAPSHOT_ONLY"
             sig_for_write.loc[snapshot_mask, "reason"] = "SNAPSHOT_ONLY"
             sig_for_write = pd.concat(
                 [sig_for_write[~snapshot_mask], sig_for_write[snapshot_mask & latest_mask]],

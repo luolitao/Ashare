@@ -23,6 +23,8 @@ TABLE_STRATEGY_INDICATOR_DAILY = "strategy_indicator_daily"
 TABLE_STRATEGY_SIGNAL_EVENTS = "strategy_signal_events"
 TABLE_STRATEGY_SIGNAL_CANDIDATES = "strategy_signal_candidates"
 VIEW_STRATEGY_SIGNAL_CANDIDATES = "v_strategy_signal_candidates"
+TABLE_STRATEGY_TRADE_METRICS = "strategy_trade_metrics"
+VIEW_STRATEGY_BACKTEST = "v_backtest"
 
 # 开盘监测输出
 TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_open_monitor_eval"
@@ -73,6 +75,8 @@ class SchemaManager:
             self._ensure_candidates_view(
                 tables.candidates_view, tables.signal_events_table, tables.indicator_table
             )
+        self._ensure_trade_metrics_table()
+        self._ensure_backtest_view()
 
         self._ensure_open_monitor_eval_table(tables.open_monitor_eval_table)
         self._ensure_open_monitor_quote_table(tables.open_monitor_quote_table)
@@ -86,6 +90,9 @@ class SchemaManager:
             tables.open_monitor_quote_table,
             tables.open_monitor_compat_view,
         )
+
+    def get_table_names(self) -> TableNames:
+        return self._resolve_table_names()
 
     def _resolve_table_names(self) -> TableNames:
         strat_cfg = get_section("strategy_ma5_ma20_trend") or {}
@@ -674,10 +681,12 @@ class SchemaManager:
             "macd_dif": "DOUBLE NULL",
             "macd_dea": "DOUBLE NULL",
             "macd_hist": "DOUBLE NULL",
+            "prev_macd_hist": "DOUBLE NULL",
             "kdj_k": "DOUBLE NULL",
             "kdj_d": "DOUBLE NULL",
             "kdj_j": "DOUBLE NULL",
             "atr14": "DOUBLE NULL",
+            "rsi14": "DOUBLE NULL",
             "ret_10": "DOUBLE NULL",
             "ret_20": "DOUBLE NULL",
             "limit_up_cnt_20": "DOUBLE NULL",
@@ -695,10 +704,19 @@ class SchemaManager:
             "code": "VARCHAR(20) NOT NULL",
             "strategy_code": "VARCHAR(32) NOT NULL",
             "signal": "VARCHAR(10) NULL",
+            "final_action": "VARCHAR(16) NULL",
+            "final_reason": "VARCHAR(255) NULL",
+            "final_cap": "DOUBLE NULL",
             "reason": "VARCHAR(255) NULL",
             "risk_tag": "VARCHAR(255) NULL",
             "risk_note": "VARCHAR(255) NULL",
             "stop_ref": "DOUBLE NULL",
+            "macd_event": "VARCHAR(32) NULL",
+            "chip_ok": "TINYINT(1) NULL",
+            "gdhs_delta_pct": "DOUBLE NULL",
+            "gdhs_announce_date": "DATE NULL",
+            "fear_score": "DOUBLE NULL",
+            "wave_type": "VARCHAR(64) NULL",
             "extra_json": "TEXT NULL",
         }
         if not self._table_exists(table):
@@ -712,6 +730,14 @@ class SchemaManager:
         self._ensure_varchar_length(table, "risk_tag", 255)
         self._ensure_varchar_length(table, "risk_note", 255)
         self._ensure_varchar_length(table, "reason", 255)
+        self._ensure_varchar_length(table, "final_reason", 255)
+        self._ensure_varchar_length(table, "macd_event", 32)
+        self._ensure_varchar_length(table, "wave_type", 64)
+        self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "chip_ok", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "gdhs_delta_pct", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "fear_score", "DOUBLE NULL")
+        self._ensure_date_column(table, "gdhs_announce_date", not_null=False)
         unique_name = "ux_signal_events_strategy_date_code"
         if not self._index_exists(table, unique_name):
             with self.engine.begin() as conn:
@@ -744,11 +770,17 @@ class SchemaManager:
             "risk_tag": "VARCHAR(255) NULL",
             "risk_note": "VARCHAR(255) NULL",
             "reason": "VARCHAR(255) NULL",
+            "final_action": "VARCHAR(16) NULL",
+            "final_reason": "VARCHAR(255) NULL",
+            "final_cap": "DOUBLE NULL",
         }
         if not self._table_exists(table):
             self._create_table(table, columns, primary_key=("sig_date", "code"))
             return
         self._add_missing_columns(table, columns)
+        self._ensure_varchar_length(table, "final_action", 16)
+        self._ensure_varchar_length(table, "final_reason", 255)
+        self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
 
     def _ensure_candidates_view(
         self, view: str, events_table: str, indicator_table: str
@@ -760,9 +792,9 @@ class SchemaManager:
               e.`sig_date`,
               e.`code`,
               e.`strategy_code`,
-              e.`signal` AS `sig_signal`,
-              e.`reason` AS `sig_reason`,
-              e.`reason`,
+              COALESCE(e.`final_action`, e.`signal`) AS `sig_signal`,
+              COALESCE(e.`final_reason`, e.`reason`) AS `sig_reason`,
+              COALESCE(e.`final_reason`, e.`reason`) AS `reason`,
               DATEDIFF(CURDATE(), e.`sig_date`) AS `signal_age`,
               CASE
                 WHEN e.`reason` LIKE '%回踩%' THEN 5
@@ -773,16 +805,79 @@ class SchemaManager:
               ind.`vol_ratio`,ind.`macd_hist`,ind.`kdj_k`,ind.`kdj_d`,ind.`atr14`,
               e.`stop_ref`,
               ind.`yearline_state`,e.`risk_tag`,e.`risk_note`,
+              e.`final_action`,e.`final_reason`,e.`final_cap`,
               e.`extra_json`
             FROM `{events_table}` e
             LEFT JOIN `{indicator_table}` ind
               ON e.`sig_date` = ind.`trade_date` AND e.`code` = ind.`code`
-            WHERE e.`signal` = 'BUY'
+            WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM')
             """
         )
         with self.engine.begin() as conn:
             conn.execute(stmt)
         self.logger.info("已创建/更新候选视图 %s。", view)
+
+    def _ensure_trade_metrics_table(self) -> None:
+        columns = {
+            "strategy_code": "VARCHAR(32) NOT NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "entry_date": "DATE NOT NULL",
+            "entry_price": "DOUBLE NULL",
+            "exit_date": "DATE NULL",
+            "exit_price": "DOUBLE NULL",
+            "atr_at_entry": "DOUBLE NULL",
+            "pnl_pct": "DOUBLE NULL",
+            "pnl_atr_ratio": "DOUBLE NULL",
+            "holding_days": "INT NULL",
+            "exit_reason": "VARCHAR(255) NULL",
+        }
+        table = TABLE_STRATEGY_TRADE_METRICS
+        if not self._table_exists(table):
+            self._create_table(table, columns, primary_key=("strategy_code", "code", "entry_date"))
+            return
+        self._add_missing_columns(table, columns)
+        self._ensure_numeric_column(table, "pnl_pct", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "pnl_atr_ratio", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "holding_days", "INT NULL")
+        self._ensure_varchar_length(table, "exit_reason", 255)
+
+    def _ensure_backtest_view(self) -> None:
+        table = TABLE_STRATEGY_TRADE_METRICS
+        view = VIEW_STRATEGY_BACKTEST
+        if not self._table_exists(table):
+            self._drop_relation(view)
+            return
+        stmt = text(
+            f"""
+            CREATE OR REPLACE VIEW `{view}` AS
+            SELECT
+              `strategy_code`,
+              'WEEK' AS `period_type`,
+              CAST(YEARWEEK(`exit_date`, 3) AS CHAR) AS `period_key`,
+              COUNT(*) AS `trade_cnt`,
+              1.0 * SUM(CASE WHEN `pnl_pct` > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `win_rate`,
+              AVG(`pnl_atr_ratio`) AS `avg_pnl_atr_ratio`,
+              SUM(CASE WHEN `pnl_atr_ratio` > 1.5 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `gt_1_5_ratio`
+            FROM `{table}`
+            WHERE `exit_date` IS NOT NULL
+            GROUP BY `strategy_code`, YEARWEEK(`exit_date`, 3)
+            UNION ALL
+            SELECT
+              `strategy_code`,
+              'MONTH' AS `period_type`,
+              CAST(DATE_FORMAT(`exit_date`, '%Y-%m') AS CHAR) AS `period_key`,
+              COUNT(*) AS `trade_cnt`,
+              1.0 * SUM(CASE WHEN `pnl_pct` > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `win_rate`,
+              AVG(`pnl_atr_ratio`) AS `avg_pnl_atr_ratio`,
+              SUM(CASE WHEN `pnl_atr_ratio` > 1.5 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `gt_1_5_ratio`
+            FROM `{table}`
+            WHERE `exit_date` IS NOT NULL
+            GROUP BY `strategy_code`, DATE_FORMAT(`exit_date`, '%Y-%m')
+            """
+        )
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+        self.logger.info("已创建/更新回测视图 %s。", view)
 
     # ---------- Open monitor ----------
     def _ensure_open_monitor_quote_table(self, table: str) -> None:

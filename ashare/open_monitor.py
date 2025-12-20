@@ -1414,7 +1414,7 @@ class MA5MA20OpenMonitorRunner:
                         f"""
                         SELECT DISTINCT `sig_date`
                         FROM `{events_table}`
-                        WHERE `signal` = 'BUY'
+                        WHERE COALESCE(`final_action`, `signal`) IN ('BUY','BUY_CONFIRM')
                           AND `strategy_code` = :strategy
                           AND `sig_date` <= :latest
                           AND `sig_date` >= :earliest
@@ -1458,13 +1458,23 @@ class MA5MA20OpenMonitorRunner:
               `sig_date`,
               `code`,
               `signal`,
+              `final_action`,
+              `final_reason`,
+              `final_cap`,
               `reason`,
               `risk_tag`,
               `risk_note`,
-              `stop_ref`
+              `stop_ref`,
+              `macd_event`,
+              `chip_ok`,
+              `gdhs_delta_pct`,
+              `gdhs_announce_date`,
+              `fear_score`,
+              `wave_type`,
+              `extra_json`
             FROM `{events_table}`
             WHERE `sig_date` IN :dates
-              AND `signal` = 'BUY'
+              AND COALESCE(`final_action`, `signal`) IN ('BUY','BUY_CONFIRM')
               AND `strategy_code` = :strategy
             """
         ).bindparams(bindparam("dates", expanding=True))
@@ -1484,6 +1494,10 @@ class MA5MA20OpenMonitorRunner:
             self.logger.info("%s 内无 BUY 信号，跳过开盘监测。", signal_dates)
             return latest_trade_date, signal_dates, events_df
 
+        if "final_action" in events_df.columns:
+            events_df["signal"] = events_df["final_action"].fillna(events_df["signal"])
+        if "final_reason" in events_df.columns:
+            events_df["reason"] = events_df["final_reason"].fillna(events_df["reason"])
         events_df["code"] = events_df["code"].astype(str)
         events_df["sig_date"] = pd.to_datetime(events_df["sig_date"], errors="coerce")
 
@@ -1549,6 +1563,16 @@ class MA5MA20OpenMonitorRunner:
             "atr14",
             "stop_ref",
             "signal",
+            "final_action",
+            "final_reason",
+            "final_cap",
+            "macd_event",
+            "chip_ok",
+            "gdhs_delta_pct",
+            "gdhs_announce_date",
+            "fear_score",
+            "wave_type",
+            "extra_json",
             "reason",
             "yearline_state",
         ]
@@ -1609,6 +1633,15 @@ class MA5MA20OpenMonitorRunner:
             "atr14": "sig_atr14",
             "stop_ref": "sig_stop_ref",
             "signal": "sig_signal",
+            "final_action": "sig_final_action",
+            "final_reason": "sig_final_reason",
+            "final_cap": "sig_final_cap",
+            "macd_event": "sig_macd_event",
+            "chip_ok": "sig_chip_ok",
+            "gdhs_delta_pct": "sig_gdhs_delta_pct",
+            "gdhs_announce_date": "sig_gdhs_announce_date",
+            "fear_score": "sig_fear_score",
+            "wave_type": "sig_wave_type",
             "reason": "sig_reason",
         }
         df = merged.rename(columns={k: v for k, v in signal_prefix_map.items() if k in merged.columns})
