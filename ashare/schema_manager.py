@@ -522,8 +522,29 @@ class SchemaManager:
         for name, table in index_tables:
             if not self._table_exists(table):
                 continue
+            meta = self._column_meta(table)
+            meta_norm = {str(col).lower(): str(col) for col in meta.keys()}
+
+            code_col = meta_norm.get("code")
+            date_col: str | None = None
+            for cand in ("snapshot_date", "date", "updatedate", "update_date", "trade_date"):
+                if cand in meta_norm:
+                    date_col = meta_norm[cand]
+                    break
+
+            if not code_col or not date_col:
+                self.logger.warning(
+                    "指数成分表 %s 缺少必需列（code/date），将跳过并继续。",
+                    table,
+                )
+                continue
+
             parts.append(
-                f"SELECT '{name}' AS `index_name`, `date` AS `snapshot_date`, `code` FROM `{table}`"
+                "SELECT "
+                f"'{name}' AS `index_name`, "
+                f"CAST(`{date_col}` AS DATE) AS `snapshot_date`, "
+                f"`{code_col}` AS `code` "
+                f"FROM `{table}`"
             )
 
         self._drop_relation(VIEW_DIM_INDEX_MEMBERSHIP_SNAPSHOT)
@@ -1096,13 +1117,15 @@ class SchemaManager:
         board_name_expr = "dsb.`board_name`" if board_dim_exists else "NULL"
         board_code_expr = "dsb.`board_code`" if board_dim_exists else "NULL"
         quote_join = ""
-        live_open_expr = "e.`live_open`"
-        live_high_expr = "e.`live_high`"
-        live_low_expr = "e.`live_low`"
-        live_latest_expr = "e.`live_latest`"
+        # 注意：eval 表只存评估/派生字段；盘口行情字段（open/high/low/latest/volume/amount）
+        # 通常落在 quote 表（strategy_open_monitor_quote）中。
+        live_open_expr = "NULL"
+        live_high_expr = "NULL"
+        live_low_expr = "NULL"
+        live_latest_expr = "NULL"
         live_pct_expr = "e.`live_pct_change`"
-        live_volume_expr = "e.`live_volume`"
-        live_amount_expr = "e.`live_amount`"
+        live_volume_expr = "NULL"
+        live_amount_expr = "NULL"
         live_gap_expr = "e.`live_gap_pct`"
         live_intraday_expr = "e.`live_intraday_vol_ratio`"
         if quote_table and self._table_exists(quote_table):
@@ -1114,13 +1137,13 @@ class SchemaManager:
                  AND e.`code` = q.`code`
                 """
             )
-            live_open_expr = "COALESCE(e.`live_open`, q.`live_open`)"
-            live_high_expr = "COALESCE(e.`live_high`, q.`live_high`)"
-            live_low_expr = "COALESCE(e.`live_low`, q.`live_low`)"
-            live_latest_expr = "COALESCE(e.`live_latest`, q.`live_latest`)"
+            live_open_expr = "q.`live_open`"
+            live_high_expr = "q.`live_high`"
+            live_low_expr = "q.`live_low`"
+            live_latest_expr = "q.`live_latest`"
             live_pct_expr = "COALESCE(e.`live_pct_change`, q.`live_pct_change`)"
-            live_volume_expr = "COALESCE(e.`live_volume`, q.`live_volume`)"
-            live_amount_expr = "COALESCE(e.`live_amount`, q.`live_amount`)"
+            live_volume_expr = "q.`live_volume`"
+            live_amount_expr = "q.`live_amount`"
             live_gap_expr = "COALESCE(e.`live_gap_pct`, q.`live_gap_pct`)"
             live_intraday_expr = "COALESCE(e.`live_intraday_vol_ratio`, q.`live_intraday_vol_ratio`)"
 
