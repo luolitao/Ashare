@@ -200,28 +200,70 @@ class ChipFilter:
 
         merged["gdhs_delta_pct"] = pd.to_numeric(merged.get("gdhs_delta_pct"), errors="coerce")
         merged["vol_ratio"] = pd.to_numeric(merged.get("vol_ratio"), errors="coerce")
-        chip_reason = pd.Series(pd.NA, index=merged.index, dtype="object")
+        merged["close"] = pd.to_numeric(merged.get("close"), errors="coerce")
+        merged["ma20"] = pd.to_numeric(merged.get("ma20"), errors="coerce")
+        merged["runup_pct"] = pd.to_numeric(merged.get("runup_pct"), errors="coerce")
+        merged["fear_score"] = pd.to_numeric(merged.get("fear_score"), errors="coerce")
+        merged["chip_delta"] = merged["gdhs_delta_pct"]
 
-        missing_gdhs = merged["gdhs_delta_pct"].isna() | merged["announce_date"].isna()
+        sig_dt = pd.to_datetime(merged["sig_date"], errors="coerce")
+        merged["age_days"] = (sig_dt - merged["announce_date"]).dt.days
+        merged["deadzone_hit"] = merged["chip_delta"].abs() <= 5
+        merged["stale_hit"] = merged["age_days"] > 120
+
+        chip_reason = pd.Series(pd.NA, index=merged.index, dtype="object")
+        chip_score = pd.Series(0.0, index=merged.index, dtype=float)
+
+        missing_gdhs = merged["chip_delta"].isna() | merged["announce_date"].isna()
         chip_reason = chip_reason.mask(missing_gdhs, "DATA_MISSING_GDHS")
         missing_vol = merged["vol_ratio"].isna()
         chip_reason = chip_reason.mask(missing_vol & chip_reason.isna(), "DATA_MISSING_VOL_RATIO")
 
         delta_raw = pd.to_numeric(merged.get("gdhs_delta_raw"), errors="coerce")
-        outlier_mask = (merged["gdhs_delta_pct"].abs() > 80) | (delta_raw.abs() > 1_000_000)
+        outlier_mask = (merged["chip_delta"].abs() > 80) | (delta_raw.abs() > 1_000_000)
         outlier_mask = outlier_mask.fillna(False)
         chip_reason = chip_reason.mask(outlier_mask & chip_reason.isna(), "DATA_OUTLIER_GDHS")
 
+        chip_reason = chip_reason.mask(merged["stale_hit"] & chip_reason.isna(), "DATA_STALE_GDHS")
+
         can_eval = chip_reason.isna()
-        chip_ok = pd.Series(pd.NA, index=merged.index, dtype="boolean")
-        chip_ok.loc[can_eval] = (merged.loc[can_eval, "gdhs_delta_pct"] < -5) & (
-            merged.loc[can_eval, "vol_ratio"] > 1.3
+        concentrate = can_eval & (merged["chip_delta"] <= -10)
+        disperse = can_eval & (merged["chip_delta"] >= 20)
+        deadzone = can_eval & merged["deadzone_hit"]
+
+        chip_score.loc[concentrate] += 0.6
+        chip_score.loc[disperse] -= 0.6
+
+        chip_reason = chip_reason.mask(concentrate, "CHIP_CONCENTRATE")
+        chip_reason = chip_reason.mask(disperse, "CHIP_DISPERSE_STRONG")
+        chip_reason = chip_reason.mask(deadzone, "CHIP_NEUTRAL")
+
+        # 量价确认与情绪分歧扣分
+        daily_drop_candidates = []
+        for col in ["pct_chg", "pct_change", "change_pct", "ret_1d", "ret"]:
+            if col in merged.columns:
+                daily_drop_candidates.append(pd.to_numeric(merged[col], errors="coerce"))
+        daily_drop = next((s for s in daily_drop_candidates if not s.isna().all()), pd.Series(np.nan, index=merged.index))
+        weaken_price = (merged["close"] < merged["ma20"]) | (
+            (merged["vol_ratio"] > 1.5) & (daily_drop < 0)
         )
+        chip_score.loc[can_eval & weaken_price.fillna(False)] -= 0.3
 
-        reject_mask = can_eval & (chip_ok == False)  # noqa: E712
-        chip_reason = chip_reason.mask(reject_mask, "CHIP_REJECT")
+        risk_tag = merged.get("risk_tag")
+        if isinstance(risk_tag, pd.Series):
+            risk_tag = risk_tag.astype("string")
+            mania_mask = risk_tag.str.contains("MANIA", case=False, na=False)
+        else:
+            mania_mask = pd.Series(False, index=merged.index)
 
-        merged["chip_ok"] = chip_ok
+        high_runup = merged["runup_pct"] > 0.2
+        chip_score.loc[can_eval & (high_runup | mania_mask)] -= 0.3
+
+        chip_score = chip_score.clip(-1.0, 1.0)
+        chip_reason = chip_reason.mask(can_eval & chip_reason.isna(), "CHIP_NEUTRAL")
+        chip_score = chip_score.where(~chip_reason.isna(), chip_score)
+
+        merged["chip_score"] = chip_score
         merged["chip_reason"] = chip_reason
         merged["sig_date"] = merged["sig_date"].dt.date
         merged["updated_at"] = dt.datetime.now()
@@ -232,9 +274,12 @@ class ChipFilter:
             "announce_date",
             "gdhs_delta_pct",
             "gdhs_delta_raw",
-            "chip_ok",
+            "chip_score",
             "chip_reason",
             "vol_ratio",
+            "age_days",
+            "deadzone_hit",
+            "stale_hit",
             "updated_at",
         ]
         result = merged[keep_cols].copy()

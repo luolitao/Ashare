@@ -956,7 +956,7 @@ class MA5MA20StrategyRunner:
                 "macd_event": row.get("macd_event"),
                 "hist_cross_up": bool(row.get("hist_cross_up", False)),
                 "hist_cross_down": bool(row.get("hist_cross_down", False)),
-                "chip_ok": row.get("chip_ok"),
+                "chip_score": row.get("chip_score"),
                 "chip_reason": row.get("chip_reason"),
                 "gdhs_delta_pct": row.get("gdhs_delta_pct"),
                 "gdhs_announce_date": (
@@ -964,6 +964,9 @@ class MA5MA20StrategyRunner:
                     if isinstance(row.get("gdhs_announce_date"), (dt.date, pd.Timestamp))
                     else None
                 ),
+                "age_days": row.get("age_days"),
+                "deadzone_hit": bool(row.get("deadzone_hit", False)),
+                "stale_hit": bool(row.get("stale_hit", False)),
                 "gate": row.get("gate_tag"),
                 "fear_score": row.get("fear_score"),
                 "wave_type": row.get("wave_type"),
@@ -1057,10 +1060,13 @@ class MA5MA20StrategyRunner:
             return merged_sig
 
         if signals.empty:
-            signals["chip_ok"] = np.nan
+            signals["chip_score"] = np.nan
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = None
+            signals["age_days"] = np.nan
+            signals["deadzone_hit"] = False
+            signals["stale_hit"] = False
             return signals
 
         signals = signals.copy()
@@ -1123,21 +1129,25 @@ class MA5MA20StrategyRunner:
                 stale_dates = pd.to_datetime(stale_rows["sig_date"], errors="coerce").dt.date.dropna().unique().tolist()
                 stale_codes = stale_rows["code"].astype(str).unique().tolist()
                 re_sig = signals[signals["date"].dt.date.isin(stale_dates) & signals["code"].isin(stale_codes)].copy()
+                refreshed = pd.DataFrame()
                 if not re_sig.empty:
                     re_sig = _fill_vol_ratio(re_sig, stale_dates, stale_codes)
                     refreshed = ChipFilter().apply(re_sig[["date", "code", "vol_ratio"]].copy())
-                    if not refreshed.empty:
-                        refreshed = refreshed.copy()
-                        refreshed["sig_date"] = pd.to_datetime(refreshed["sig_date"], errors="coerce")
-                        chip_df = chip_df[~stale_mask].copy()
-                        chip_df = pd.concat([chip_df, refreshed], ignore_index=True)
-                        chip_df = chip_df.drop_duplicates(subset=["sig_date", "code"], keep="last")
+                if not refreshed.empty:
+                    refreshed = refreshed.copy()
+                    refreshed["sig_date"] = pd.to_datetime(refreshed["sig_date"], errors="coerce")
+                    chip_df = chip_df[~stale_mask].copy()
+                    chip_df = pd.concat([chip_df, refreshed], ignore_index=True)
+                    chip_df = chip_df.drop_duplicates(subset=["sig_date", "code"], keep="last")
 
         if chip_df.empty:
-            signals["chip_ok"] = np.nan
+            signals["chip_score"] = np.nan
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = "DATA_MISSING_GDHS"
+            signals["age_days"] = np.nan
+            signals["deadzone_hit"] = False
+            signals["stale_hit"] = False
             return signals
 
         chip_df = chip_df.rename(columns={"announce_date": "gdhs_announce_date"})
@@ -1155,10 +1165,13 @@ class MA5MA20StrategyRunner:
         merged["gdhs_announce_date"] = pd.to_datetime(
             merged.get("gdhs_announce_date"), errors="coerce"
         )
-        merged["chip_ok"] = merged.get("chip_ok")
+        merged["chip_score"] = pd.to_numeric(merged.get("chip_score"), errors="coerce")
         merged["chip_reason"] = merged.get("chip_reason")
+        merged["age_days"] = pd.to_numeric(merged.get("age_days"), errors="coerce")
+        merged["deadzone_hit"] = merged.get("deadzone_hit", False)
+        merged["stale_hit"] = merged.get("stale_hit", False)
         gdhs_missing = merged["gdhs_announce_date"].isna() & merged["gdhs_delta_pct"].isna()
-        chip_all_missing = gdhs_missing & merged["chip_ok"].isna()
+        chip_all_missing = gdhs_missing & merged["chip_score"].isna()
         vol_missing = merged["vol_ratio"].isna()
         missing_reason_mask = merged["chip_reason"].isna() | (merged["chip_reason"] == "")
         missing_reason = np.select(
@@ -1172,7 +1185,7 @@ class MA5MA20StrategyRunner:
         missing_reason_series = pd.Series(missing_reason, index=merged.index, dtype="object")
         missing_reason_mask = missing_reason_series.notna()
         merged.loc[missing_reason_mask, "chip_reason"] = missing_reason_series[missing_reason_mask].values
-        merged.loc[missing_reason_mask, "chip_ok"] = pd.NA
+        merged.loc[missing_reason_mask, "chip_score"] = 0.0
         return merged
 
     def _decide_final_action(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1263,17 +1276,37 @@ class MA5MA20StrategyRunner:
         final_reason = final_reason.mask(reduce_mask & ~soft_stop, "弱势缩量减仓")
         final_cap = final_cap.mask(reduce_mask, 0.0)
 
-        chip_ok = out.get("chip_ok")
+        chip_score = pd.to_numeric(out.get("chip_score"), errors="coerce")
         chip_reason = out.get("chip_reason")
         chip_reason = chip_reason.replace("", pd.NA) if isinstance(chip_reason, pd.Series) else chip_reason
-        has_chip = chip_ok.notna() if isinstance(chip_ok, pd.Series) else pd.Series(False, index=out.index)
-        chip_reject = has_chip & (chip_ok == False)  # noqa: E712
-        final_action = final_action.mask(chip_reject, "WAIT")
-        default_chip_reason = (
-            chip_reason.fillna("CHIP_REJECT") if isinstance(chip_reason, pd.Series) else "CHIP_REJECT"
+        raw_signal = out.get("raw_signal")
+        raw_signal_upper = raw_signal.astype(str).str.upper() if isinstance(raw_signal, pd.Series) else None
+
+        entry_mask = ~final_action.isin(["SELL", "REDUCE"])
+        if raw_signal_upper is not None:
+            sell_raw = raw_signal_upper == "SELL"
+            final_action = final_action.mask(sell_raw, "SELL")
+            final_cap = final_cap.mask(sell_raw, 0.0)
+
+            buy_confirm_raw = raw_signal_upper == "BUY_CONFIRM"
+            degrade_wait = buy_confirm_raw & entry_mask & (chip_score < -0.5)
+            final_action = final_action.mask(degrade_wait, "WAIT")
+            wait_reason = chip_reason.fillna("CHIP_WEAK") if isinstance(chip_reason, pd.Series) else "CHIP_WEAK"
+            final_reason = final_reason.mask(degrade_wait, wait_reason)
+            final_cap = final_cap.mask(degrade_wait, 0.0)
+
+            weak_confirm = buy_confirm_raw & entry_mask & ~degrade_wait
+            confirm_cap = np.where(chip_score >= 0.2, 0.2, 0.1)
+            final_cap = final_cap.mask(weak_confirm, np.minimum(final_cap, confirm_cap))
+
+        chip_score_filled = chip_score.fillna(0) if isinstance(chip_score, pd.Series) else 0.0
+        hold_like = entry_mask & ~final_action.isin(["WAIT"])
+        cap_tier = np.select(
+            [chip_score_filled >= 0.5, chip_score_filled >= 0, chip_score_filled < 0],
+            [0.3, 0.2, 0.1],
+            default=final_cap,
         )
-        final_reason = final_reason.mask(chip_reject, default_chip_reason)
-        final_cap = final_cap.mask(chip_reject, 0.0)
+        final_cap = final_cap.mask(hold_like, np.minimum(final_cap, cap_tier))
 
         chip_missing = (
             chip_reason.astype("string").str.startswith("DATA_MISSING").fillna(False)
@@ -1439,10 +1472,13 @@ class MA5MA20StrategyRunner:
             "risk_note",
             "stop_ref",
             "macd_event",
-            "chip_ok",
+            "chip_score",
             "gdhs_delta_pct",
             "gdhs_announce_date",
             "chip_reason",
+            "age_days",
+            "deadzone_hit",
+            "stale_hit",
             "fear_score",
             "wave_type",
             "extra_json",
@@ -1477,12 +1513,13 @@ class MA5MA20StrategyRunner:
         events_df["extra_json"] = None
         if "extra_json" in base.columns:
             events_df["extra_json"] = base["extra_json"].fillna("").astype(str)
-        if "chip_ok" in events_df.columns:
-            events_df["chip_ok"] = (
-                events_df["chip_ok"]
-                .astype("Int64")
-                .where(events_df["chip_ok"].notna(), other=pd.NA)
-            )
+        if "chip_score" in events_df.columns:
+            events_df["chip_score"] = pd.to_numeric(events_df["chip_score"], errors="coerce")
+        if "age_days" in events_df.columns:
+            events_df["age_days"] = pd.to_numeric(events_df["age_days"], errors="coerce").astype("Int64")
+        for flag_col in ["deadzone_hit", "stale_hit"]:
+            if flag_col in events_df.columns:
+                events_df[flag_col] = events_df[flag_col].astype(bool)
 
         if scope == "latest":
             delete_stmt = (
