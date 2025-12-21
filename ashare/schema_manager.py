@@ -720,6 +720,8 @@ class SchemaManager:
             "gdhs_delta_pct": "DOUBLE NULL",
             "gdhs_announce_date": "DATE NULL",
             "chip_reason": "VARCHAR(255) NULL",
+            "chip_penalty": "DOUBLE NULL",
+            "chip_note": "VARCHAR(255) NULL",
             "age_days": "INT NULL",
             "deadzone_hit": "TINYINT(1) NULL",
             "stale_hit": "TINYINT(1) NULL",
@@ -744,12 +746,14 @@ class SchemaManager:
         self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
         self._ensure_numeric_column(table, "chip_score", "DOUBLE NULL")
         self._ensure_numeric_column(table, "gdhs_delta_pct", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "chip_penalty", "DOUBLE NULL")
         self._ensure_numeric_column(table, "fear_score", "DOUBLE NULL")
         self._ensure_numeric_column(table, "age_days", "INT NULL")
         self._ensure_numeric_column(table, "deadzone_hit", "TINYINT(1) NULL")
         self._ensure_numeric_column(table, "stale_hit", "TINYINT(1) NULL")
         self._ensure_date_column(table, "gdhs_announce_date", not_null=False)
         self._ensure_varchar_length(table, "chip_reason", 255)
+        self._ensure_varchar_length(table, "chip_note", 255)
         unique_name = "ux_signal_events_strategy_date_code"
         if not self._index_exists(table, unique_name):
             with self.engine.begin() as conn:
@@ -862,6 +866,8 @@ class SchemaManager:
             "gdhs_delta_raw": "DOUBLE NULL",
             "chip_score": "DOUBLE NULL",
             "chip_reason": "VARCHAR(255) NULL",
+            "chip_penalty": "DOUBLE NULL",
+            "chip_note": "VARCHAR(255) NULL",
             "vol_ratio": "DOUBLE NULL",
             "age_days": "INT NULL",
             "deadzone_hit": "TINYINT(1) NULL",
@@ -880,7 +886,9 @@ class SchemaManager:
         self._ensure_numeric_column(table, "age_days", "INT NULL")
         self._ensure_numeric_column(table, "deadzone_hit", "TINYINT(1) NULL")
         self._ensure_numeric_column(table, "stale_hit", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "chip_penalty", "DOUBLE NULL")
         self._ensure_varchar_length(table, "chip_reason", 255)
+        self._ensure_varchar_length(table, "chip_note", 255)
         self._ensure_datetime_column(table, "updated_at")
 
     def _ensure_backtest_view(self) -> None:

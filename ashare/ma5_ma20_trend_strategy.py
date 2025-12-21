@@ -967,6 +967,8 @@ class MA5MA20StrategyRunner:
                 "age_days": row.get("age_days"),
                 "deadzone_hit": bool(row.get("deadzone_hit", False)),
                 "stale_hit": bool(row.get("stale_hit", False)),
+                "chip_penalty": row.get("chip_penalty"),
+                "chip_note": row.get("chip_note"),
                 "gate": row.get("gate_tag"),
                 "fear_score": row.get("fear_score"),
                 "wave_type": row.get("wave_type"),
@@ -1064,6 +1066,8 @@ class MA5MA20StrategyRunner:
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = None
+            signals["chip_penalty"] = np.nan
+            signals["chip_note"] = None
             signals["age_days"] = np.nan
             signals["deadzone_hit"] = False
             signals["stale_hit"] = False
@@ -1175,6 +1179,8 @@ class MA5MA20StrategyRunner:
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = "DATA_MISSING_GDHS"
+            signals["chip_penalty"] = np.nan
+            signals["chip_note"] = "DATA_MISSING_GDHS"
             signals["age_days"] = np.nan
             signals["deadzone_hit"] = False
             signals["stale_hit"] = False
@@ -1197,6 +1203,8 @@ class MA5MA20StrategyRunner:
         )
         merged["chip_score"] = pd.to_numeric(merged.get("chip_score"), errors="coerce")
         merged["chip_reason"] = merged.get("chip_reason")
+        merged["chip_penalty"] = pd.to_numeric(merged.get("chip_penalty"), errors="coerce")
+        merged["chip_note"] = merged.get("chip_note")
         merged["age_days"] = pd.to_numeric(merged.get("age_days"), errors="coerce")
         merged["deadzone_hit"] = merged.get("deadzone_hit", False)
         merged["stale_hit"] = merged.get("stale_hit", False)
@@ -1206,9 +1214,9 @@ class MA5MA20StrategyRunner:
         missing_reason_mask = merged["chip_reason"].isna() | (merged["chip_reason"] == "")
         missing_reason = np.select(
             [
-                missing_reason_mask & (gdhs_missing | chip_all_missing),
-                missing_reason_mask & vol_missing,
-            ],
+            missing_reason_mask & (gdhs_missing | chip_all_missing),
+            missing_reason_mask & vol_missing,
+        ],
             ["DATA_MISSING_GDHS", "DATA_MISSING_VOL_RATIO"],
             default=None,
         )
@@ -1216,6 +1224,7 @@ class MA5MA20StrategyRunner:
         missing_reason_mask = missing_reason_series.notna()
         merged.loc[missing_reason_mask, "chip_reason"] = missing_reason_series[missing_reason_mask].values
         merged.loc[missing_reason_mask, "chip_score"] = 0.0
+        merged.loc[missing_reason_mask, "chip_note"] = merged.loc[missing_reason_mask, "chip_reason"]
         return merged
 
     def _decide_final_action(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -1315,6 +1324,7 @@ class MA5MA20StrategyRunner:
         chip_score = pd.to_numeric(out.get("chip_score"), errors="coerce")
         chip_reason = out.get("chip_reason")
         chip_reason = chip_reason.replace("", pd.NA) if isinstance(chip_reason, pd.Series) else chip_reason
+        chip_penalty = pd.to_numeric(out.get("chip_penalty"), errors="coerce").fillna(0.0)
         raw_signal = out.get("raw_signal")
         raw_signal_upper = raw_signal.astype(str).str.upper() if isinstance(raw_signal, pd.Series) else None
 
@@ -1365,6 +1375,7 @@ class MA5MA20StrategyRunner:
         final_reason = final_reason.mask(chip_missing & final_reason.isna(), missing_reason_fill)
 
         entry_mask = ~final_action.isin(["SELL", "REDUCE"])
+        final_cap = final_cap.mask(entry_mask, np.maximum(0.0, final_cap - chip_penalty))
         vol_ratio = pd.to_numeric(out.get("vol_ratio"), errors="coerce")
         low_vol_entry = vol_ratio_filled < 1.5
         final_cap = final_cap.mask(entry_mask & low_vol_entry & (final_cap > 0), 0.3)
@@ -1521,6 +1532,8 @@ class MA5MA20StrategyRunner:
             "gdhs_delta_pct",
             "gdhs_announce_date",
             "chip_reason",
+            "chip_penalty",
+            "chip_note",
             "age_days",
             "deadzone_hit",
             "stale_hit",
@@ -1552,6 +1565,14 @@ class MA5MA20StrategyRunner:
                     .astype(str)
                     .str.slice(0, 255)
                 )
+        if "chip_note" in events_df.columns:
+            events_df["chip_note"] = (
+                events_df["chip_note"]
+                .fillna("")
+                .astype(str)
+                .str.slice(0, 255)
+                .replace("", pd.NA)
+            )
         events_df["gdhs_announce_date"] = pd.to_datetime(
             events_df.get("gdhs_announce_date"), errors="coerce"
         ).dt.date
@@ -1560,6 +1581,8 @@ class MA5MA20StrategyRunner:
             events_df["extra_json"] = base["extra_json"].fillna("").astype(str)
         if "chip_score" in events_df.columns:
             events_df["chip_score"] = pd.to_numeric(events_df["chip_score"], errors="coerce")
+        if "chip_penalty" in events_df.columns:
+            events_df["chip_penalty"] = pd.to_numeric(events_df["chip_penalty"], errors="coerce")
         if "age_days" in events_df.columns:
             events_df["age_days"] = pd.to_numeric(events_df["age_days"], errors="coerce").astype("Int64")
         for flag_col in ["deadzone_hit", "stale_hit"]:
