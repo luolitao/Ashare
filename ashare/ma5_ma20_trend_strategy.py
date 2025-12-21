@@ -1018,9 +1018,9 @@ class MA5MA20StrategyRunner:
             try:
                 vr_stmt = text(
                     """
-                    SELECT `date` AS date, code, vol_ratio
+                    SELECT `trade_date`AS date, code, vol_ratio
                     FROM strategy_indicator_daily
-                    WHERE `date` IN :dates AND code IN :codes
+                    WHERE `trade_date` IN :dates AND code IN :codes
                     """
                 ).bindparams(bindparam("dates", expanding=True), bindparam("codes", expanding=True))
                 with self.db_writer.engine.begin() as conn:
@@ -1035,6 +1035,19 @@ class MA5MA20StrategyRunner:
             if vr_df.empty:
                 return sig_df
 
+            # 关键：merge 键 dtype 必须一致，否则会报：
+            # ValueError: You are trying to merge on datetime64[ns] and object columns for key 'date'
+            sig_df = sig_df.copy()
+            vr_df = vr_df.copy()
+            if "date" in sig_df.columns:
+                sig_df["date"] = pd.to_datetime(sig_df["date"], errors="coerce")
+            sig_df["code"] = sig_df["code"].astype(str)
+            vr_df["date"] = pd.to_datetime(vr_df["date"], errors="coerce")
+            vr_df["code"] = vr_df["code"].astype(str)
+            sig_df = sig_df.dropna(subset=["date", "code"])
+            vr_df = vr_df.dropna(subset=["date", "code"])
+            if sig_df.empty or vr_df.empty:
+                return sig_df
             merged_sig = sig_df.merge(vr_df, on=["date", "code"], how="left", suffixes=("", "_ind"))
             merged_sig["vol_ratio"] = pd.to_numeric(merged_sig["vol_ratio"], errors="coerce").fillna(
                 pd.to_numeric(merged_sig.get("vol_ratio_ind"), errors="coerce")
@@ -1350,6 +1363,8 @@ class MA5MA20StrategyRunner:
         indicator_df = indicator_df.rename(columns={"date": "trade_date"})
         indicator_df["trade_date"] = pd.to_datetime(indicator_df["trade_date"]).dt.date
         indicator_df["code"] = indicator_df["code"].astype(str)
+        # 防止 DataFrame 自身重复键（trade_date, code）导致一次写入就撞主键
+        indicator_df = indicator_df.drop_duplicates(subset=["trade_date", "code"], keep="last").copy()
 
         if scope == "latest":
             delete_stmt = (
@@ -1437,6 +1452,9 @@ class MA5MA20StrategyRunner:
         events_df["sig_date"] = pd.to_datetime(events_df["sig_date"]).dt.date
         events_df["code"] = events_df["code"].astype(str)
         events_df["strategy_code"] = STRATEGY_CODE_MA5_MA20_TREND
+
+        # 防止同一批信号里存在重复键，导致唯一约束/主键冲突（strategy_code, sig_date, code）
+        events_df = events_df.drop_duplicates(subset=["strategy_code", "sig_date", "code"], keep="last").copy()
         for col in ["risk_tag", "risk_note", "reason", "chip_reason"]:
             if col in events_df.columns:
                 events_df[col] = (

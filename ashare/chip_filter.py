@@ -123,7 +123,17 @@ class ChipFilter:
             return pd.DataFrame()
 
         sig_df = signals.copy()
-        sig_df["sig_date"] = pd.to_datetime(sig_df["date"], errors="coerce")
+        date_col = (
+            "date"
+            if "date" in sig_df.columns
+            else ("sig_date" if "sig_date" in sig_df.columns else None)
+        )
+        if date_col is None:
+            self.logger.warning(
+                "ChipFilter: signals 缺少 date/sig_date 列，无法计算筹码过滤。"
+            )
+            return pd.DataFrame()
+        sig_df["sig_date"] = pd.to_datetime(sig_df[date_col], errors="coerce")
         sig_df = sig_df.dropna(subset=["sig_date", "code"])
         sig_df["code"] = sig_df["code"].astype(str)
         sig_df = sig_df.sort_values(["code", "sig_date"], ignore_index=True)
