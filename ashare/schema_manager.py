@@ -716,10 +716,13 @@ class SchemaManager:
             "risk_note": "VARCHAR(255) NULL",
             "stop_ref": "DOUBLE NULL",
             "macd_event": "VARCHAR(32) NULL",
-            "chip_ok": "TINYINT(1) NULL",
+            "chip_score": "DOUBLE NULL",
             "gdhs_delta_pct": "DOUBLE NULL",
             "gdhs_announce_date": "DATE NULL",
             "chip_reason": "VARCHAR(255) NULL",
+            "age_days": "INT NULL",
+            "deadzone_hit": "TINYINT(1) NULL",
+            "stale_hit": "TINYINT(1) NULL",
             "fear_score": "DOUBLE NULL",
             "wave_type": "VARCHAR(64) NULL",
             "extra_json": "TEXT NULL",
@@ -739,9 +742,12 @@ class SchemaManager:
         self._ensure_varchar_length(table, "macd_event", 32)
         self._ensure_varchar_length(table, "wave_type", 64)
         self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "chip_ok", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "chip_score", "DOUBLE NULL")
         self._ensure_numeric_column(table, "gdhs_delta_pct", "DOUBLE NULL")
         self._ensure_numeric_column(table, "fear_score", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "age_days", "INT NULL")
+        self._ensure_numeric_column(table, "deadzone_hit", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "stale_hit", "TINYINT(1) NULL")
         self._ensure_date_column(table, "gdhs_announce_date", not_null=False)
         self._ensure_varchar_length(table, "chip_reason", 255)
         unique_name = "ux_signal_events_strategy_date_code"
@@ -854,9 +860,12 @@ class SchemaManager:
             "announce_date": "DATE NULL",
             "gdhs_delta_pct": "DOUBLE NULL",
             "gdhs_delta_raw": "DOUBLE NULL",
-            "chip_ok": "TINYINT(1) NULL",
+            "chip_score": "DOUBLE NULL",
             "chip_reason": "VARCHAR(255) NULL",
             "vol_ratio": "DOUBLE NULL",
+            "age_days": "INT NULL",
+            "deadzone_hit": "TINYINT(1) NULL",
+            "stale_hit": "TINYINT(1) NULL",
             "updated_at": "DATETIME(6) NULL",
         }
         table = TABLE_STRATEGY_CHIP_FILTER
@@ -864,10 +873,13 @@ class SchemaManager:
             self._create_table(table, columns, primary_key=("sig_date", "code"))
             return
         self._add_missing_columns(table, columns)
-        self._ensure_numeric_column(table, "chip_ok", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "chip_score", "DOUBLE NULL")
         self._ensure_numeric_column(table, "gdhs_delta_pct", "DOUBLE NULL")
         self._ensure_numeric_column(table, "gdhs_delta_raw", "DOUBLE NULL")
         self._ensure_numeric_column(table, "vol_ratio", "DOUBLE NULL")
+        self._ensure_numeric_column(table, "age_days", "INT NULL")
+        self._ensure_numeric_column(table, "deadzone_hit", "TINYINT(1) NULL")
+        self._ensure_numeric_column(table, "stale_hit", "TINYINT(1) NULL")
         self._ensure_varchar_length(table, "chip_reason", 255)
         self._ensure_datetime_column(table, "updated_at")
 
