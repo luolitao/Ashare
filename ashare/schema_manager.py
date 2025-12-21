@@ -707,7 +707,7 @@ class SchemaManager:
             "sig_date": "DATE NOT NULL",
             "code": "VARCHAR(20) NOT NULL",
             "strategy_code": "VARCHAR(32) NOT NULL",
-            "signal": "VARCHAR(10) NULL",
+            "signal": "VARCHAR(64) NULL",
             "final_action": "VARCHAR(16) NULL",
             "final_reason": "VARCHAR(255) NULL",
             "final_cap": "DOUBLE NULL",

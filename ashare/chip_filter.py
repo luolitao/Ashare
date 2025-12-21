@@ -296,7 +296,6 @@ class ChipFilter:
             "chip_score",
             "chip_reason",
             "vol_ratio",
-            "chip_ok",
             "age_days",
             "deadzone_hit",
             "stale_hit",
