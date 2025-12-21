@@ -1171,7 +1171,14 @@ class MA5MA20StrategyRunner:
                     refreshed = refreshed.copy()
                     refreshed["sig_date"] = pd.to_datetime(refreshed["sig_date"], errors="coerce")
                     chip_df = chip_df[~stale_mask].copy()
-                    chip_df = pd.concat([chip_df, refreshed], ignore_index=True)
+                    concat_frames = []
+                    for df in (chip_df, refreshed):
+                        if df is None or df.empty:
+                            continue
+                        if not df.notna().any().any():
+                            continue
+                        concat_frames.append(df)
+                    chip_df = pd.concat(concat_frames, ignore_index=True) if concat_frames else pd.DataFrame()
                     chip_df = chip_df.drop_duplicates(subset=["sig_date", "code"], keep="last")
 
         if chip_df.empty:
@@ -1753,6 +1760,14 @@ class MA5MA20StrategyRunner:
         self._fundamentals_cache = fundamentals
         self._stock_basic_cache = stock_basic
         sig = self._generate_signals(ind, fundamentals, stock_basic)
+        sig = sig.dropna(subset=["date", "code"])
+        sig["date"] = pd.to_datetime(sig["date"], errors="coerce")
+        sig["code"] = sig["code"].astype(str)
+        sig = (
+            sig.sort_values(["code", "date"])
+            .drop_duplicates(subset=["code", "date"], keep="last")
+            .reset_index(drop=True)
+        )
         sig_for_candidates = sig.copy()
         sig_for_candidates["code"] = sig_for_candidates["code"].astype(str)
 
@@ -1779,6 +1794,13 @@ class MA5MA20StrategyRunner:
             self._write_candidates(latest_date, sig_for_candidates)
 
         latest_sig = sig[sig["date"].dt.date == latest_date]
+        dup_count = int(latest_sig.duplicated(subset=["code", "date"]).sum())
+        self.logger.info(
+            "MA5-MA20 策略自检：latest_sig 行数=%s，唯一 code 数=%s，重复(code,date)=%s",
+            len(latest_sig),
+            latest_sig["code"].nunique(),
+            dup_count,
+        )
         action_col = "final_action" if "final_action" in latest_sig.columns else "signal"
         action_series = latest_sig[action_col].fillna("HOLD").astype(str)
         counts = action_series.value_counts(dropna=False)
