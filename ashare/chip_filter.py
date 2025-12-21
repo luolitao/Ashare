@@ -224,6 +224,8 @@ class ChipFilter:
 
         chip_reason = pd.Series(pd.NA, index=merged.index, dtype="object")
         chip_score = pd.Series(0.0, index=merged.index, dtype=float)
+        chip_penalty = pd.Series(0.0, index=merged.index, dtype=float)
+        chip_note = pd.Series(pd.NA, index=merged.index, dtype="object")
 
         missing_gdhs = merged["chip_delta"].isna() | merged["announce_date"].isna()
         chip_reason = chip_reason.mask(missing_gdhs, "DATA_MISSING_GDHS")
@@ -277,13 +279,23 @@ class ChipFilter:
 
         chip_score = chip_score.clip(-1.0, 1.0)
         chip_reason = chip_reason.mask(can_eval & chip_reason.isna(), "CHIP_NEUTRAL")
-        chip_score = chip_score.where(~chip_reason.isna(), chip_score)
-        chip_ok = chip_reason.isin({"CHIP_CONCENTRATE", "CHIP_NEUTRAL"}) | (
-            chip_score >= 0.0
-        )
+
+        data_issue_mask = chip_reason.isin({
+            "DATA_MISSING_GDHS",
+            "DATA_OUTLIER_GDHS",
+            "DATA_STALE_GDHS",
+        })
+        chip_score = chip_score.where(~data_issue_mask, 0.0)
+        chip_note = chip_note.mask(data_issue_mask, chip_reason)
+
+        deadzone_flag = merged["deadzone_hit"].fillna(False)
+        chip_penalty = chip_penalty.mask(deadzone_flag, chip_penalty + 0.1)
+        chip_note = chip_note.mask(deadzone_flag & chip_note.isna(), "DEADZONE_PENALTY")
 
         merged["chip_score"] = chip_score
         merged["chip_reason"] = chip_reason
+        merged["chip_penalty"] = chip_penalty
+        merged["chip_note"] = chip_note
         merged["sig_date"] = merged["sig_date"].dt.date
         merged["updated_at"] = dt.datetime.now()
 
@@ -299,6 +311,8 @@ class ChipFilter:
             "age_days",
             "deadzone_hit",
             "stale_hit",
+            "chip_penalty",
+            "chip_note",
             "updated_at",
         ]
         result = merged[keep_cols].copy()
