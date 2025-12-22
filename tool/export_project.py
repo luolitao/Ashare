@@ -1,10 +1,14 @@
 import os
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+ts = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y%m%d_%H%M%S")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 OUTPUT_DIR = SCRIPT_DIR / "output"
-OUTPUT_FILE = OUTPUT_DIR / "project_for_llm.txt"
+OUTPUT_FILE = OUTPUT_DIR / f"project_for_llm_{ts}.txt"
 
 # 想导出的文件后缀（按需增减）
 INCLUDE_EXT = {
