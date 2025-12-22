@@ -902,8 +902,9 @@ class SchemaManager:
             """
 
         chip_join = ""
-        chip_fields = ""
+        chip_enabled = False
         if chip_table and self._table_exists(chip_table):
+            chip_enabled = True
             chip_join = (
                 f"""
                 LEFT JOIN `{chip_table}` cf
@@ -911,12 +912,6 @@ class SchemaManager:
                  AND e.`code` = cf.`code`
                 """
             )
-            chip_fields = """
-              cf.`chip_score`,
-              cf.`chip_reason`,
-              cf.`chip_penalty`,
-              cf.`chip_note`
-            """
 
         meta = self._column_meta(events_table)
 
@@ -939,11 +934,6 @@ class SchemaManager:
         optional_cols = [
             "stop_ref",
             "macd_event",
-            "gdhs_delta_pct",
-            "gdhs_announce_date",
-            "age_days",
-            "deadzone_hit",
-            "stale_hit",
             "fear_score",
             "wave_type",
             "yearline_state",
@@ -989,10 +979,8 @@ class SchemaManager:
 
         if ind_fields:
             field_exprs.append(ind_fields.strip())
-        if chip_fields:
-            field_exprs.append(chip_fields.strip())
 
-        if chip_fields:
+        if chip_enabled:
             gdhs_delta_sources.append("cf.`gdhs_delta_pct`")
             announce_sources.append("cf.`announce_date`")
             chip_score_sources.append("cf.`chip_score`")

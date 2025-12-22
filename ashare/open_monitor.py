@@ -2691,7 +2691,8 @@ class MA5MA20OpenMonitorRunner:
                 if "industry" not in industry_dim.columns and "industry_classification" in industry_dim.columns:
                     industry_dim["industry"] = industry_dim["industry_classification"]
                 merged = merged.merge(
-                    industry_dim[[c for c in ["code", "industry", "industry_classification"] if c in industry_dim.columns]],
+                    industry_dim[
+                        [c for c in ["code", "industry", "industry_classification"] if c in industry_dim.columns]],
                     on="code",
                     how="left",
                 )
@@ -2706,11 +2707,7 @@ class MA5MA20OpenMonitorRunner:
             if not latest_snapshots.empty:
                 snap = latest_snapshots.copy()
                 snap["_has_latest_snapshot"] = True
-                rename_map = {
-                    c: f"asof_{c}"
-                    for c in snap.columns
-                    if c not in {"code", "_has_latest_snapshot"}
-                }
+                rename_map = {c: f"asof_{c}" for c in snap.columns if c not in {"code", "_has_latest_snapshot"}}
                 snap = snap.rename(columns=rename_map)
                 merged = merged.merge(snap, on="code", how="left")
 
@@ -2739,9 +2736,7 @@ class MA5MA20OpenMonitorRunner:
         )
         minutes_elapsed = self._calc_minutes_elapsed(checked_at_ts)
         total_minutes = 240
-        merged["avg_volume_20"] = (
-            merged["code"].map(avg_volume_map) if avg_volume_map else None
-        )
+        merged["avg_volume_20"] = merged["code"].map(avg_volume_map) if avg_volume_map else None
 
         float_cols = [
             "sig_close",
@@ -2789,9 +2784,7 @@ class MA5MA20OpenMonitorRunner:
 
         live_vol_scale = _infer_volume_scale_factor(merged)
         if live_vol_scale != 1.0 and "live_volume" in merged.columns:
-            merged["live_volume"] = merged["live_volume"].apply(
-                lambda x: None if x is None else x * live_vol_scale
-            )
+            merged["live_volume"] = merged["live_volume"].apply(lambda x: None if x is None else x * live_vol_scale)
 
         def _resolve_ref_close(row: pd.Series) -> float | None:
             for key in ("prev_close", "sig_close"):
@@ -2857,9 +2850,7 @@ class MA5MA20OpenMonitorRunner:
                 if run_id_norm == "PREOPEN" and ref_close is not None:
                     price_now = ref_close
                 elif run_id_norm == "POSTCLOSE":
-                    price_now = _to_float(row.get("live_latest")) or ref_close or _to_float(
-                        row.get("sig_close")
-                    )
+                    price_now = _to_float(row.get("live_latest")) or ref_close or _to_float(row.get("sig_close"))
 
             live_gap = None
             live_pct = None
@@ -2873,11 +2864,11 @@ class MA5MA20OpenMonitorRunner:
             live_vol = _to_float(row.get("live_volume"))
             live_intraday = None
             if (
-                avg_vol_20 is not None
-                and avg_vol_20 > 0
-                and live_vol is not None
-                and live_vol > 0
-                and minutes_elapsed > 0
+                    avg_vol_20 is not None
+                    and avg_vol_20 > 0
+                    and live_vol is not None
+                    and live_vol > 0
+                    and minutes_elapsed > 0
             ):
                 scaled = (live_vol / max(minutes_elapsed, 1)) * total_minutes
                 live_intraday = scaled / avg_vol_20
@@ -3039,16 +3030,31 @@ class MA5MA20OpenMonitorRunner:
         merged["rule_hits_json"] = rule_hits_json_list
         merged["summary_line"] = summary_lines
 
-        merged["asof_trade_date"] = merged.get("asof_trade_date").fillna(merged.get("sig_date"))
-        merged["asof_close"] = merged.get("asof_close").fillna(merged.get("sig_close"))
-        merged["asof_ma5"] = merged.get("asof_ma5").fillna(merged.get("sig_ma5"))
-        merged["asof_ma20"] = merged.get("asof_ma20").fillna(merged.get("sig_ma20"))
-        merged["asof_ma60"] = merged.get("asof_ma60").fillna(merged.get("sig_ma60"))
-        merged["asof_ma250"] = merged.get("asof_ma250").fillna(merged.get("sig_ma250"))
-        merged["asof_vol_ratio"] = merged.get("asof_vol_ratio").fillna(merged.get("sig_vol_ratio"))
-        merged["asof_macd_hist"] = merged.get("asof_macd_hist").fillna(merged.get("sig_macd_hist"))
-        merged["asof_atr14"] = merged.get("asof_atr14").fillna(merged.get("sig_atr14"))
-        merged["asof_stop_ref"] = merged.get("asof_stop_ref").fillna(merged.get("sig_stop_ref"))
+        # ---- 这里：修复 fillna object downcast FutureWarning（核心改动）----
+        def _coalesce_numeric_into(target: str, fallback: str) -> None:
+            if target not in merged.columns:
+                merged[target] = None
+            if fallback not in merged.columns:
+                return
+            left = pd.to_numeric(merged[target], errors="coerce")
+            right = pd.to_numeric(merged[fallback], errors="coerce")
+            merged[target] = left.fillna(right)
+
+        if "asof_trade_date" in merged.columns and "sig_date" in merged.columns:
+            # 用 where 合并，避免 object fillna 触发 downcast warning
+            mask = merged["asof_trade_date"].notna()
+            merged["asof_trade_date"] = merged["asof_trade_date"].where(mask, merged["sig_date"])
+
+        _coalesce_numeric_into("asof_close", "sig_close")
+        _coalesce_numeric_into("asof_ma5", "sig_ma5")
+        _coalesce_numeric_into("asof_ma20", "sig_ma20")
+        _coalesce_numeric_into("asof_ma60", "sig_ma60")
+        _coalesce_numeric_into("asof_ma250", "sig_ma250")
+        _coalesce_numeric_into("asof_vol_ratio", "sig_vol_ratio")
+        _coalesce_numeric_into("asof_macd_hist", "sig_macd_hist")
+        _coalesce_numeric_into("asof_atr14", "sig_atr14")
+        _coalesce_numeric_into("asof_stop_ref", "sig_stop_ref")
+        # ---- 修复结束 ----
 
         full_keep_cols = [
             "monitor_date",
