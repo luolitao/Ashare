@@ -933,7 +933,13 @@ class MA5MA20OpenMonitorRunner:
         payload["env_weekly_risk_level"] = _get_env("weekly_risk_level")
         payload["env_weekly_scene"] = _get_env("weekly_scene_code")
         payload["env_weekly_gate_policy"] = env_weekly_gate_policy
-        payload["env_weekly_gate_action"] = _get_env("weekly_gate_policy") or env_weekly_gate_policy
+
+        weekly_gate_action = (
+            _get_env("weekly_gate_action")
+            or _get_env("weekly_gate_policy")
+            or env_weekly_gate_policy
+        )
+        payload["env_weekly_gate_action"] = weekly_gate_action
         index_snapshot = {}
         if isinstance(env_context, dict):
             raw_index_snapshot = env_context.get("index_intraday")
@@ -942,7 +948,7 @@ class MA5MA20OpenMonitorRunner:
         env_index_hash = index_snapshot.get("env_index_snapshot_hash")
         payload["env_index_snapshot_hash"] = env_index_hash
         payload["env_final_gate_action"] = self._merge_gate_actions(
-            env_weekly_gate_policy, index_snapshot.get("env_index_gate_action")
+            weekly_gate_action, index_snapshot.get("env_index_gate_action")
         )
 
         if not self._table_exists(table):
@@ -3952,8 +3958,10 @@ class MA5MA20OpenMonitorRunner:
             dev_ma20_atr_txt = f"{dev_ma20_atr_val:.2f}" if dev_ma20_atr_val is not None else "-"
             runup_atr_txt = f"{runup_atr_val:.2f}" if runup_atr_val is not None else "-"
             board_txt = board_status or "-"
-            final_gate_action = ctx.env_gate_action or self._merge_gate_actions(
-                weekly_gate_action, env_index_gate_action
+            final_gate_action = self._merge_gate_actions(
+                weekly_gate_action,
+                env_index_gate_action,
+                ctx.env_gate_action,
             )
             gate_txt = final_gate_action or weekly_gate_action or "NOT_APPLIED"
             index_pct_txt = (
