@@ -170,6 +170,27 @@ class RunupMetrics:
     runup_from_sigclose: float | None
     runup_from_sigclose_atr: float | None
 
+@dataclass(frozen=True)
+class MarketEnvironment:
+    """开盘监测所需的核心环境信息。
+
+    说明：
+    - gate_action/position_cap_pct/reason_json 是决策层的主要输入；
+    - raw 保留原始 env_context，便于落库/排查，但规则与决策应优先使用结构化字段。
+    """
+
+    gate_action: str | None = None  # STOP / WAIT / ALLOW
+    position_cap_pct: float | None = None
+    reason_json: Any | None = None
+    index_snapshot_hash: str | None = None
+    regime: str | None = None
+    position_hint: float | None = None
+    weekly_asof_trade_date: str | None = None
+    weekly_risk_level: str | None = None
+    weekly_scene: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 
 @dataclass(frozen=True)
 class RuleHit:
@@ -2605,6 +2626,28 @@ class MA5MA20OpenMonitorRunner:
         return ("回踩" in reason_text) and (("ma20" in lower) or ("ma 20" in lower))
 
 
+    def _parse_market_environment(self, env_context: dict[str, Any] | None) -> MarketEnvironment:
+        if not isinstance(env_context, dict):
+            return MarketEnvironment()
+
+        gate_action = env_context.get("env_final_gate_action")
+        if gate_action is not None:
+            gate_action = str(gate_action).strip().upper()
+
+        return MarketEnvironment(
+            gate_action=gate_action,
+            position_cap_pct=_to_float(env_context.get("env_final_cap_pct")),
+            reason_json=env_context.get("env_final_reason_json"),
+            index_snapshot_hash=env_context.get("env_index_snapshot_hash"),
+            regime=env_context.get("regime"),
+            position_hint=_to_float(env_context.get("position_hint")),
+            weekly_asof_trade_date=env_context.get("weekly_asof_trade_date"),
+            weekly_risk_level=env_context.get("weekly_risk_level"),
+            weekly_scene=env_context.get("weekly_scene_code"),
+            raw=env_context,
+        )
+
+
     def _prepare_monitor_frame(
         self,
         signals: pd.DataFrame,
@@ -2769,43 +2812,23 @@ class MA5MA20OpenMonitorRunner:
         run_id_norm = str(run_id or "").strip().upper()
         ready_signals_used = getattr(self, "_ready_signals_used", False)
 
-        env_final_gate_action = None
-        env_final_cap_pct = None
-        env_final_reason_json = None
-        env_index_snapshot_hash = None
-        env_regime = None
-        env_position_hint = None
-        env_weekly_asof_trade_date = None
-        env_weekly_risk_level = None
-        env_weekly_scene = None
-        if isinstance(env_context, dict):
-            env_final_gate_action = env_context.get("env_final_gate_action")
-            env_final_cap_pct = _to_float(env_context.get("env_final_cap_pct"))
-            env_final_reason_json = env_context.get("env_final_reason_json")
-            env_index_snapshot_hash = env_context.get("env_index_snapshot_hash")
-            env_regime = env_context.get("regime")
-            env_position_hint = _to_float(env_context.get("position_hint"))
-            env_weekly_asof_trade_date = env_context.get("weekly_asof_trade_date")
-            env_weekly_risk_level = env_context.get("weekly_risk_level")
-            env_weekly_scene = env_context.get("weekly_scene_code")
+        env = self._parse_market_environment(env_context)
 
-        if env_final_gate_action is not None:
-            env_final_gate_action = str(env_final_gate_action).strip().upper()
-
-        if env_final_gate_action is None:
+        if env.gate_action is None:
             self.logger.error(
                 "环境快照缺少 env_final_gate_action，已终止评估（monitor_date=%s, run_id=%s）。",
                 monitor_date,
                 run_id,
             )
             return pd.DataFrame()
-        if env_final_cap_pct is None:
+        if env.position_cap_pct is None:
             self.logger.error(
                 "环境快照缺少 env_final_cap_pct，已终止评估（monitor_date=%s, run_id=%s）。",
                 monitor_date,
                 run_id,
             )
             return pd.DataFrame()
+
 
         merged, avg_volume_map, minutes_elapsed, total_minutes = self._prepare_monitor_frame(
             signals,
@@ -2952,9 +2975,9 @@ class MA5MA20OpenMonitorRunner:
                     action = candidate
                     action_reason = reason
 
-            if env_final_gate_action == "STOP":
+            if env.gate_action == "STOP":
                 apply_action("SKIP", "环境阻断")
-            elif env_final_gate_action == "WAIT":
+            elif env.gate_action == "WAIT":
                 apply_action("WAIT", "环境等待")
 
             chip_score = _to_float(row.get("sig_chip_score") or row.get("chip_score"))
@@ -2991,7 +3014,7 @@ class MA5MA20OpenMonitorRunner:
             if price_now is not None and sig_atr14 is not None:
                 trade_stop_ref = price_now - stop_atr_mult * sig_atr14
 
-            entry_cap = env_final_cap_pct
+            entry_cap = env.position_cap_pct
             sig_final_cap = _to_float(row.get("final_cap"))
             if sig_final_cap is not None:
                 entry_cap = sig_final_cap if entry_cap is None else min(entry_cap, sig_final_cap)
@@ -3015,13 +3038,13 @@ class MA5MA20OpenMonitorRunner:
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
             rule_hits_json_list.append(None)
             summary_lines.append(f"{state} {action} | {action_reason}")
-            env_index_snapshot_hashes.append(env_index_snapshot_hash)
-            env_final_gate_action_list.append(env_final_gate_action)
-            env_regimes.append(env_regime)
-            env_position_hints.append(env_position_hint)
-            env_weekly_asof_trade_dates.append(env_weekly_asof_trade_date)
-            env_weekly_risk_levels.append(env_weekly_risk_level)
-            env_weekly_scene_list.append(env_weekly_scene)
+            env_index_snapshot_hashes.append(env.index_snapshot_hash)
+            env_final_gate_action_list.append(env.gate_action)
+            env_regimes.append(env.regime)
+            env_position_hints.append(env.position_hint)
+            env_weekly_asof_trade_dates.append(env.weekly_asof_trade_date)
+            env_weekly_risk_levels.append(env.weekly_risk_level)
+            env_weekly_scene_list.append(env.weekly_scene)
 
         merged["monitor_date"] = monitor_date
         merged["live_trade_date"] = monitor_date
