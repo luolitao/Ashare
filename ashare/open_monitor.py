@@ -1538,20 +1538,29 @@ class MA5MA20OpenMonitorRunner:
         return {d: i for i, d in enumerate(dates)}
 
     def _load_recent_buy_signals(self) -> Tuple[str | None, List[str], pd.DataFrame]:
-        preferred_view = self.params.ready_signals_view
-        fallback_events = self.params.signal_events_table
-        events_table = preferred_view or fallback_events
-        use_ready_view = False
-        if preferred_view and self._table_exists(preferred_view):
+        preferred_view = str(self.params.ready_signals_view or "").strip()
+        fallback_events = str(self.params.signal_events_table or "").strip()
+
+        # 统一信号入口：默认必须使用 ready_signals_view。
+        # 只有当配置显式将 ready_signals_view 置空时，才允许回退到 signal_events_table。
+        if preferred_view:
+            if not self._table_exists(preferred_view):
+                self.logger.error(
+                    "ready_signals_view=%s 不存在，已跳过开盘监测；请先确保 SchemaManager.ensure_all 已执行或检查配置。",
+                    preferred_view,
+                )
+                return None, [], pd.DataFrame()
             events_table = preferred_view
             use_ready_view = True
-        elif fallback_events and self._table_exists(fallback_events):
+        else:
             events_table = fallback_events
+            use_ready_view = False
+            if not events_table or not self._table_exists(events_table):
+                self.logger.error("信号来源表/视图 %s 不存在，跳过开盘监测。", events_table)
+                return None, [], pd.DataFrame()
+
         self._ready_signals_used = use_ready_view
         indicator_table = self.params.indicator_table
-        if not self._table_exists(events_table):
-            self.logger.error("信号来源表/视图 %s 不存在，跳过开盘监测。", events_table)
-            return None, [], pd.DataFrame()
         monitor_date = dt.date.today().isoformat()
         # 严格最近 N 个交易日窗口：只由 signal_lookback_days 决定
         lookback = max(int(self.params.signal_lookback_days or 0), 1)
