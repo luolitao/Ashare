@@ -102,6 +102,48 @@ def make_snapshot_hash(row: Dict[str, Any]) -> str:
     return hashlib.md5(serialized.encode("utf-8")).hexdigest()
 
 
+def normalize_quotes_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """将不同来源行情列统一成 open_monitor 契约列。
+
+    统一后的列：
+    - live_open/live_high/live_low/live_latest/live_volume/live_amount
+    - 可选：live_pct_change、prev_close 等
+    """
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    out = df.copy()
+
+    mapping: Dict[str, str] = {
+        # 统一英文列
+        "open": "live_open",
+        "high": "live_high",
+        "low": "live_low",
+        "latest": "live_latest",
+        "volume": "live_volume",
+        "amount": "live_amount",
+        "pct_change": "live_pct_change",
+        "gap_pct": "live_gap_pct",
+        "intraday_vol_ratio": "live_intraday_vol_ratio",
+        # 统一中文列（以 akshare spot 为主）
+        "今开": "live_open",
+        "最高": "live_high",
+        "最低": "live_low",
+        "最新价": "live_latest",
+        "成交量": "live_volume",
+        "成交额": "live_amount",
+        "涨跌幅": "live_pct_change",
+        "昨收": "prev_close",
+    }
+
+    rename_cols = {k: v for k, v in mapping.items() if k in out.columns and v not in out.columns}
+    if rename_cols:
+        out = out.rename(columns=rename_cols)
+
+    return out
+
+
 def derive_index_gate_action(regime: str | None, position_hint: float | None) -> str | None:
     regime_norm = str(regime or "").strip().upper() or None
     pos_hint_val = _to_float(position_hint)
@@ -586,7 +628,7 @@ class OpenMonitorParams:
         if not isinstance(sec, dict):
             sec = {}
 
-        # 默认信号/指标表与策略保持一致
+        # 默认信号事件表/策略 code 与 strategy_ma5_ma20_trend 保持一致（指标表已废弃）
         strat = get_section("strategy_ma5_ma20_trend") or {}
         if isinstance(strat, dict):
             default_indicator = strat.get("indicator_table", cls.indicator_table)
@@ -597,7 +639,6 @@ class OpenMonitorParams:
             )
             default_strategy_code = strat.get("strategy_code", STRATEGY_CODE_MA5_MA20_TREND)
         else:
-            default_indicator = cls.indicator_table
             default_events = cls.signal_events_table
             default_strategy_code = STRATEGY_CODE_MA5_MA20_TREND
 
