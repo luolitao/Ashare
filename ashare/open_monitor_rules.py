@@ -1,25 +1,29 @@
 from __future__ import annotations
 
-"""open_monitor 的规则/决策引擎。
-
-说明：
-- 将 Rule/DecisionContext/RuleEngine 等纯逻辑从 open_monitor.py 拆分出来，避免巨石文件继续膨胀；
-- 规则集合（build_default_monitor_rules）仍由 monitor_rules.py 负责（通过类型注入避免循环依赖）。
-"""
-
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+# 注意：open_monitor_rules 是“唯一规则引擎真源”。
+# open_monitor.py 仅做 orchestrator：拼装 ctx / 拉行情 / 落库 / 导出。
+
+
+ACTION_PRIORITY = ["STOP", "SKIP", "REDUCE_50%", "WAIT", "EXECUTE", "UNKNOWN"]
+
+
+def _action_rank(val: str | None) -> int:
+    if val is None:
+        return len(ACTION_PRIORITY)
+    val_norm = str(val).strip().upper()
+    try:
+        return ACTION_PRIORITY.index(val_norm)
+    except ValueError:
+        return len(ACTION_PRIORITY)
+
 
 @dataclass(frozen=True)
 class MarketEnvironment:
-    """开盘监测所需的核心环境信息。
-
-    说明：
-    - gate_action/position_cap_pct/reason_json 是决策层的主要输入；
-    - raw 保留原始 env_context，便于落库/排查，但规则与决策应优先使用结构化字段。
-    """
+    """开盘监测所需的核心环境信息。"""
 
     gate_action: str | None = None  # STOP / WAIT / ALLOW
     position_cap_pct: float | None = None
@@ -36,14 +40,14 @@ class MarketEnvironment:
 @dataclass(frozen=True)
 class RuleHit:
     name: str
-    category: str  # STRUCTURE / EXECUTION / ENV
+    category: str  # STRUCTURE / ACTION / ENV_OVERLAY
     severity: int
     reason: str
     action_override: str | None = None
     state_override: str | None = None
     cap_override: float | None = None
 
-    def to_dict(self) -> dict[str, Any]:  # noqa: ANN401
+    def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "name": self.name,
             "category": self.category,
@@ -78,28 +82,22 @@ class RuleResult:
     env_position_cap: float | None = None
 
 
-ACTION_PRIORITY = ["STOP", "SKIP", "REDUCE_50%", "WAIT", "EXECUTE", "UNKNOWN"]
-
-
-def _action_rank(val: str | None) -> int:
-    if val is None:
-        return len(ACTION_PRIORITY)
-    val_norm = str(val).strip().upper()
-    try:
-        return ACTION_PRIORITY.index(val_norm)
-    except ValueError:
-        return len(ACTION_PRIORITY)
-
-
 @dataclass
 class DecisionContext:
+    """每一行信号的决策上下文。"""
+
+    # --- decision outputs ---
     state: str = "OK"
     state_reason: str = "结构/时效通过"
     state_severity: int = 0
+
     action: str = "EXECUTE"
     action_reason: str = "OK"
     action_rank: int = _action_rank("EXECUTE")
+
     entry_exposure_cap: float | None = None
+
+    # env_overlay 输出（独立于 env.gate_action；env.gate_action 由 ACTION 类规则处理）
     env_gate_action: str | None = None
     env_gate_reason: str | None = None
     env_position_cap: float | None = None
@@ -120,11 +118,7 @@ class DecisionContext:
 
     rule_hits: list[RuleHit] = field(default_factory=list)
 
-    def record_hit(
-        self,
-        rule: Rule,
-        result: RuleResult,
-    ) -> None:
+    def record_hit(self, rule: Rule, result: RuleResult) -> None:
         cap_override = result.cap_override
         if result.env_position_cap is not None:
             cap_override = (
@@ -158,6 +152,7 @@ class DecisionContext:
                 self.entry_exposure_cap = result.cap_override
             else:
                 self.entry_exposure_cap = min(self.entry_exposure_cap, result.cap_override)
+
         target_action = result.action_override or self.action
         target_rank = _action_rank(target_action)
         if target_rank < self.action_rank:
@@ -166,6 +161,7 @@ class DecisionContext:
             self.action_reason = result.reason
         elif target_rank == self.action_rank and self.action_reason in {"", None, "OK"}:
             self.action_reason = result.reason
+
         self.record_hit(rule, result)
 
     def apply_env_overlay(
@@ -174,133 +170,116 @@ class DecisionContext:
         result: RuleResult,
         merge_gate_actions: Callable[..., str | None],
     ) -> None:
-        if result.env_gate_action is None and result.env_position_cap is None:
-            self.record_hit(rule, result)
-            return
-        next_gate = merge_gate_actions(
-            self.env_gate_action,
-            result.env_gate_action,
-            prev_reason=self.env_gate_reason,
-            next_reason=result.reason,
-        )
-        if next_gate != self.env_gate_action:
-            self.env_gate_action = next_gate
-            self.env_gate_reason = result.reason
+        if result.env_gate_action:
+            self.env_gate_action = merge_gate_actions(self.env_gate_action, result.env_gate_action)
+            gate_note = result.reason or ""
+            if self.env_gate_reason and gate_note:
+                self.env_gate_reason = f"{self.env_gate_reason}; {gate_note}"
+            elif gate_note:
+                self.env_gate_reason = gate_note
+
         if result.env_position_cap is not None:
             if self.env_position_cap is None:
                 self.env_position_cap = result.env_position_cap
             else:
                 self.env_position_cap = min(self.env_position_cap, result.env_position_cap)
+
         self.record_hit(rule, result)
 
-    def export_action_reason(self) -> str:
-        if self.action_reason and self.action_reason != "OK":
-            return str(self.action_reason)
-        if self.env_gate_reason:
-            return str(self.env_gate_reason)
-        if self.state_reason and self.state_reason != "结构/时效通过":
-            return str(self.state_reason)
-        return "OK"
-
-    def export_state_reason(self) -> str:
-        if self.state_reason:
-            return str(self.state_reason)
-        return "结构/时效通过"
-
-    def export_rule_hits_json(self) -> str | None:
-        if not self.rule_hits:
-            return None
-        payload = [hit.to_dict() for hit in self.rule_hits]
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-    def finalize_env_overlay(
-        self,
-        merge_gate_actions: Callable[..., str | None],
-        *,
-        derive_gate_action: Callable[[str | None, float | None], str | None] | None = None,
-    ) -> None:
-        if self.env is None:
-            return
-        gate_from_env = self.env.gate_action
-        derived_gate = None
-        if derive_gate_action is not None:
-            derived_gate = derive_gate_action(self.env.regime, self.env.position_hint)
-        if derived_gate and derived_gate != gate_from_env:
-            gate_from_env = merge_gate_actions(
-                gate_from_env,
-                derived_gate,
-                prev_reason="env",
-                next_reason="derived",
-            )
-        if gate_from_env:
-            self.env_gate_action = merge_gate_actions(
-                self.env_gate_action,
-                gate_from_env,
-                prev_reason=self.env_gate_reason,
-                next_reason="env",
-            )
-        if self.env.position_cap_pct is not None:
-            cap = float(self.env.position_cap_pct)
-            if self.env_position_cap is None:
-                self.env_position_cap = cap
+    def finalize_env_overlay(self, merge_gate_actions: Callable[..., str | None]) -> None:
+        if self.env_position_cap is not None:
+            if self.entry_exposure_cap is None:
+                self.entry_exposure_cap = self.env_position_cap
             else:
-                self.env_position_cap = min(self.env_position_cap, cap)
+                self.entry_exposure_cap = min(self.entry_exposure_cap, self.env_position_cap)
 
-    def export_env_gate_action(self) -> str | None:
-        return self.env_gate_action
+        final_gate = merge_gate_actions(self.env_gate_action)
+        if final_gate is not None:
+            self.env_gate_action = final_gate
 
-    def export_env_cap_pct(self) -> float | None:
-        return self.env_position_cap
+        if final_gate in {"STOP", "WAIT"} and _action_rank(self.action) > _action_rank("WAIT"):
+            self.action = "WAIT"
+            self.action_rank = _action_rank("WAIT")
+            if self.action_reason in {"", None, "OK"} and self.env_gate_reason:
+                self.action_reason = self.env_gate_reason
+
+        if not self.rule_hits:
+            self.rule_hits.append(
+                RuleHit(
+                    name="OK",
+                    category="FINAL",
+                    severity=0,
+                    reason="OK",
+                )
+            )
+
+    def export_result(self) -> "DecisionResult":
+        state = self.state
+        if self.action == "SKIP":
+            state = "INVALID"
+        elif self.action == "WAIT":
+            state = "PENDING"
+        elif self.action == "UNKNOWN":
+            state = "UNKNOWN"
+
+        rule_hits_json = json.dumps(
+            [hit.to_dict() for hit in self.rule_hits],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        status_reason = self.action_reason
+        summary_line = f"{state} {self.action} | {self.action_reason}"
+
+        return DecisionResult(
+            state=state,
+            action=self.action,
+            action_reason=self.action_reason,
+            status_reason=status_reason,
+            entry_exposure_cap=self.entry_exposure_cap,
+            env_gate_action=self.env_gate_action,
+            rule_hits_json=rule_hits_json,
+            summary_line=summary_line,
+        )
 
 
 @dataclass(frozen=True)
 class DecisionResult:
     state: str
-    state_reason: str
     action: str
     action_reason: str
+    status_reason: str
     entry_exposure_cap: float | None
     env_gate_action: str | None
-    env_position_cap: float | None
-    rule_hits_json: str | None = None
+    rule_hits_json: str
+    summary_line: str
 
 
 class RuleEngine:
-    def __init__(self, rules: list[Rule]) -> None:
-        self.rules = list(rules or [])
+    """开盘监测规则引擎（唯一实现）。"""
 
-    def evaluate(
-        self,
-        ctx: DecisionContext,
-        *,
-        merge_gate_actions: Callable[..., str | None],
-        derive_gate_action: Callable[[str | None, float | None], str | None] | None = None,
-    ) -> DecisionResult:
-        if not self.rules:
-            ctx.finalize_env_overlay(
-                merge_gate_actions,
-                derive_gate_action=derive_gate_action,
-            )
-            return DecisionResult(
-                state=ctx.state,
-                state_reason=ctx.export_state_reason(),
-                action=ctx.action,
-                action_reason=ctx.export_action_reason(),
-                entry_exposure_cap=ctx.entry_exposure_cap,
-                env_gate_action=ctx.export_env_gate_action(),
-                env_position_cap=ctx.export_env_cap_pct(),
-                rule_hits_json=ctx.export_rule_hits_json(),
-            )
+    def __init__(self, merge_gate_actions: Callable[..., str | None]) -> None:
+        self.merge_gate_actions = merge_gate_actions
 
-        # 1) STRUCTURE gates
-        for rule in self.rules:
-            if rule.category != "STRUCTURE":
-                continue
-            if not rule.predicate(ctx):
-                continue
-            result = rule.effect(ctx)
-            ctx.apply_state(rule, result)
+    def apply(self, ctx: DecisionContext, rules: list[Rule]) -> None:
+        by_category: dict[str, list[Rule]] = {
+            "STRUCTURE": [],
+            "ACTION": [],
+            "ENV_OVERLAY": [],
+        }
+        for rule in rules:
+            bucket = by_category.get(rule.category)
+            if bucket is not None:
+                bucket.append(rule)
 
-        # 2) ACTION rules
-        for rule in self.rules:
-            if rule.category != "ACTION":
+        for category in ("STRUCTURE", "ACTION", "ENV_OVERLAY"):
+            for rule in sorted(by_category[category], key=lambda r: r.severity, reverse=True):
+                if rule.predicate(ctx):
+                    result = rule.effect(ctx)
+                    if category == "STRUCTURE":
+                        ctx.apply_state(rule, result)
+                    elif category == "ACTION":
+                        ctx.apply_action(rule, result)
+                    else:
+                        ctx.apply_env_overlay(rule, result, self.merge_gate_actions)
+
+        ctx.finalize_env_overlay(self.merge_gate_actions)

@@ -71,3 +71,14 @@ def test_runup_tolerance_and_pullback_gate_prevent_flapping():
     )
     assert triggered is True
     assert "runup_from_sigclose_atr=1.600" in reason
+
+
+def test_open_monitor_no_shadow_rule_engine() -> None:
+    import inspect
+
+    import ashare.open_monitor as om
+    from ashare import open_monitor_rules as core
+
+    assert om.RuleEngine is core.RuleEngine
+    src = inspect.getsource(om)
+    assert "class RuleEngine" not in src
