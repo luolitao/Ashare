@@ -671,7 +671,8 @@ class WeeklyEnvironmentBuilder:
             return "WAIT"
 
         if risk_level == "MEDIUM" and structure_status == "FORMING":
-            return "WAIT"
+            # feat: MEDIUM 风险周线不一票 WAIT，改为 ALLOW_SMALL 以降仓放行
+            return "ALLOW_SMALL"
 
         if risk_level in {"LOW", "MEDIUM"}:
             return "ALLOW"
@@ -748,6 +749,24 @@ class WeeklyEnvironmentBuilder:
             gate_candidates.append(regime_gate)
             reason_parts["regime_gate_action"] = regime_gate
 
+        # feat: env_final_reason_json 补充周线证据字段，便于解释 gate=WAIT/ALLOW_SMALL 的来源
+        for key in [
+            "weekly_risk_level",
+            "weekly_risk_score",
+            "weekly_scene_code",
+            "weekly_structure_status",
+            "weekly_pattern_status",
+            "weekly_asof_trade_date",
+            "weekly_current_week_closed",
+            "weekly_key_levels_str",
+            "weekly_money_proxy",
+            "weekly_tags",
+            "weekly_note",
+        ]:
+            value = env_context.get(key)
+            if value not in (None, "", [], {}, ()):  # noqa: PLC1901
+                reason_parts[key] = value
+
         final_gate = self._merge_gate_actions(*gate_candidates) or "ALLOW"
 
         cap_candidates = [
@@ -756,10 +775,9 @@ class WeeklyEnvironmentBuilder:
         ]
         final_cap = next((c for c in cap_candidates if c is not None), 1.0)
         final_cap = min(max(final_cap, 0.0), 1.0)
-
         env_context["env_final_gate_action"] = final_gate
         env_context["env_final_cap_pct"] = final_cap
-        env_context["env_final_reason_json"] = json.dumps(reason_parts, ensure_ascii=False)
+        env_context["env_final_reason_json"] = self._clip(json.dumps(reason_parts, ensure_ascii=False), 2000)
 
     @property
     def calendar_cache(self) -> set[str]:
