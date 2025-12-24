@@ -3108,26 +3108,74 @@ class MA5MA20OpenMonitorRunner:
             run_id,
             env_final_gate_action,
         )
+        # feat: 周线环境日志从 env_final_reason_json 回填关键字段，避免出现大量 None
+        reason_ctx = {}
+        if isinstance(env_context, dict):
+            reason_json = env_context.get("env_final_reason_json")
+            if isinstance(reason_json, str) and reason_json.strip():
+                try:
+                    reason_ctx = json.loads(reason_json)
+                except Exception:
+                    reason_ctx = {}
+
         weekly_scenario = env_context.get("weekly_scenario", {}) if isinstance(env_context, dict) else {}
         if isinstance(weekly_scenario, dict):
             struct_tags = ",".join(weekly_scenario.get("weekly_structure_tags", []) or [])
             confirm_tags = ",".join(weekly_scenario.get("weekly_confirm_tags", []) or [])
-            scene_code = weekly_scenario.get("weekly_scene_code")
+
+            asof_trade_date = weekly_scenario.get("weekly_asof_trade_date") or reason_ctx.get("weekly_asof_trade_date")
+            current_week_closed = weekly_scenario.get("weekly_current_week_closed")
+            if current_week_closed is None:
+                current_week_closed = reason_ctx.get("weekly_current_week_closed")
+
+            risk_level = weekly_scenario.get("weekly_risk_level") or reason_ctx.get("weekly_risk_level")
+            risk_score = _to_float(weekly_scenario.get("weekly_risk_score"))
+            if risk_score is None:
+                risk_score = _to_float(reason_ctx.get("weekly_risk_score"))
+            risk_score = risk_score or 0.0
+
+            scene_code = weekly_scenario.get("weekly_scene_code") or reason_ctx.get("weekly_scene_code")
+
             bias = weekly_scenario.get("weekly_bias")
+            if bias is None:
+                tags_str = reason_ctx.get("weekly_tags")
+                if isinstance(tags_str, str):
+                    if "BIAS_BULLISH" in tags_str:
+                        bias = "BULLISH"
+                    elif "BIAS_BEARISH" in tags_str:
+                        bias = "BEARISH"
+
             status = weekly_scenario.get("weekly_status")
-            key_levels_short = str(weekly_scenario.get("weekly_key_levels_str") or "")[:120]
+            if status is None:
+                status = (
+                    weekly_scenario.get("weekly_pattern_status")
+                    or reason_ctx.get("weekly_pattern_status")
+                    or reason_ctx.get("weekly_structure_status")
+                )
+
+            key_levels_str = weekly_scenario.get("weekly_key_levels_str") or reason_ctx.get("weekly_key_levels_str")
+            key_levels_short = str(key_levels_str or "")[:120]
+
+            if not confirm_tags:
+                tags_str = reason_ctx.get("weekly_tags")
+                if isinstance(tags_str, str) and tags_str.strip():
+                    confirm_tags = ",".join([t.strip() for t in tags_str.replace(";", ",").split(",") if t.strip()])
+
             self.logger.info(
                 "周线情景：asof=%s current_week_closed=%s risk=%s(%.1f) scene=%s bias=%s status=%s levels=%s 确认标签=%s",
-                weekly_scenario.get("weekly_asof_trade_date"),
-                weekly_scenario.get("weekly_current_week_closed"),
-                weekly_scenario.get("weekly_risk_level"),
-                _to_float(weekly_scenario.get("weekly_risk_score")) or 0.0,
+                asof_trade_date,
+                current_week_closed,
+                risk_level,
+                risk_score,
                 scene_code,
                 bias,
                 status,
                 key_levels_short,
                 confirm_tags,
             )
+            weekly_note = str(weekly_scenario.get("weekly_note") or reason_ctx.get("weekly_note") or "").strip()
+            if weekly_note:
+                self.logger.info("周线备注：%s", weekly_note[:200])
             plan_a = str(weekly_scenario.get("weekly_plan_a") or "").strip()[:200]
             plan_b = str(weekly_scenario.get("weekly_plan_b") or "").strip()[:200]
             if plan_a:
@@ -3186,10 +3234,22 @@ class MA5MA20OpenMonitorRunner:
                     "action_reason",
                 ]
             ].head(top_n)
+            preview_disp = preview.copy()
+            if gap_col.endswith("_pct") and gap_col in preview_disp.columns:
+                def _fmt_pct(v):
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        return ""
+                    if math.isnan(fv):
+                        return ""
+                    return f"{fv * 100:.3f}%"
+
+                preview_disp[gap_col] = preview_disp[gap_col].apply(_fmt_pct)
             self.logger.info(
                 "可执行清单 Top%s（按 gap 由小到大）：\n%s",
                 top_n,
-                preview.to_string(index=False),
+                preview_disp.to_string(index=False),
             )
 
         wait_df = result[result["action"] == "WAIT"].copy()
@@ -3208,10 +3268,22 @@ class MA5MA20OpenMonitorRunner:
                     "status_reason",
                 ]
             ].head(wait_top)
+            wait_preview_disp = wait_preview.copy()
+            if gap_col.endswith("_pct") and gap_col in wait_preview_disp.columns:
+                def _fmt_pct(v):
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        return ""
+                    if math.isnan(fv):
+                        return ""
+                    return f"{fv * 100:.3f}%"
+
+                wait_preview_disp[gap_col] = wait_preview_disp[gap_col].apply(_fmt_pct)
             self.logger.info(
                 "WAIT 观察清单 Top%s（按 gap 由小到大）：\n%s",
                 wait_top,
-                wait_preview.to_string(index=False),
+                wait_preview_disp.to_string(index=False),
             )
 
         self._persist_results(result)
