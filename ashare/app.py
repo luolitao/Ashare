@@ -71,7 +71,12 @@ def _fetch_kline_with_retry(
         max_backoff = 15.0
         return min(max_backoff, base * (2 ** (attempt_index - 1)))
 
-    session.ensure_alive(force_check=True)
+    # 关键优化：不要对“每只股票”都 force_check 探活。
+    # force_check=True 会触发一次额外的网络探针（_probe_alive -> query_sz50_stocks），
+    # 全市场拉取会把请求量翻倍，显著拖慢速度；并发时更容易触发超时/限流。
+    # 这里仅保证已登录即可；会话健康检查与自愈交给 BaostockDataFetcher/_call_with_retry 的节流逻辑。
+    session.ensure_alive()
+
     for attempt in range(1, max_retries + 1):
         try:
             df = fetcher.get_kline(
@@ -925,17 +930,25 @@ class AshareApp:
             worker_processes,
             len(codes_to_fetch),
         )
+        # feat: 按累计行数阈值批量写库，减少频繁 flush 导致的 I/O 开销
+        flush_rows_target = max(5000, int(self.write_chunksize) * 10)
+        flush_rows_target = min(flush_rows_target, 20000)
+        flush_frames_cap = max(self.history_flush_batch, 50)
+        buffer_rows = 0
+
 
         def _handle_result(
             status: str, code_value: str, payload: pd.DataFrame | str
         ) -> None:
             nonlocal success_count
+            nonlocal buffer_rows
 
             if status == "ok" and isinstance(payload, pd.DataFrame):
                 if payload.empty:
                     empty_codes.append(code_value)
                 else:
                     history_frames.append(payload)
+                    buffer_rows += len(payload)
                     success_count += 1
             else:
                 failed_codes.append(code_value)
@@ -958,7 +971,8 @@ class AshareApp:
                 _handle_result(status, code, payload)
 
                 if history_frames and (
-                    len(history_frames) >= self.history_flush_batch
+                    buffer_rows >= flush_rows_target
+                    or len(history_frames) >= flush_frames_cap
                     or idx == len(codes_to_fetch)
                 ):
                     self._flush_history_batch(
@@ -986,7 +1000,8 @@ class AshareApp:
                     _handle_result(status, code, payload)
 
                     if history_frames and (
-                        len(history_frames) >= self.history_flush_batch
+                        buffer_rows >= flush_rows_target
+                        or len(history_frames) >= flush_frames_cap
                         or idx == len(codes_to_fetch)
                     ):
                         self._flush_history_batch(
