@@ -75,13 +75,12 @@ class ChipFilter:
                 SELECT {",".join(f"`{c}`" for c in select_cols)}
                 FROM `{table}`
                 WHERE `{code_col}` IN :codes
-                  AND `{announce_col}` <= :latest
                 """
             ).bindparams(bindparam("codes", expanding=True))
         )
         with self.db_writer.engine.begin() as conn:
             try:
-                df = pd.read_sql_query(stmt, conn, params={"codes": list(codes), "latest": str(latest_date)})
+                df = pd.read_sql_query(stmt, conn, params={"codes": list(codes)})
             except Exception:
                 return pd.DataFrame()
 
@@ -93,6 +92,10 @@ class ChipFilter:
         df = df.rename(columns=rename_map)
         df["code"] = df["code"].astype(str)
         df["announce_date"] = pd.to_datetime(df["announce_date"], errors="coerce")
+        latest_ts = pd.to_datetime(latest_date, errors="coerce")
+        if pd.isna(latest_ts):
+            latest_ts = pd.Timestamp.max
+        df = df[df["announce_date"] <= latest_ts]
         df["gdhs_delta_pct"] = pd.to_numeric(df.get("gdhs_delta_pct"), errors="coerce")
         df["gdhs_delta_raw"] = pd.to_numeric(df.get("gdhs_delta_raw"), errors="coerce")
         return df.dropna(subset=["announce_date"]).sort_values(["code", "announce_date"]).reset_index(drop=True)
@@ -126,11 +129,18 @@ class ChipFilter:
             aligned = aligned[[c for c in aligned.columns if c in table_columns]].copy()
         self.db_writer.write_dataframe(aligned, self.table, if_exists="append")
 
-    def apply(self, signals: pd.DataFrame, *, gdhs_table: str = "a_share_gdhs_detail") -> pd.DataFrame:
+    def apply(
+        self,
+        signals: pd.DataFrame,
+        *,
+        gdhs_table: str = "a_share_gdhs_detail",
+        gdhs_summary_table: str | None = "a_share_gdhs",
+    ) -> pd.DataFrame:
         if signals.empty:
             return pd.DataFrame()
-
-        if not self._table_exists(gdhs_table):
+        detail_exists = self._table_exists(gdhs_table)
+        summary_exists = bool(gdhs_summary_table) and self._table_exists(gdhs_summary_table)
+        if not detail_exists and not summary_exists:
             return pd.DataFrame()
 
         sig_df = signals.copy()
@@ -153,9 +163,41 @@ class ChipFilter:
 
         latest_date = sig_df["sig_date"].max()
         codes = sig_df["code"].unique().tolist()
-        chip_df = self._load_gdhs_detail(codes, latest_date, gdhs_table)
-        if chip_df.empty:
-            return pd.DataFrame()
+        empty_cols = ["code", "announce_date", "gdhs_delta_pct", "gdhs_delta_raw"]
+
+        detail_df = (
+            self._load_gdhs_detail(codes, latest_date, gdhs_table)
+            if detail_exists
+            else pd.DataFrame(columns=empty_cols)
+        )
+        summary_df = (
+            self._load_gdhs_detail(codes, latest_date, gdhs_summary_table)  # type: ignore[arg-type]
+            if summary_exists
+            else pd.DataFrame(columns=empty_cols)
+        )
+
+        frames: list[pd.DataFrame] = []
+        if not detail_df.empty:
+            detail_df = detail_df.copy()
+            detail_df["__src"] = 0
+            frames.append(detail_df)
+        if not summary_df.empty:
+            summary_df = summary_df.copy()
+            summary_df["__src"] = 1
+            frames.append(summary_df)
+
+        chip_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=empty_cols)
+        if not chip_df.empty:
+            chip_df["code"] = chip_df["code"].astype(str)
+            chip_df["announce_date"] = pd.to_datetime(chip_df["announce_date"], errors="coerce")
+            chip_df["gdhs_delta_pct"] = pd.to_numeric(chip_df.get("gdhs_delta_pct"), errors="coerce")
+            chip_df["gdhs_delta_raw"] = pd.to_numeric(chip_df.get("gdhs_delta_raw"), errors="coerce")
+            chip_df = (
+                chip_df.dropna(subset=["code", "announce_date"])
+                .sort_values(["code", "announce_date", "__src"], ignore_index=True)
+                .drop_duplicates(subset=["code", "announce_date"], keep="first")
+                .drop(columns=["__src"], errors="ignore")
+            )
 
         chip_df = chip_df.sort_values(["code", "announce_date"], ignore_index=True)
 
@@ -288,7 +330,7 @@ class ChipFilter:
         chip_score = chip_score.where(~data_issue_mask, 0.0)
         chip_note = chip_note.mask(data_issue_mask, chip_reason)
 
-        deadzone_flag = merged["deadzone_hit"].fillna(False)
+        deadzone_flag = deadzone.fillna(False)
         chip_penalty = chip_penalty.mask(deadzone_flag, chip_penalty + 0.1)
         chip_note = chip_note.mask(deadzone_flag & chip_note.isna(), "DEADZONE_PENALTY")
 

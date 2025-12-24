@@ -39,6 +39,8 @@ TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_open_monitor_quote"
 VIEW_STRATEGY_OPEN_MONITOR_WIDE = "v_strategy_open_monitor_wide"
 # 开盘监测默认查询视图（精简字段；完整字段请查 v_strategy_open_monitor_wide）
 VIEW_STRATEGY_OPEN_MONITOR = "strategy_open_monitor"
+# 兼容旧版本开盘监测视图（历史命名）：用于清理遗留对象
+VIEW_OPEN_MONITOR_COMPAT_LEGACY = "open_monitor_compat_view"
 # 大盘/指数环境快照
 TABLE_ENV_INDEX_SNAPSHOT = "strategy_env_index_snapshot"
 
@@ -100,16 +102,23 @@ class SchemaManager:
         )
         schema_cfg = get_section("schema") or {}
         open_monitor_cfg = get_section("open_monitor") or {}
-        compat_views_enabled = False
+
+        schema_compat_views_enabled = False
         if isinstance(schema_cfg, dict) and ("compat_views" in schema_cfg):
-            compat_views_enabled = _to_bool(schema_cfg.get("compat_views"), False)
+            schema_compat_views_enabled = _to_bool(schema_cfg.get("compat_views"), False)
+
+        # compat_candidates_view: 仅控制候选池历史命名兼容（v_strategy_ma5_ma20_candidates）
+        compat_candidates_view_enabled = schema_compat_views_enabled
         if isinstance(open_monitor_cfg, dict) and ("compat_candidates_view" in open_monitor_cfg):
-            compat_views_enabled = _to_bool(
+            compat_candidates_view_enabled = _to_bool(
                 open_monitor_cfg.get("compat_candidates_view"),
-                compat_views_enabled,
+                compat_candidates_view_enabled,
             )
 
-        if compat_views_enabled:
+        # 开盘监测兼容视图：仅由 schema.compat_views 控制（避免与候选池兼容开关互相影响）
+        compat_open_monitor_view_enabled = schema_compat_views_enabled
+
+        if compat_candidates_view_enabled:
             self._ensure_candidates_compat_view(
                 VIEW_STRATEGY_MA5_MA20_CANDIDATES,
                 tables.candidates_view,
@@ -145,18 +154,20 @@ class SchemaManager:
         self._ensure_env_snapshot_table(tables.env_snapshot_table)
         self._ensure_env_index_snapshot_table(tables.env_index_snapshot_table)
         open_monitor_compat_view = tables.open_monitor_compat_view
-        if (
-            not compat_views_enabled
-            and open_monitor_compat_view
-            and open_monitor_compat_view not in {tables.open_monitor_view, tables.open_monitor_wide_view}
-        ):
-            if self._view_exists(open_monitor_compat_view) or self._table_exists(open_monitor_compat_view):
-                self._drop_relation_any(open_monitor_compat_view)
-                self.logger.info(
-                    "已禁用开盘监测兼容视图 %s，请改用 %s。",
-                    open_monitor_compat_view,
-                    tables.open_monitor_view,
-                )
+        if not compat_open_monitor_view_enabled:
+            legacy_open_monitor_views = {open_monitor_compat_view, VIEW_OPEN_MONITOR_COMPAT_LEGACY}
+            for legacy_view in legacy_open_monitor_views:
+                if (
+                    legacy_view
+                    and legacy_view not in {tables.open_monitor_view, tables.open_monitor_wide_view}
+                    and (self._view_exists(legacy_view) or self._table_exists(legacy_view))
+                ):
+                    self._drop_relation_any(legacy_view)
+                    self.logger.info(
+                        "已禁用开盘监测兼容视图 %s，请改用 %s。",
+                        legacy_view,
+                        tables.open_monitor_view,
+                    )
 
         self._ensure_open_monitor_view(
             tables.open_monitor_view,
@@ -165,7 +176,7 @@ class SchemaManager:
             tables.env_snapshot_table,
             tables.env_index_snapshot_table,
             tables.open_monitor_quote_table,
-            open_monitor_compat_view if compat_views_enabled else "",
+            open_monitor_compat_view if compat_open_monitor_view_enabled else "",
         )
 
     def get_table_names(self) -> TableNames:
