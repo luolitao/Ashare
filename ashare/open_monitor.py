@@ -3038,6 +3038,168 @@ class MA5MA20OpenMonitorRunner:
         self.logger.info("开盘监测 CSV 已导出：%s", path)
 
     # -------------------------
+    # Rank / observation (Stage 0)
+    # -------------------------
+    @staticmethod
+    def _clamp01(val: float | None) -> float:
+        if val is None:
+            return 0.0
+        try:
+            fv = float(val)
+        except Exception:  # noqa: BLE001
+            return 0.0
+        if fv != fv:  # NaN
+            return 0.0
+        return 0.0 if fv < 0.0 else 1.0 if fv > 1.0 else fv
+
+    def _calc_market_weight(self, env_context: dict[str, Any] | None) -> tuple[float, str]:
+        env = MarketEnvironment.from_snapshot(env_context)
+        gate = str(env.gate_action or "").strip().upper() or "-"
+        pos_hint = _to_float(env.position_hint)
+        weekly_risk = str(env.weekly_risk_level or "").strip().upper() or "-"
+
+        base_map = {"ALLOW": 1.0, "ALLOW_SMALL": 0.75, "WAIT": 0.45, "STOP": 0.0}
+        base = base_map.get(gate, 0.85)
+        pos_factor = 1.0 if pos_hint is None else self._clamp01(pos_hint)
+        risk_factor = 1.0
+        if weekly_risk == "HIGH":
+            risk_factor = 0.65
+        elif weekly_risk == "MEDIUM":
+            risk_factor = 0.85
+        elif weekly_risk == "LOW":
+            risk_factor = 1.05
+
+        market_weight = self._clamp01(base * pos_factor * risk_factor)
+        note = f"gate={gate} pos_hint={pos_hint if pos_hint is not None else '-'} weekly_risk={weekly_risk}"
+        return market_weight, note
+
+    @staticmethod
+    def _resolve_board_payload(
+        boards_map: dict[str, Any] | None, board_code: Any, board_name: Any
+    ) -> dict[str, Any] | None:
+        if not isinstance(boards_map, dict) or not boards_map:
+            return None
+        for key in (board_code, board_name):
+            key_norm = str(key or "").strip()
+            if key_norm and key_norm in boards_map:
+                payload = boards_map.get(key_norm)
+                return payload if isinstance(payload, dict) else None
+        return None
+
+    def _build_rank_frame(
+        self, df: pd.DataFrame, env_context: dict[str, Any] | None
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Stage 0：仅用于展示/排序，不影响 gate/action/入库结果。"""
+
+        if df.empty:
+            return df.copy(), {}
+
+        ranked = df.copy()
+        meta: dict[str, Any] = {}
+
+        market_weight, market_note = self._calc_market_weight(env_context)
+        ranked["market_weight"] = market_weight
+        meta["market_weight"] = market_weight
+        meta["market_note"] = market_note
+
+        boards_map = env_context.get("boards") if isinstance(env_context, dict) else None
+        if "board_status" not in ranked.columns:
+            ranked["board_status"] = None
+        if "board_rank" not in ranked.columns:
+            ranked["board_rank"] = None
+        if "board_chg_pct" not in ranked.columns:
+            ranked["board_chg_pct"] = None
+
+        def _fill_board(row: pd.Series) -> pd.Series:
+            payload = self._resolve_board_payload(
+                boards_map, row.get("board_code"), row.get("board_name")
+            )
+            if not payload:
+                return row
+            if not str(row.get("board_status") or "").strip():
+                row["board_status"] = payload.get("status")
+            if row.get("board_rank") in (None, "", 0) and payload.get("rank") is not None:
+                row["board_rank"] = payload.get("rank")
+            if row.get("board_chg_pct") in (None, "") and payload.get("chg_pct") is not None:
+                row["board_chg_pct"] = payload.get("chg_pct")
+            return row
+
+        if boards_map:
+            ranked = ranked.apply(_fill_board, axis=1)
+
+        status_weight_map = {"strong": 1.0, "neutral": 0.7, "weak": 0.4}
+        board_status = ranked.get("board_status")
+        if board_status is None:
+            ranked["board_weight"] = 0.6
+        else:
+            ranked["board_weight"] = (
+                board_status.astype(str).str.strip().str.lower().map(status_weight_map).fillna(0.6)
+            )
+
+        meta["board_weight_map"] = status_weight_map
+
+        quality_col = None
+        quality_series = None
+        for cand in ["signal_strength", "sig_chip_score", "sig_vol_ratio"]:
+            if cand in ranked.columns:
+                s = pd.to_numeric(ranked[cand], errors="coerce")
+                if s.notna().sum() >= 3:
+                    quality_col = cand
+                    quality_series = s
+                    break
+
+        if quality_series is None:
+            ranked["stock_quality_weight"] = 0.5
+            meta["stock_quality_source"] = None
+        else:
+            pct = quality_series.rank(pct=True)
+            median = float(pct.dropna().median()) if pct.notna().any() else 0.5
+            ranked["stock_quality_weight"] = pct.fillna(median)
+            meta["stock_quality_source"] = quality_col
+
+        ranked["final_rank_score"] = (
+            100.0
+            * (
+                0.45 * ranked["market_weight"]
+                + 0.35 * ranked["board_weight"]
+                + 0.20 * ranked["stock_quality_weight"]
+            )
+        )
+
+        return ranked, meta
+
+    @staticmethod
+    def _build_board_map_from_strength(board_strength: pd.DataFrame) -> dict[str, dict[str, Any]]:
+        board_map: dict[str, dict[str, Any]] = {}
+        if board_strength is None or getattr(board_strength, "empty", True):
+            return board_map
+
+        total = len(board_strength)
+        for _, row in board_strength.iterrows():
+            name = str(row.get("board_name") or "").strip()
+            code = str(row.get("board_code") or "").strip()
+            rank = row.get("rank")
+            pct = row.get("chg_pct")
+            status = "neutral"
+            if total > 0 and rank not in (None, ""):
+                try:
+                    rank_i = int(rank)
+                except Exception:  # noqa: BLE001
+                    rank_i = None
+                if rank_i is not None:
+                    if rank_i <= max(1, int(total * 0.2)):
+                        status = "strong"
+                    elif rank_i >= max(1, int(total * 0.8)):
+                        status = "weak"
+            payload = {"rank": rank, "chg_pct": pct, "status": status}
+            for key in [name, code]:
+                key_norm = str(key).strip()
+                if key_norm:
+                    board_map[key_norm] = payload
+
+        return board_map
+
+    # -------------------------
     # Public run
     # -------------------------
     def run(self, *, force: bool = False) -> None:
@@ -3219,26 +3381,59 @@ class MA5MA20OpenMonitorRunner:
         if result.empty:
             return
 
+        rank_env_context = env_context
+        if isinstance(env_context, dict) and "boards" not in env_context:
+            try:
+                board_strength = self.env_builder.load_board_spot_strength_from_db(
+                    latest_trade_date, checked_at=checked_at
+                )
+                board_map = self._build_board_map_from_strength(board_strength)
+                if board_map:
+                    rank_env_context = dict(env_context)
+                    rank_env_context["boards"] = board_map
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("读取板块强弱用于展示排序失败：%s", exc)
+
+        ranked_df, rank_meta = self._build_rank_frame(result, rank_env_context)
+        if rank_meta:
+            self.logger.info(
+                "展示排序权重(不影响 gate/action/入库)：market_weight=%.2f（%s） board_weight=%s stock_quality=%s",
+                float(rank_meta.get("market_weight") or 0.0),
+                str(rank_meta.get("market_note") or "-")[:120],
+                str(rank_meta.get("board_weight_map") or "-")[:120],
+                str(rank_meta.get("stock_quality_source") or "-")[:120],
+            )
+
         summary = result["action"].value_counts(dropna=False).to_dict()
         self.logger.info("开盘监测结果统计：%s", summary)
 
-        exec_df = result[result["action"] == "EXECUTE"].copy()
+        exec_df = ranked_df[ranked_df["action"] == "EXECUTE"].copy()
         gap_col = "live_gap_pct" if "live_gap_pct" in exec_df.columns else "gap_pct"
         exec_df[gap_col] = exec_df[gap_col].apply(_to_float)
-        exec_df = exec_df.sort_values(by=gap_col, ascending=True)
+        if "final_rank_score" in exec_df.columns:
+            exec_df["final_rank_score"] = pd.to_numeric(exec_df["final_rank_score"], errors="coerce")
+            exec_df = exec_df.sort_values(
+                by=["final_rank_score", gap_col],
+                ascending=[False, True],
+            )
+        else:
+            exec_df = exec_df.sort_values(by=gap_col, ascending=True)
         top_n = min(30, len(exec_df))
         if top_n > 0:
-            preview = exec_df[
-                [
-                    "code",
-                    "name",
-                    "sig_close",
-                    "live_open",
-                    "live_latest",
-                    gap_col,
-                    "action_reason",
-                ]
-            ].head(top_n)
+            preview_cols = [
+                "code",
+                "name",
+                "sig_close",
+                "live_open",
+                "live_latest",
+                gap_col,
+                "board_status",
+                "signal_strength",
+                "final_rank_score",
+                "action_reason",
+            ]
+            preview_cols = [c for c in preview_cols if c in exec_df.columns]
+            preview = exec_df[preview_cols].head(top_n)
             preview_disp = preview.copy()
             if gap_col.endswith("_pct") and gap_col in preview_disp.columns:
                 def _fmt_pct(v):
@@ -3252,27 +3447,37 @@ class MA5MA20OpenMonitorRunner:
 
                 preview_disp[gap_col] = preview_disp[gap_col].apply(_fmt_pct)
             self.logger.info(
-                "可执行清单 Top%s（按 gap 由小到大）：\n%s",
+                "可执行清单 Top%s（按 final_rank_score 优先，其次 gap）：\n%s",
                 top_n,
                 preview_disp.to_string(index=False),
             )
 
-        wait_df = result[result["action"] == "WAIT"].copy()
+        wait_df = ranked_df[ranked_df["action"] == "WAIT"].copy()
         wait_df[gap_col] = wait_df[gap_col].apply(_to_float)
-        wait_df = wait_df.sort_values(by=gap_col, ascending=True)
+        if "final_rank_score" in wait_df.columns:
+            wait_df["final_rank_score"] = pd.to_numeric(wait_df["final_rank_score"], errors="coerce")
+            wait_df = wait_df.sort_values(
+                by=["final_rank_score", gap_col],
+                ascending=[False, True],
+            )
+        else:
+            wait_df = wait_df.sort_values(by=gap_col, ascending=True)
         wait_top = min(10, len(wait_df))
         if wait_top > 0:
-            wait_preview = wait_df[
-                [
-                    "code",
-                    "name",
-                    "sig_close",
-                    "live_open",
-                    "live_latest",
-                    gap_col,
-                    "status_reason",
-                ]
-            ].head(wait_top)
+            wait_cols = [
+                "code",
+                "name",
+                "sig_close",
+                "live_open",
+                "live_latest",
+                gap_col,
+                "board_status",
+                "signal_strength",
+                "final_rank_score",
+                "status_reason",
+            ]
+            wait_cols = [c for c in wait_cols if c in wait_df.columns]
+            wait_preview = wait_df[wait_cols].head(wait_top)
             wait_preview_disp = wait_preview.copy()
             if gap_col.endswith("_pct") and gap_col in wait_preview_disp.columns:
                 def _fmt_pct(v):
@@ -3286,7 +3491,7 @@ class MA5MA20OpenMonitorRunner:
 
                 wait_preview_disp[gap_col] = wait_preview_disp[gap_col].apply(_fmt_pct)
             self.logger.info(
-                "WAIT 观察清单 Top%s（按 gap 由小到大）：\n%s",
+                "WAIT 观察清单 Top%s（按 final_rank_score 优先，其次 gap）：\n%s",
                 wait_top,
                 wait_preview_disp.to_string(index=False),
             )
