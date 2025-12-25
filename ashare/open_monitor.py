@@ -2540,13 +2540,47 @@ class MA5MA20OpenMonitorRunner:
             trade_stop_refs.append(trade_stop_ref)
             effective_stop_refs.append(trade_stop_ref)
 
-            states.append(result.state)
-            status_reasons.append(result.status_reason)
+            # ---------------------------
+            # 硬性数据缺失检查：不“回填/退回”，直接标记为数据问题，避免掩盖错误
+            # ---------------------------
+            missing_live = (
+                pd.isna(row.get("live_latest"))
+                and pd.isna(row.get("live_open"))
+                and pd.isna(row.get("live_high"))
+                and pd.isna(row.get("live_low"))
+            )
+            missing_asof = pd.isna(row.get("asof_trade_date")) or pd.isna(row.get("asof_close"))
+
+            state = result.state
+            status_reason = result.status_reason
+            rule_hits_json = result.rule_hits_json
+            summary_line = result.summary_line
+
+            if missing_live or missing_asof:
+                reason = "MISSING_LIVE_QUOTE" if missing_live else "MISSING_LATEST_SNAPSHOT"
+                state = "INVALID"
+                status_reason = reason
+                action = "SKIP"
+                action_reason = reason
+                summary_line = f"{summary_line} | DATA:{reason}"
+
+                # 尝试把缺失原因追加到 rule_hits_json（保持向后兼容）
+                try:
+                    hits = json.loads(rule_hits_json) if rule_hits_json else []
+                    if not isinstance(hits, list):
+                        hits = []
+                except Exception:
+                    hits = []
+                hits.append({"rule": reason, "severity": 100, "reason": reason})
+                rule_hits_json = json.dumps(hits, ensure_ascii=False)
+
+            states.append(state)
+            status_reasons.append(status_reason)
             actions.append(action)
             action_reasons.append(action_reason)
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
-            rule_hits_json_list.append(result.rule_hits_json)
-            summary_lines.append(result.summary_line)
+            rule_hits_json_list.append(rule_hits_json)
+            summary_lines.append(summary_line)
             env_index_snapshot_hashes.append(env.index_snapshot_hash)
             env_final_gate_action_list.append(result.env_gate_action or env.gate_action)
             env_regimes.append(env.regime)
@@ -2556,7 +2590,9 @@ class MA5MA20OpenMonitorRunner:
             env_weekly_scene_list.append(env.weekly_scene)
 
         merged["monitor_date"] = monitor_date
-        merged["live_trade_date"] = monitor_date
+        # live_trade_date 应保留行情数据中的实际交易日；不要覆盖为 monitor_date（否则会掩盖节假日/缺数等问题）
+        if "live_trade_date" not in merged.columns:
+            merged["live_trade_date"] = pd.NA
         merged["live_gap_pct"] = live_gap_list
         merged["live_pct_change"] = live_pct_change_list
         merged["live_intraday_vol_ratio"] = live_intraday_vol_list
