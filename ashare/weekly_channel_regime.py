@@ -240,7 +240,7 @@ class WeeklyChannelClassifier:
                 slope_change_4w = float(last_slope - prev_slope)
 
         state = "INSIDE_CHANNEL"
-        note = "仍在通道内运行，等待周收盘选择方向"
+        note = "仍在通道内运行"
 
         chan_pos = None
         chan_pos_clamped = None

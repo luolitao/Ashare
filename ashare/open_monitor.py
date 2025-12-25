@@ -474,6 +474,8 @@ class MA5MA20OpenMonitorRunner:
         )
         self.weekly_env_fallback_asof_date: str | None = None
         self._ready_signals_used: bool = False
+        self._recent_buy_signals_cache_key = None
+        self._recent_buy_signals_cache = None
 
     def _resolve_volume_ratio_threshold(self) -> float:
         strat = get_section("strategy_ma5_ma20_trend") or {}
@@ -621,6 +623,27 @@ class MA5MA20OpenMonitorRunner:
             return not df.empty and bool(df.iloc[0].get("cnt", 0))
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("检查列 %s.%s 是否存在失败：%s", table, column, exc)
+            return False
+
+
+    def _env_snapshot_exists(self, monitor_date: str, run_id: str) -> bool:
+        table = self.params.env_snapshot_table
+        if not (table and monitor_date and run_id and self._table_exists(table)):
+            return False
+
+        stmt = text(
+            f"""
+            SELECT 1 FROM `{table}`
+            WHERE `run_id` = :b AND `monitor_date` = :d
+            LIMIT 1
+            """
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                row = conn.execute(stmt, {"b": run_id, "d": monitor_date}).fetchone()
+                return row is not None
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("检查环境快照是否存在失败：%s", exc)
             return False
 
     def _persist_env_snapshot(
@@ -1336,6 +1359,12 @@ class MA5MA20OpenMonitorRunner:
         monitor_date = dt.date.today().isoformat()
         lookback = max(int(self.params.signal_lookback_days or 0), 1)
 
+        # feat: 缓存当次信号读取并按上周收盘口径判定周线，避免重复耗时与周中误提示
+        cache_key = (monitor_date, view, lookback, str(self.params.strategy_code))
+        if self._recent_buy_signals_cache_key == cache_key and self._recent_buy_signals_cache is not None:
+            cached_latest_trade_date, cached_signal_dates, cached_df = self._recent_buy_signals_cache
+            return cached_latest_trade_date, list(cached_signal_dates), cached_df.copy()
+
         # 1) 推导最新交易日（优先 daily_table；再回退 view.sig_date）
         latest_trade_date = self._resolve_latest_trade_date(ready_view=view)
         if not latest_trade_date:
@@ -1588,6 +1617,9 @@ class MA5MA20OpenMonitorRunner:
             if target not in df.columns:
                 df[target] = None
 
+        self._recent_buy_signals_cache_key = cache_key
+        self._recent_buy_signals_cache = (latest_trade_date, list(signal_dates), df.copy())
+
         return latest_trade_date, signal_dates, df
 
     def _load_latest_snapshots(self, latest_trade_date: str, codes: List[str]) -> pd.DataFrame:
@@ -1623,6 +1655,7 @@ class MA5MA20OpenMonitorRunner:
 
         snap_df["code"] = snap_df["code"].astype(str)
         merged = snap_df.copy()
+        stop_df = pd.DataFrame()
         if not stop_df.empty:
             stop_df = stop_df.rename(columns={"sig_date": "trade_date"})
             stop_df["trade_date"] = pd.to_datetime(stop_df["trade_date"]).dt.strftime("%Y-%m-%d")
@@ -3032,13 +3065,29 @@ class MA5MA20OpenMonitorRunner:
         codes = signals["code"].dropna().astype(str).unique().tolist()
         self.logger.info("待监测标的数量：%s（信号日：%s）", len(codes), signal_dates)
 
-        quotes = self._fetch_quotes(codes)
-        if quotes is None or quotes.empty:
-            self.logger.warning("未获取到任何实时行情，将输出 UNKNOWN 结果。")
-        else:
-            self.logger.info("实时行情已获取：%s 条", len(quotes))
+        if not self._env_snapshot_exists(monitor_date, run_id):
+            try:
+                self.build_and_persist_env_snapshot(
+                    latest_trade_date,
+                    monitor_date=monitor_date,
+                    run_id=run_id,
+                    checked_at=checked_at,
+                )
+                self.logger.info(
+                    "已自动补齐环境快照（monitor_date=%s, run_id=%s, latest_trade_date=%s）。",
+                    monitor_date,
+                    run_id,
+                    latest_trade_date,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.exception(
+                    "自动补齐环境快照失败（monitor_date=%s, run_id=%s）：%s",
+                    monitor_date,
+                    run_id,
+                    exc,
+                )
+                return
 
-        latest_snapshots = self._load_latest_snapshots(latest_trade_date, codes)
         env_context = self.load_env_snapshot_context(monitor_date, run_id)
         if not env_context:
             self.logger.error(
@@ -3047,6 +3096,15 @@ class MA5MA20OpenMonitorRunner:
                 run_id,
             )
             return
+
+        quotes = self._fetch_quotes(codes)
+        if quotes is None or quotes.empty:
+            self.logger.warning("未获取到任何实时行情，将输出 UNKNOWN 结果。")
+        else:
+            self.logger.info("实时行情已获取：%s 条", len(quotes))
+
+        latest_snapshots = self._load_latest_snapshots(latest_trade_date, codes)
+
 
         env_final_gate_action = env_context.get("env_final_gate_action") if isinstance(env_context, dict) else None
         self.logger.info(

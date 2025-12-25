@@ -454,7 +454,8 @@ class WeeklyEnvironmentBuilder:
         scenario.update(plan)
         scenario["weekly_asof_trade_date"] = plan.get("weekly_asof_trade_date")
         scenario["weekly_week_closed"] = plan.get("weekly_week_closed", False)
-        scenario["weekly_current_week_closed"] = plan.get("weekly_current_week_closed", False)
+        # feat: 周线按最新已收盘周口径输出 周中不再提示未收盘并保持正常cap
+        scenario["weekly_current_week_closed"] = bool(scenario.get("weekly_week_closed", False))
         scenario["weekly_gating_enabled"] = bool(plan.get("weekly_gating_enabled", False))
         scenario["weekly_risk_score"] = to_float(plan.get("weekly_risk_score"))
         scenario["weekly_risk_level"] = plan.get("weekly_risk_level") or "UNKNOWN"
@@ -478,7 +479,7 @@ class WeeklyEnvironmentBuilder:
             plan.get("weekly_structure_status") or plan.get("weekly_status")
         )
         scenario["weekly_pattern_status"] = plan.get("weekly_pattern_status")
-        if not scenario["weekly_current_week_closed"]:
+        if not scenario.get("weekly_week_closed", True):
             scenario["weekly_note"] = "本周未收盘，等待区间破位/突破（周收盘有效）"
 
         tags: list[str] = []

@@ -522,7 +522,7 @@ class WeeklyPlanSystem:
         status: str,
         direction_confirmed: bool,
         key_levels: Dict[str, float],
-        current_week_closed: bool,
+        asof_week_closed: bool,
         gate_policy: str | None = None,
     ) -> Tuple[str, str, str | None, str, str, float | None, str | None, str, str | None]:
         plan_a_if: List[str] = []
@@ -543,7 +543,7 @@ class WeeklyPlanSystem:
             plan_a_if.append("IF_BREAKDOWN")
         if gate_policy_norm == "WAIT" and "IF_WAIT_RANGE_BREAK" not in plan_a_if:
             plan_a_if.append("IF_WAIT_RANGE_BREAK")
-        if not current_week_closed:
+        if not asof_week_closed:
             plan_a_if.append("IF_CURRENT_WEEK_UNCLOSED")
         if direction_confirmed:
             plan_a_if.append("IF_CONFIRMED")
@@ -666,6 +666,8 @@ class WeeklyPlanSystem:
         if weekly_closed is None:
             weekly_closed = bool(current_week_closed and asof_str == week_end_str)
 
+        asof_week_closed = bool(weekly_closed)
+
         slope_delta = weekly_payload.get("slope_change_4w")
         if slope_delta is None and isinstance(weekly_payload.get("context", {}), dict):
             slope_delta = weekly_payload.get("context", {}).get("slope_change_4w")
@@ -719,7 +721,7 @@ class WeeklyPlanSystem:
             candidate.status,
             direction_confirmed,
             key_levels,
-            current_week_closed,
+            asof_week_closed,
             gate_policy,
         )
 
@@ -737,7 +739,7 @@ class WeeklyPlanSystem:
             exposure_cap = float(exposure_cap)
             if candidate.bias == "BEARISH":
                 exposure_cap = min(exposure_cap, 0.25)
-            if not current_week_closed:
+            if not asof_week_closed:
                 exposure_cap = min(exposure_cap, 0.20)
 
         money_proxy = {
@@ -780,7 +782,7 @@ class WeeklyPlanSystem:
                 "weekly_plan_b_recover_if": plan_b_recover,
                 "weekly_asof_trade_date": asof_str,
                 "weekly_week_closed": bool(weekly_closed),
-                "weekly_current_week_closed": current_week_closed,
+                "weekly_current_week_closed": asof_week_closed,
             }
         )
         plan_payload = {k: v for k, v in plan.items() if k != "weekly_plan_json"}
