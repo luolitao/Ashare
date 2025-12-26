@@ -116,24 +116,9 @@ def _next_trading_start(ts: dt.datetime, runner: MA5MA20OpenMonitorRunner) -> dt
 def _env_snapshot_exists(
     runner: MA5MA20OpenMonitorRunner, *, monitor_date: str, run_id: str
 ) -> bool:
-    table = str(getattr(runner.params, "env_snapshot_table", "") or "").strip()
-    if not table:
-        return False
-    if not runner._table_exists(table):  # noqa: SLF001
-        return False
-    stmt = text(
-        f"""
-        SELECT 1 FROM `{table}`
-        WHERE `run_id` = :b AND `monitor_date` = :d
-        LIMIT 1
-        """
-    )
-    try:
-        with runner.db_writer.engine.begin() as conn:
-            row = conn.execute(stmt, {"b": run_id, "d": monitor_date}).fetchone()
-            return row is not None
-    except Exception:  # noqa: BLE001
-        return False
+    """判断指定批次的环境快照是否已存在（委托给 Repository）。"""
+
+    return runner.repo.env_snapshot_exists(monitor_date, run_id)
 
 
 def main() -> None:
@@ -174,28 +159,11 @@ def main() -> None:
         - 不再回退读取 open_monitor.indicator_table（该字段仅为旧配置兼容，不应再作为调度入口依赖）；
         - 优先 daily_table.date；若无日线表，则回退 ready_signals_view.sig_date。
         """
-        base_table = runner._daily_table()  # noqa: SLF001
-        date_col = "date"
-        if not runner._table_exists(base_table):  # noqa: SLF001
-            view = str(getattr(runner.params, "ready_signals_view", "") or "").strip()
-            if not view or (not runner._table_exists(view)):  # noqa: SLF001
-                return None
-            base_table = view
-            date_col = "sig_date"
         try:
-            with runner.db_writer.engine.begin() as conn:
-                df = pd.read_sql_query(
-                    f"SELECT MAX(`{date_col}`) AS max_date FROM `{base_table}`",
-                    conn,
-                )
+            view = str(getattr(runner.params, "ready_signals_view", "") or "").strip() or None
+            return runner.repo._resolve_latest_trade_date(ready_view=view)  # noqa: SLF001
         except Exception:  # noqa: BLE001
             return None
-        if df.empty:
-            return None
-        val = df.iloc[0].get("max_date")
-        if pd.isna(val) or not str(val).strip():
-            return None
-        return str(val)[:10]
 
     def _ensure_env_snapshot(trigger_at: dt.datetime) -> tuple[str, str]:
         nonlocal ensured_key, ensured_ready

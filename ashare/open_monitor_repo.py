@@ -526,6 +526,35 @@ class OpenMonitorRepository:
         trade_age_map = self._load_trade_age_map(latest_trade_date, str(min_date), monitor_date)
         events_df["signal_age"] = events_df["sig_date"].map(trade_age_map)
 
+        # fix: 监控候选在拉行情/评估前按有效期剔除过期信号，避免过期 BUY 进入候选池
+        cross_valid_days = int(getattr(self.params, "cross_valid_days", 3) or 3)
+        pullback_valid_days = int(getattr(self.params, "pullback_valid_days", 5) or 5)
+
+        def _infer_valid_days(row: pd.Series) -> int:
+            kind = str(row.get("signal_kind") or "").upper()
+            reason = str(row.get("sig_reason") or "")
+            is_pullback = ("PULL" in kind) or ("回踩" in reason)
+            return pullback_valid_days if is_pullback else cross_valid_days
+
+        if "valid_days" not in events_df.columns:
+            events_df["valid_days"] = events_df.apply(_infer_valid_days, axis=1)
+
+        before = len(events_df)
+        keep_mask = (
+            events_df["signal_age"].isna()
+            | events_df["valid_days"].isna()
+            | (events_df["signal_age"] <= events_df["valid_days"])
+        )
+        events_df = events_df.loc[keep_mask].copy()
+        dropped = before - len(events_df)
+        if dropped:
+            self.logger.info(
+                f"已按信号有效期过滤过期 BUY 候选：移除 {dropped} 条（保留 {len(events_df)} 条）。"
+            )
+
+        # 过滤后重算信号日列表（用于日志、行情/指标补全等后续路径）
+        signal_dates = sorted(events_df["sig_date"].dropna().unique().tolist())
+
         try:
             for d in signal_dates:
                 codes = (
