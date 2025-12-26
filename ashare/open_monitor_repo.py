@@ -939,6 +939,61 @@ class OpenMonitorRepository:
             self.logger.debug("读取 run_pk 失败：%s", exc)
         return None
 
+
+    def _ensure_run_pk_inplace(self, df: pd.DataFrame) -> None:
+        """Ensure df has non-null run_pk derived from (monitor_date, run_id).
+
+        Some upstream steps only carry (monitor_date, run_id) and forget to attach run_pk.
+        This helper backfills run_pk via strategy_open_monitor_run so downstream joins are stable.
+        """
+
+        if df is None or df.empty:
+            return
+
+        if "run_id" not in df.columns or "monitor_date" not in df.columns:
+            return
+
+        if "run_pk" not in df.columns:
+            df["run_pk"] = None
+
+
+        need_mask = df["run_pk"].isna()
+        if not need_mask.any():
+            return
+
+        def _norm_monitor_date(v):
+            if v is None:
+                return None
+            # pandas Timestamp
+            if isinstance(v, pd.Timestamp):
+                if pd.isna(v):
+                    return None
+                return v.date().isoformat()
+            # datetime/date
+            if isinstance(v, dt.datetime):
+                return v.date().isoformat()
+            if isinstance(v, dt.date):
+                return v.isoformat()
+            s = str(v).strip()
+            if not s or s.lower() == "nat":
+                return None
+            return s
+
+        # Only iterate unique (monitor_date, run_id) that need backfill
+        pairs = df.loc[need_mask, ["monitor_date", "run_id"]].drop_duplicates()
+        for md, rid in pairs.itertuples(index=False, name=None):
+            md2 = _norm_monitor_date(md)
+            rid2 = str(rid).strip() if rid is not None else ""
+            if not (md2 and rid2):
+                continue
+
+            run_pk = self.ensure_run_context(monitor_date=md2, run_id=rid2, checked_at=None)
+            if run_pk is None:
+                continue
+
+            # assign into the rows still missing
+            df.loc[(df["monitor_date"] == md) & (df["run_id"] == rid) & (df["run_pk"].isna()), "run_pk"] = int(run_pk)
+
     def env_snapshot_exists(self, monitor_date: str, run_id: str) -> bool:
         table = self.params.env_snapshot_table
         if not (table and monitor_date and run_id and self._table_exists(table)):
@@ -1162,6 +1217,24 @@ class OpenMonitorRepository:
                 parsed = pd.to_datetime(snapshot.get(date_col), errors="coerce")
                 snapshot[date_col] = parsed.date() if not pd.isna(parsed) else snapshot.get(date_col)
 
+
+        # 兜底：run_id 统一为非空字符串（否则无法和 run 表 join）
+        if "run_id" in snapshot:
+            rid = str(snapshot.get("run_id") or "").strip()
+            snapshot["run_id"] = rid or None
+
+        # 指数快照写入时，也顺手确保 run 记录存在（便于后续联表调试）
+        if snapshot.get("monitor_date") and snapshot.get("run_id"):
+            try:
+                self.ensure_run_context(
+                    monitor_date=snapshot.get("monitor_date"),
+                    run_id=str(snapshot.get("run_id")),
+                    checked_at=snapshot.get("checked_at"),
+                    params_json={"phase": "ENV_INDEX_SNAPSHOT"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.debug("确保 run 记录存在时失败（可忽略）：%s", exc)
+
         columns = list(snapshot.keys())
         if "snapshot_hash" not in columns:
             return None
@@ -1251,6 +1324,8 @@ class OpenMonitorRepository:
         )
         if "run_pk" not in quotes.columns:
             quotes["run_pk"] = None
+
+        self._ensure_run_pk_inplace(quotes)
         quotes["code"] = quotes["code"].astype(str)
 
         monitor_dates = quotes["monitor_date"].dropna().astype(str).unique().tolist()

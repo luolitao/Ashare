@@ -1066,7 +1066,7 @@ class MA5MA20StrategyRunner:
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = None
-            signals["chip_penalty"] = np.nan
+            signals["chip_penalty"] = 0.0
             signals["chip_note"] = None
             signals["age_days"] = np.nan
             signals["deadzone_hit"] = False
@@ -1186,7 +1186,7 @@ class MA5MA20StrategyRunner:
             signals["gdhs_delta_pct"] = np.nan
             signals["gdhs_announce_date"] = pd.NaT
             signals["chip_reason"] = "DATA_MISSING_GDHS"
-            signals["chip_penalty"] = np.nan
+            signals["chip_penalty"] = 0.0
             signals["chip_note"] = "DATA_MISSING_GDHS"
             signals["age_days"] = np.nan
             signals["deadzone_hit"] = False
@@ -1210,7 +1210,7 @@ class MA5MA20StrategyRunner:
         )
         merged["chip_score"] = pd.to_numeric(merged.get("chip_score"), errors="coerce")
         merged["chip_reason"] = merged.get("chip_reason")
-        merged["chip_penalty"] = pd.to_numeric(merged.get("chip_penalty"), errors="coerce")
+        merged["chip_penalty"] = pd.to_numeric(merged.get("chip_penalty"), errors="coerce").fillna(0.0)
         merged["chip_note"] = merged.get("chip_note")
         merged["age_days"] = pd.to_numeric(merged.get("age_days"), errors="coerce")
         merged["deadzone_hit"] = merged.get("deadzone_hit", False)

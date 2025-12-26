@@ -399,6 +399,13 @@ class OpenMonitorEnvService:
         fetch_index_live_quote: Callable[[], dict[str, Any]] | None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
         ctx = env_context or {}
+
+        # run_id 用作 join key：保持非空（为空时用 checked_at 的 HH:MM 兜底）
+        rid = str(run_id or "").strip()
+        if not rid:
+            rid = checked_at.strftime("%H:%M")
+            self.logger.warning("env index snapshot: empty run_id -> fallback to %s", rid)
+        run_id = rid
         index_env_snapshot: dict[str, Any] = {}
         env_index_snapshot_hash: str | None = None
 
@@ -412,9 +419,14 @@ class OpenMonitorEnvService:
             )
 
         if index_env_snapshot:
+            # 兜底：实时价存在但 live_trade_date 缺失时，用 monitor_date 标记
+            if (not index_env_snapshot.get("env_index_live_trade_date")) and (index_env_snapshot.get("env_index_live_latest") is not None):
+                index_env_snapshot["env_index_live_trade_date"] = monitor_date
+
             index_snapshot_payload = {
                 "monitor_date": monitor_date,
                 "checked_at": checked_at,
+                "run_id": run_id,
                 "index_code": index_env_snapshot.get("env_index_code"),
                 "asof_trade_date": index_env_snapshot.get("env_index_asof_trade_date"),
                 "live_trade_date": index_env_snapshot.get("env_index_live_trade_date"),
