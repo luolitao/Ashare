@@ -22,7 +22,7 @@ import datetime as dt
 import json
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, List
 
 import pandas as pd
@@ -63,6 +63,10 @@ class OpenMonitorParams:
     """开盘监测参数（支持从 config.yaml 的 open_monitor 覆盖）。"""
 
     enabled: bool = True
+    # 运行时上下文（由 Runner 填充；用于行情侧回填 live_trade_date）
+    checked_at: dt.datetime | None = None
+    monitor_date: str | None = None
+
 
     # 信号输入：只接受 ready_signals_view（由 SchemaManager 负责生成/维护）
     ready_signals_view: str = VIEW_STRATEGY_READY_SIGNALS
@@ -338,6 +342,11 @@ class MA5MA20OpenMonitorRunner:
 
         checked_at = dt.datetime.now()
         monitor_date = checked_at.date().isoformat()
+
+        # 将本次运行时上下文透传给行情层（用于补齐 live_trade_date）
+        self.params = replace(self.params, checked_at=checked_at, monitor_date=monitor_date)
+        self.repo.params = self.params
+        self.market_data.params = self.params
         run_id = self._calc_run_id(checked_at)
         run_params_json = self._build_run_params_json()
         run_pk = self.repo.ensure_run_context(
