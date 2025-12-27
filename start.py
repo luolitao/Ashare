@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import json
+import logging
 from pathlib import Path
 
 from sqlalchemy import text
@@ -177,7 +178,7 @@ def main() -> None:
     report_path = output_dir / f"prep_report_{ts}.json"
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"[REPORT] 准备报告：已写入 {report_path.as_posix()}")
+    logging.info(f"[REPORT] 准备报告：已写入 {report_path.as_posix()}")
 
     _self_check(
         repo,
