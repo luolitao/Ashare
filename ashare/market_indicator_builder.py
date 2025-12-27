@@ -103,12 +103,12 @@ class MarketIndicatorBuilder:
         if df.empty or "trade_date" not in df.columns:
             return []
 
-        dates = pd.to_datetime(df["trade_date"], errors="coerce").dt.date.dropna()
+        dates = pd.to_datetime(df["trade_date"], errors="coerce").dropna()
         if dates.empty:
             return []
 
-        weekly_end = dates.to_series().groupby(dates.to_series().dt.to_period("W")).max()
-        return weekly_end.dropna().tolist()
+        weekly_end = dates.groupby(dates.dt.to_period("W-FRI")).max()
+        return weekly_end.dt.date.dropna().tolist()
 
     def compute_daily_indicators(
         self, start_date: dt.date, end_date: dt.date
@@ -174,7 +174,7 @@ class MarketIndicatorBuilder:
             grp["rolling_low"] = rolling_low
             ma250_valid = grp["ma250"].notna()
             below_ma250 = (close < grp["ma250"]) & ma250_valid
-            prev_below = below_ma250.shift(1).fillna(False)
+            prev_below = below_ma250.shift(1, fill_value=False)
             above_ma250 = (close >= grp["ma250"]) & ma250_valid
 
             grp["below_ma250_streak"] = consecutive_true(below_ma250)
@@ -222,7 +222,7 @@ class MarketIndicatorBuilder:
 
         merged["trade_date"] = merged["date"].dt.date
         day_summary = (
-            merged.groupby("trade_date")
+            merged.groupby("trade_date")[["status", "score_raw", "pullback_mode"]]
             .apply(self._resolve_daily_regime)
             .reset_index()
         )
