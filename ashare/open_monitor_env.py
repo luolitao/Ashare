@@ -6,8 +6,6 @@ import datetime as dt
 import json
 from typing import Any, Callable
 
-import pandas as pd
-
 from .open_monitor_repo import calc_run_id, make_snapshot_hash
 from .utils.convert import to_float as _to_float
 
@@ -43,33 +41,55 @@ def derive_index_gate_action(regime: str | None, position_hint: float | None) ->
 class OpenMonitorEnvService:
     """负责环境快照构建与加载的服务层。"""
 
-    def __init__(self, repo, logger, params, env_builder) -> None:
+    def __init__(self, repo, logger, params, env_builder, indicator_builder) -> None:
         self.repo = repo
         self.logger = logger
         self.params = params
         self.env_builder = env_builder
+        self.indicator_builder = indicator_builder
 
     def load_env_snapshot_context(
         self,
         monitor_date: str,
-        run_id: str | None = None,
+        run_pk: int | None = None,
     ) -> dict[str, Any] | None:
-        return self._load_env_snapshot_context(monitor_date, run_id)
+        return self._load_env_snapshot_context(monitor_date, run_pk)
 
     def _load_env_snapshot_context(
-        self, monitor_date: str, run_id: str | None = None
+        self, monitor_date: str, run_pk: int | None = None
     ) -> dict[str, Any] | None:
-        df = self.repo.load_env_snapshot_row(monitor_date, run_id)
+        df = self.repo.load_env_snapshot_row(monitor_date, run_pk)
         if df is None or df.empty:
             return None
 
         row = df.iloc[0]
+        weekly_asof = row.get("env_weekly_asof_trade_date")
+        daily_asof = row.get("env_daily_asof_trade_date")
+        index_code = str(self.params.index_code or "").strip()
+        weekly_indicator = (
+            self.repo.load_weekly_indicator(str(weekly_asof), index_code)
+            if weekly_asof
+            else {}
+        )
+        daily_indicator = (
+            self.repo.load_daily_indicator(str(daily_asof), index_code)
+            if daily_asof
+            else {}
+        )
         weekly_scenario = {
-            "weekly_asof_trade_date": row.get("env_weekly_asof_trade_date"),
-            "weekly_risk_level": row.get("env_weekly_risk_level"),
-            "weekly_scene_code": row.get("env_weekly_scene"),
-            "weekly_gate_policy": row.get("env_weekly_gate_policy"),
-            "weekly_gate_action": row.get("env_weekly_gate_action"),
+            "weekly_asof_trade_date": weekly_indicator.get("weekly_asof_trade_date")
+            or weekly_asof,
+            "weekly_risk_level": weekly_indicator.get("weekly_risk_level"),
+            "weekly_scene_code": weekly_indicator.get("weekly_scene_code"),
+            "weekly_gate_policy": weekly_indicator.get("weekly_gate_policy"),
+            "weekly_gate_action": weekly_indicator.get("weekly_gate_policy"),
+            "weekly_structure_status": weekly_indicator.get("weekly_structure_status"),
+            "weekly_pattern_status": weekly_indicator.get("weekly_pattern_status"),
+            "weekly_plan_a_exposure_cap": weekly_indicator.get("weekly_plan_a_exposure_cap"),
+            "weekly_key_levels_str": weekly_indicator.get("weekly_key_levels_str"),
+            "weekly_money_proxy": weekly_indicator.get("weekly_money_proxy"),
+            "weekly_tags": weekly_indicator.get("weekly_tags"),
+            "weekly_note": weekly_indicator.get("weekly_note"),
         }
 
         index_snapshot_hash = row.get("env_index_snapshot_hash")
@@ -82,11 +102,14 @@ class OpenMonitorEnvService:
             "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),
             "weekly_gate_policy": weekly_scenario.get("weekly_gate_policy"),
             "weekly_gate_action": weekly_scenario.get("weekly_gate_action"),
-            "regime": row.get("env_regime"),
-            "index_score": row.get("env_index_score"),
-            "position_hint": row.get("env_position_hint"),
-            "effective_position_hint": row.get("env_position_hint"),
-            "run_id": row.get("run_id"),
+            "regime": daily_indicator.get("regime") or row.get("env_regime"),
+            "index_score": daily_indicator.get("score") or row.get("env_index_score"),
+            "position_hint": daily_indicator.get("position_hint")
+            or row.get("env_position_hint"),
+            "effective_position_hint": daily_indicator.get("position_hint")
+            or row.get("env_position_hint"),
+            "run_pk": row.get("run_pk"),
+            "daily_asof_trade_date": daily_indicator.get("asof_trade_date") or daily_asof,
             "env_index_snapshot_hash": index_snapshot_hash,
             "env_final_gate_action": row.get("env_final_gate_action"),
             "env_final_cap_pct": row.get("env_final_cap_pct"),
@@ -118,7 +141,85 @@ class OpenMonitorEnvService:
     def build_environment_context(
         self, latest_trade_date: str, *, checked_at: dt.datetime | None = None
     ) -> dict[str, Any]:
-        return self.env_builder.build_environment_context(latest_trade_date, checked_at=checked_at)
+        index_code = str(self.params.index_code or "").strip()
+        weekly_asof = None
+        weekly_asof_date = self.repo.get_latest_weekly_indicator_date(index_code)
+        if weekly_asof_date:
+            weekly_asof = weekly_asof_date.isoformat()
+        if not weekly_asof:
+            weekly_rows = self.indicator_builder.compute_weekly_indicator(
+                latest_trade_date, checked_at=checked_at
+            )
+            self.repo.upsert_weekly_indicator(weekly_rows)
+            if weekly_rows:
+                weekly_asof = str(weekly_rows[0].get("weekly_asof_trade_date"))
+
+        daily_indicator = self.repo.load_daily_indicator(latest_trade_date, index_code)
+        if not daily_indicator:
+            start_date = dt.date.fromisoformat(latest_trade_date)
+            daily_rows = self.indicator_builder.compute_daily_indicators(
+                start_date, start_date
+            )
+            self.repo.upsert_daily_indicator(daily_rows)
+            daily_indicator = self.repo.load_daily_indicator(latest_trade_date, index_code)
+
+        weekly_indicator = (
+            self.repo.load_weekly_indicator(weekly_asof, index_code) if weekly_asof else {}
+        )
+        weekly_scenario = {
+            "weekly_asof_trade_date": weekly_indicator.get("weekly_asof_trade_date")
+            or weekly_asof,
+            "weekly_scene_code": weekly_indicator.get("weekly_scene_code"),
+            "weekly_structure_status": weekly_indicator.get("weekly_structure_status"),
+            "weekly_pattern_status": weekly_indicator.get("weekly_pattern_status"),
+            "weekly_risk_score": weekly_indicator.get("weekly_risk_score"),
+            "weekly_risk_level": weekly_indicator.get("weekly_risk_level"),
+            "weekly_gate_policy": weekly_indicator.get("weekly_gate_policy"),
+            "weekly_gate_action": weekly_indicator.get("weekly_gate_policy"),
+            "weekly_plan_a_exposure_cap": weekly_indicator.get("weekly_plan_a_exposure_cap"),
+            "weekly_key_levels_str": weekly_indicator.get("weekly_key_levels_str"),
+            "weekly_money_proxy": weekly_indicator.get("weekly_money_proxy"),
+            "weekly_tags": weekly_indicator.get("weekly_tags"),
+            "weekly_note": weekly_indicator.get("weekly_note"),
+        }
+        weekly_gate_policy = weekly_indicator.get("weekly_gate_policy")
+        env_context = {
+            "weekly_scenario": weekly_scenario,
+            "weekly_asof_trade_date": weekly_scenario.get("weekly_asof_trade_date"),
+            "weekly_risk_score": weekly_scenario.get("weekly_risk_score"),
+            "weekly_risk_level": weekly_scenario.get("weekly_risk_level"),
+            "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),
+            "weekly_structure_status": weekly_scenario.get("weekly_structure_status"),
+            "weekly_pattern_status": weekly_scenario.get("weekly_pattern_status"),
+            "weekly_plan_a_exposure_cap": weekly_scenario.get("weekly_plan_a_exposure_cap"),
+            "weekly_key_levels_str": weekly_scenario.get("weekly_key_levels_str"),
+            "weekly_money_proxy": weekly_scenario.get("weekly_money_proxy"),
+            "weekly_tags": weekly_scenario.get("weekly_tags"),
+            "weekly_note": weekly_scenario.get("weekly_note"),
+            "weekly_gate_policy": weekly_gate_policy,
+            "weekly_gate_action": weekly_gate_policy,
+            "daily_asof_trade_date": daily_indicator.get("asof_trade_date")
+            if daily_indicator
+            else latest_trade_date,
+            "index_score": _to_float(daily_indicator.get("score"))
+            if daily_indicator
+            else None,
+            "regime": daily_indicator.get("regime") if daily_indicator else None,
+            "position_hint": _to_float(daily_indicator.get("position_hint"))
+            if daily_indicator
+            else None,
+            "effective_position_hint": _to_float(daily_indicator.get("position_hint"))
+            if daily_indicator
+            else None,
+        }
+        if not weekly_gate_policy:
+            weekly_gate_policy = self.env_builder.resolve_env_weekly_gate_policy(env_context)
+            env_context["weekly_gate_policy"] = weekly_gate_policy
+            env_context["weekly_gate_action"] = weekly_gate_policy
+        self.env_builder._finalize_env_directives(
+            env_context, weekly_gate_policy=weekly_gate_policy
+        )
+        return env_context
 
     def build_and_persist_env_snapshot(
         self,
@@ -126,6 +227,7 @@ class OpenMonitorEnvService:
         *,
         monitor_date: str | None = None,
         run_id: str | None = None,
+        run_pk: int | None = None,
         checked_at: dt.datetime | None = None,
         fetch_index_live_quote: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
@@ -135,13 +237,18 @@ class OpenMonitorEnvService:
             monitor_date = checked_at.date().isoformat()
         if run_id is None:
             run_id = calc_run_id(checked_at, self.params.run_id_minutes)
+        if run_pk is None:
+            run_pk = self.repo.ensure_run_context(
+                monitor_date,
+                run_id,
+                checked_at=checked_at,
+                triggered_at=checked_at,
+                params_json=None,
+            )
 
         env_context = self.build_environment_context(
             latest_trade_date, checked_at=checked_at
         )
-        weekly_gate_policy = self.resolve_env_weekly_gate_policy(env_context)
-        if isinstance(env_context, dict):
-            env_context["weekly_gate_policy"] = weekly_gate_policy
 
         env_context, _, _ = self.attach_index_snapshot(
             latest_trade_date,
@@ -152,16 +259,16 @@ class OpenMonitorEnvService:
             fetch_index_live_quote=fetch_index_live_quote,
         )
 
+        weekly_gate_policy = env_context.get("weekly_gate_policy")
         self.env_builder._finalize_env_directives(
             env_context, weekly_gate_policy=weekly_gate_policy
         )
 
-        self.repo.persist_env_snapshot(
-            env_context,
-            monitor_date,
-            run_id,
-            weekly_gate_policy,
-        )
+        if run_pk is None:
+            self.logger.error("环境快照缺少 run_pk，已跳过写入。")
+            return env_context
+
+        self.repo.persist_env_snapshot(env_context, monitor_date, run_pk)
 
         return env_context
 

@@ -1,22 +1,7 @@
-"""定时调度执行开盘监测（每整 N 分钟触发一次，自动跳过非交易日）。
-
-用法：
-  # 每整 5 分钟跑一次
-  python run_open_monitor_scheduler.py --interval 5
-
-  # 每整 10 分钟跑一次
-  python run_open_monitor_scheduler.py --interval 10
-
-说明：
-  - 这是一个前台常驻脚本（Ctrl+C 退出）。
-  - 默认严格对齐“整点分钟边界”：00/05/10/... 或 00/10/20/...
-  - 每次触发都会执行 ashare.open_monitor.MA5MA20OpenMonitorRunner().run(force=True)
-  - 如果缺少当次 (monitor_date, run_id) 环境快照，会在触发前自动 build_and_persist_env_snapshot 补齐
-"""
+"""定时调度执行开盘监测（每整 N 分钟触发一次，自动跳过非交易日）。"""
 
 from __future__ import annotations
 
-import argparse
 import datetime as dt
 from datetime import timedelta
 import time
@@ -111,36 +96,22 @@ def _next_trading_start(ts: dt.datetime, runner: MA5MA20OpenMonitorRunner) -> dt
 
 
 def _env_snapshot_exists(
-    runner: MA5MA20OpenMonitorRunner, *, monitor_date: str, run_id: str
+    runner: MA5MA20OpenMonitorRunner, *, monitor_date: str, run_pk: int
 ) -> bool:
     """判断指定批次的环境快照是否已存在（委托给 Repository）。"""
 
-    return runner.repo.env_snapshot_exists(monitor_date, run_id)
+    return runner.repo.env_snapshot_exists(monitor_date, run_pk)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="每整 N 分钟执行一次 run_open_monitor")
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=_default_interval_from_config(),
-        help="调度间隔（分钟），默认读取 config.yaml 的 open_monitor.interval_minutes",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="只执行一次就退出（仍会按整点边界对齐）",
-    )
-    args = parser.parse_args()
-
+def main(*, interval_minutes: int | None = None, once: bool = False) -> None:
     ensure_schema()
     runner = MA5MA20OpenMonitorRunner()
     logger = runner.logger
-    interval_min = int(args.interval)
+    interval_min = int(interval_minutes or _default_interval_from_config())
     if interval_min <= 0:
         raise ValueError("interval must be positive")
 
-    ensured_key: tuple[str, str] | None = None
+    ensured_key: tuple[str, int] | None = None
     ensured_ready: bool = False
 
     def _load_latest_trade_date() -> str | None:
@@ -162,19 +133,22 @@ def main() -> None:
         monitor_date = runner.repo.resolve_monitor_trade_date(trigger_at)
         biz_ts = dt.datetime.combine(dt.date.fromisoformat(monitor_date), trigger_at.time())
         run_id = runner._calc_run_id(biz_ts)  # noqa: SLF001
-        runner.repo.ensure_run_context(
+        run_pk = runner.repo.ensure_run_context(
             monitor_date,
             run_id,
             checked_at=trigger_at,
             triggered_at=trigger_at,
             params_json=runner._build_run_params_json(),  # noqa: SLF001
         )
-        key = (monitor_date, run_id)
+        if run_pk is None:
+            logger.warning("run_pk 获取失败，跳过环境快照写入。")
+            return monitor_date, run_id
+        key = (monitor_date, run_pk)
 
         if ensured_key == key and ensured_ready:
             return monitor_date, run_id
 
-        if _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=run_id):
+        if _env_snapshot_exists(runner, monitor_date=monitor_date, run_pk=run_pk):
             ensured_key = key
             ensured_ready = True
             return monitor_date, run_id
@@ -192,10 +166,20 @@ def main() -> None:
 
         def _try_build_env(ts: dt.datetime, rid: str) -> bool:
             try:
+                candidate_run_pk = runner.repo.ensure_run_context(
+                    monitor_date,
+                    rid,
+                    checked_at=ts,
+                    triggered_at=ts,
+                    params_json=runner._build_run_params_json(),  # noqa: SLF001
+                )
+                if candidate_run_pk is None:
+                    return False
                 runner.build_and_persist_env_snapshot(
                     latest_trade_date,
                     monitor_date=monitor_date,
                     run_id=rid,
+                    run_pk=candidate_run_pk,
                     checked_at=ts,
                 )
                 logger.info(
@@ -225,20 +209,24 @@ def main() -> None:
             if not rid or rid in seen_run_ids:
                 continue
             seen_run_ids.add(rid)
-            runner.repo.ensure_run_context(
+            candidate_run_pk = runner.repo.ensure_run_context(
                 monitor_date,
                 rid,
                 checked_at=trigger_at,
                 triggered_at=trigger_at,
                 params_json=runner._build_run_params_json(),  # noqa: SLF001
             )
-            if _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=rid):
+            if candidate_run_pk and _env_snapshot_exists(
+                runner, monitor_date=monitor_date, run_pk=candidate_run_pk
+            ):
                 break
             if _try_build_env(trigger_at, rid):
                 break
 
         ensured_key = key
-        ensured_ready = _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=run_id)
+        ensured_ready = _env_snapshot_exists(
+            runner, monitor_date=monitor_date, run_pk=run_pk
+        )
         if not ensured_ready:
             logger.warning(
                 "环境快照仍不存在（monitor_date=%s, run_id=%s），open_monitor 可能会终止；建议检查 env_snapshot 写入或相关表/配置。",
@@ -286,8 +274,8 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.exception("开盘监测执行异常（将等待下一轮）：%s", exc)
 
-            if args.once:
-                logger.info("--once 已完成，退出调度器。")
+            if once:
+                logger.info("调度器已按 once 执行完成，退出。")
                 return
 
             # 防止“刚好运行很快又落在同一秒边界”导致重复触发

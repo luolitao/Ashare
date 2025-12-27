@@ -1029,53 +1029,53 @@ class OpenMonitorRepository:
             self.logger.debug("读取 run_pk 失败：%s", exc)
         return None
 
-    def env_snapshot_exists(self, monitor_date: str, run_id: str) -> bool:
+    def env_snapshot_exists(self, monitor_date: str, run_pk: int) -> bool:
         table = self.params.env_snapshot_table
-        if not (table and monitor_date and run_id and self._table_exists(table)):
+        if not (table and monitor_date and run_pk and self._table_exists(table)):
             return False
 
         stmt = text(
             f"""
             SELECT 1 FROM `{table}`
-            WHERE `run_id` = :b AND `monitor_date` = :d
+            WHERE `run_pk` = :b AND `monitor_date` = :d
             LIMIT 1
             """
         )
         try:
             with self.engine.begin() as conn:
-                row = conn.execute(stmt, {"b": run_id, "d": monitor_date}).fetchone()
+                row = conn.execute(stmt, {"b": run_pk, "d": monitor_date}).fetchone()
                 return row is not None
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("检查环境快照是否存在失败：%s", exc)
             return False
 
     def load_env_snapshot_row(
-        self, monitor_date: str, run_id: str | None
+        self, monitor_date: str, run_pk: int | None
     ) -> pd.DataFrame | None:
         table = self.params.env_snapshot_table
         if not (table and monitor_date and self._table_exists(table)):
             return None
-        if run_id is None:
-            self.logger.error("读取环境快照时缺少 run_id（monitor_date=%s）。", monitor_date)
+        if run_pk is None:
+            self.logger.error("读取环境快照时缺少 run_pk（monitor_date=%s）。", monitor_date)
             return None
 
         stmt = text(
             f"""
             SELECT * FROM `{table}`
-            WHERE `run_id` = :b AND `monitor_date` = :d
+            WHERE `run_pk` = :b AND `monitor_date` = :d
             LIMIT 1
             """
         )
 
         try:
             with self.engine.begin() as conn:
-                df = pd.read_sql_query(stmt, conn, params={"d": monitor_date, "b": run_id})
+                df = pd.read_sql_query(stmt, conn, params={"d": monitor_date, "b": run_pk})
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取环境快照失败：%s", exc)
             return None
 
         if df.empty:
-            self.logger.error("未找到环境快照（monitor_date=%s, run_id=%s）。", monitor_date, run_id)
+            self.logger.error("未找到环境快照（monitor_date=%s, run_pk=%s）。", monitor_date, run_pk)
             return None
 
         return df
@@ -1129,12 +1129,179 @@ class OpenMonitorRepository:
         }
         return normalized
 
+    def get_latest_weekly_indicator_date(self, index_code: str) -> dt.date | None:
+        table = self.params.weekly_indicator_table
+        if not (table and self._table_exists(table)):
+            return None
+        stmt = text(
+            f"""
+            SELECT MAX(`weekly_asof_trade_date`) AS latest_date
+            FROM `{table}`
+            WHERE `index_code` = :code
+            """
+        )
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(stmt, {"code": index_code}).mappings().first()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取周线指标最新日期失败：%s", exc)
+            return None
+        if not row:
+            return None
+        latest = row.get("latest_date")
+        if isinstance(latest, dt.datetime):
+            return latest.date()
+        if isinstance(latest, dt.date):
+            return latest
+        if latest:
+            try:
+                return pd.to_datetime(latest).date()
+            except Exception:
+                return None
+        return None
+
+    def get_latest_daily_indicator_date(self, index_code: str) -> dt.date | None:
+        table = self.params.daily_indicator_table
+        if not (table and self._table_exists(table)):
+            return None
+        stmt = text(
+            f"""
+            SELECT MAX(`asof_trade_date`) AS latest_date
+            FROM `{table}`
+            WHERE `index_code` = :code
+            """
+        )
+        try:
+            with self.engine.begin() as conn:
+                row = conn.execute(stmt, {"code": index_code}).mappings().first()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取日线指标最新日期失败：%s", exc)
+            return None
+        if not row:
+            return None
+        latest = row.get("latest_date")
+        if isinstance(latest, dt.datetime):
+            return latest.date()
+        if isinstance(latest, dt.date):
+            return latest
+        if latest:
+            try:
+                return pd.to_datetime(latest).date()
+            except Exception:
+                return None
+        return None
+
+    def load_weekly_indicator(self, asof_trade_date: str, index_code: str) -> dict[str, Any]:
+        table = self.params.weekly_indicator_table
+        if not (table and self._table_exists(table)):
+            return {}
+        stmt = text(
+            f"""
+            SELECT *
+            FROM `{table}`
+            WHERE `weekly_asof_trade_date` = :d AND `index_code` = :code
+            LIMIT 1
+            """
+        )
+        try:
+            with self.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={"d": asof_trade_date, "code": index_code},
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取周线指标失败：%s", exc)
+            return {}
+        if df.empty:
+            return {}
+        return df.iloc[0].to_dict()
+
+    def load_daily_indicator(self, asof_trade_date: str, index_code: str) -> dict[str, Any]:
+        table = self.params.daily_indicator_table
+        if not (table and self._table_exists(table)):
+            return {}
+        stmt = text(
+            f"""
+            SELECT *
+            FROM `{table}`
+            WHERE `asof_trade_date` = :d AND `index_code` = :code
+            LIMIT 1
+            """
+        )
+        try:
+            with self.engine.begin() as conn:
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={"d": asof_trade_date, "code": index_code},
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取日线指标失败：%s", exc)
+            return {}
+        if df.empty:
+            return {}
+        return df.iloc[0].to_dict()
+
+    def upsert_weekly_indicator(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        table = self.params.weekly_indicator_table
+        if not (table and self._table_exists(table)):
+            return 0
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return 0
+        columns = df.columns.tolist()
+        update_cols = [c for c in columns if c not in {"weekly_asof_trade_date", "index_code"}]
+        stmt = text(
+            f"""
+            INSERT INTO `{table}` ({", ".join(f"`{c}`" for c in columns)})
+            VALUES ({", ".join(f":{c}" for c in columns)})
+            ON DUPLICATE KEY UPDATE {", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)}
+            """
+        )
+        payloads = df.to_dict(orient="records")
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt, payloads)
+            return len(payloads)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("写入周线指标失败：%s", exc)
+            return 0
+
+    def upsert_daily_indicator(self, rows: list[dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        table = self.params.daily_indicator_table
+        if not (table and self._table_exists(table)):
+            return 0
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return 0
+        columns = df.columns.tolist()
+        update_cols = [c for c in columns if c not in {"asof_trade_date", "index_code"}]
+        stmt = text(
+            f"""
+            INSERT INTO `{table}` ({", ".join(f"`{c}`" for c in columns)})
+            VALUES ({", ".join(f":{c}" for c in columns)})
+            ON DUPLICATE KEY UPDATE {", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)}
+            """
+        )
+        payloads = df.to_dict(orient="records")
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt, payloads)
+            return len(payloads)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("写入日线指标失败：%s", exc)
+            return 0
+
     def persist_env_snapshot(
         self,
         env_context: dict[str, Any] | None,
         monitor_date: str,
-        run_id: str,
-        env_weekly_gate_policy: str | None,
+        run_pk: int,
     ) -> None:
         if not env_context:
             return
@@ -1147,50 +1314,24 @@ class OpenMonitorRepository:
         monitor_date_val = monitor_dt.date() if not pd.isna(monitor_dt) else monitor_date
 
         payload: dict[str, Any] = {}
-        weekly_scenario = env_context.get("weekly_scenario") if isinstance(env_context, dict) else {}
-        if not isinstance(weekly_scenario, dict):
-            weekly_scenario = {}
-
-        index_score = _to_float(env_context.get("index_score"))
-        index_score_val = int(round(index_score)) if index_score is not None else None
-        regime = env_context.get("regime")
-        position_hint = _to_float(env_context.get("position_hint"))
-        if regime is not None:
-            regime = str(regime).strip() or None
-        if index_score_val is None or regime is None or position_hint is None:
-            self.logger.error(
-                "环境快照缺少指数环境字段：index_score=%s regime=%s position_hint=%s",
-                index_score,
-                regime,
-                position_hint,
-            )
-            raise ValueError("环境快照缺少指数环境字段（index_score/regime/position_hint）")
-
-        def _get_env(key: str) -> Any:  # noqa: ANN401
-            if isinstance(env_context, dict) and env_context.get(key) not in (None, ""):
-                return env_context.get(key)
-            return weekly_scenario.get(key)
 
         payload["monitor_date"] = monitor_date_val
-        payload["run_id"] = run_id
-        env_weekly_asof = _get_env("weekly_asof_trade_date")
+        payload["run_pk"] = run_pk
+        env_weekly_asof = env_context.get("weekly_asof_trade_date")
         if env_weekly_asof is not None:
             parsed_weekly = pd.to_datetime(env_weekly_asof, errors="coerce")
             env_weekly_asof = parsed_weekly.date() if not pd.isna(parsed_weekly) else env_weekly_asof
         payload["env_weekly_asof_trade_date"] = env_weekly_asof
-        payload["env_weekly_risk_level"] = _get_env("weekly_risk_level")
-        payload["env_weekly_scene"] = _get_env("weekly_scene_code")
-        payload["env_weekly_gate_policy"] = env_weekly_gate_policy
-
-        weekly_gate_action = (
-            _get_env("weekly_gate_action")
-            or _get_env("weekly_gate_policy")
-            or env_weekly_gate_policy
-        )
-        payload["env_weekly_gate_action"] = weekly_gate_action
-        payload["env_index_score"] = index_score_val
-        payload["env_regime"] = regime
-        payload["env_position_hint"] = position_hint
+        env_daily_asof = env_context.get("daily_asof_trade_date")
+        if env_daily_asof is not None:
+            parsed_daily = pd.to_datetime(env_daily_asof, errors="coerce")
+            env_daily_asof = parsed_daily.date() if not pd.isna(parsed_daily) else env_daily_asof
+        payload["env_daily_asof_trade_date"] = env_daily_asof
+        index_score = _to_float(env_context.get("index_score"))
+        payload["env_index_score"] = int(round(index_score)) if index_score is not None else None
+        regime = env_context.get("regime")
+        payload["env_regime"] = str(regime).strip() if regime is not None else None
+        payload["env_position_hint"] = _to_float(env_context.get("position_hint"))
         index_snapshot = {}
         if isinstance(env_context, dict):
             raw_index_snapshot = env_context.get("index_intraday")
@@ -1201,9 +1342,9 @@ class OpenMonitorRepository:
         payload["env_final_gate_action"] = env_context.get("env_final_gate_action")
         if payload["env_final_gate_action"] is None:
             self.logger.error(
-                "环境快照缺少 env_final_gate_action，已跳过写入（monitor_date=%s, run_id=%s）。",
+                "环境快照缺少 env_final_gate_action，已跳过写入（monitor_date=%s, run_pk=%s）。",
                 monitor_date,
-                run_id,
+                run_pk,
             )
             return
         cap_candidates = [
@@ -1222,7 +1363,7 @@ class OpenMonitorRepository:
             self.logger.error("环境快照表 %s 不存在，已跳过写入。", table)
             return
         columns = list(payload.keys())
-        update_cols = [c for c in columns if c not in {"monitor_date", "run_id"}]
+        update_cols = [c for c in columns if c not in {"monitor_date", "run_pk"}]
         col_clause = ", ".join(f"`{c}`" for c in columns)
         value_clause = ", ".join(f":{c}" for c in columns)
         update_clause = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)
@@ -1238,10 +1379,10 @@ class OpenMonitorRepository:
             with self.engine.begin() as conn:
                 conn.execute(stmt, payload)
             self.logger.info(
-                "环境快照已写入表 %s（monitor_date=%s, run_id=%s）",
+                "环境快照已写入表 %s（monitor_date=%s, run_pk=%s）",
                 table,
                 monitor_date,
-                run_id,
+                run_pk,
             )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("写入环境快照失败：%s", exc)
