@@ -323,7 +323,7 @@ class MA5MA20OpenMonitorRunner:
     ) -> dict[str, Any] | None:
         return self.env_service.load_env_snapshot_context(monitor_date, run_id)
 
-    def run(self, *, force: bool = False) -> None:
+    def run(self, *, force: bool = False, checked_at: dt.datetime | None = None) -> None:
         """执行开盘监测。
 
         - 默认遵循 config.yaml: open_monitor.enabled。
@@ -337,7 +337,7 @@ class MA5MA20OpenMonitorRunner:
         if force and (not self.params.enabled):
             self.logger.info("open_monitor.enabled=false，但 force=True，仍将执行开盘监测。")
 
-        checked_at = dt.datetime.now()
+        checked_at = checked_at or dt.datetime.now()
         monitor_date = self.repo.resolve_monitor_trade_date(checked_at)
         biz_ts = dt.datetime.combine(dt.date.fromisoformat(monitor_date), checked_at.time())
 

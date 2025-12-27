@@ -22,21 +22,12 @@ from ashare.open_monitor import MA5MA20OpenMonitorRunner
 from ashare.schema_manager import ensure_schema
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="输出指数周线通道情景")
-    parser.add_argument(
-        "--include-current-week",
-        action="store_true",
-        dest="include_current_week",
-        help="包含当前形成中的周线（默认只输出最近已收盘周）",
-    )
-    args = parser.parse_args()
-
-    try:
-        asof_date = resolve_weekly_asof_date(args.include_current_week)
-    except ValueError as exc:
-        print(str(exc))
-        return
+def run_weekly_env(
+    asof_date: str | None = None, *, include_current_week: bool = False
+) -> dict:
+    """生成并落库周线环境（exists_before/after 对应 env_snapshot 表）。"""
+    if not asof_date:
+        asof_date = resolve_weekly_asof_date(include_current_week)
 
     ensure_schema()
     runner = MA5MA20OpenMonitorRunner()
@@ -45,12 +36,14 @@ def main() -> None:
     # 将周线环境按“周线截止交易日”落表，避免每次运行都覆盖最新一条记录。
     monitor_date = asof_date
     run_id = f"WEEKLY_{asof_date}"
+    exists_before = runner.repo.env_snapshot_exists(monitor_date, run_id)
     env_context = runner.build_and_persist_env_snapshot(
         asof_date,
         monitor_date=monitor_date,
         run_id=run_id,
         checked_at=checked_at,
     )
+    exists_after = runner.repo.env_snapshot_exists(monitor_date, run_id)
 
     output_dir = Path("output/index_weekly_channel")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +65,30 @@ def main() -> None:
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
+    return {
+        "asof_date": asof_date,
+        "run_id": run_id,
+        "exists_before": exists_before,
+        "exists_after": exists_after,
+        "written": True,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="输出指数周线通道情景")
+    parser.add_argument(
+        "--include-current-week",
+        action="store_true",
+        dest="include_current_week",
+        help="包含当前形成中的周线（默认只输出最近已收盘周）",
+    )
+    args = parser.parse_args()
+
+    try:
+        run_weekly_env(include_current_week=args.include_current_week)
+    except ValueError as exc:
+        print(str(exc))
+        return
 
 
 if __name__ == "__main__":

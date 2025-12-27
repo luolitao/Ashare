@@ -305,16 +305,44 @@ class OpenMonitorRepository:
         return None
 
     def resolve_monitor_trade_date(self, checked_at: dt.datetime) -> str:
-        candidate = checked_at.date().isoformat()
-        view = str(getattr(self.params, "ready_signals_view", "") or "").strip() or None
-        latest_trade_date = self._resolve_latest_trade_date(ready_view=view)
+        """解析业务交易日：非交易日则回落到最近交易日。"""
 
-        if not latest_trade_date:
-            return candidate
+        try:
+            candidate_date = checked_at.date()
 
-        if self._is_trading_day(candidate, latest_trade_date):
-            return candidate
-        return latest_trade_date
+            try:
+                calendar = load_trading_calendar(
+                    start=candidate_date - dt.timedelta(days=370),
+                    end=candidate_date,
+                )
+            except Exception:  # noqa: BLE001
+                calendar = set()
+
+            if calendar:
+                calendar_dates = [
+                    dt.datetime.strptime(d, "%Y-%m-%d").date()
+                    for d in calendar
+                    if isinstance(d, str)
+                ]
+                calendar_dates = [d for d in calendar_dates if d <= candidate_date]
+                if calendar_dates:
+                    return max(calendar_dates).isoformat()
+
+            view = str(getattr(self.params, "ready_signals_view", "") or "").strip() or None
+            latest_trade_date = self._resolve_latest_trade_date(ready_view=view)
+            if latest_trade_date and self._is_trading_day(candidate_date.isoformat(), latest_trade_date):
+                return candidate_date.isoformat()
+            if latest_trade_date:
+                return latest_trade_date
+
+            target = candidate_date
+            for _ in range(14):
+                if target.weekday() < 5:
+                    return target.isoformat()
+                target -= dt.timedelta(days=1)
+            return candidate_date.isoformat()
+        except Exception:  # noqa: BLE001
+            return checked_at.date().isoformat()
 
     def _load_signal_day_pct_change(
         self, signal_date: str, codes: List[str]

@@ -21,9 +21,6 @@ import datetime as dt
 from datetime import timedelta
 import time
 
-import pandas as pd
-from sqlalchemy import text
-
 from ashare.config import get_section
 from ashare.open_monitor import MA5MA20OpenMonitorRunner
 from ashare.env_snapshot_utils import load_trading_calendar
@@ -134,12 +131,6 @@ def main() -> None:
         action="store_true",
         help="只执行一次就退出（仍会按整点边界对齐）",
     )
-    parser.add_argument(
-        "--include-current-week",
-        action="store_true",
-        dest="include_current_week",
-        help="周线 asof_date 是否包含当前形成周（默认使用最近已收盘周）",
-    )
     args = parser.parse_args()
 
     ensure_schema()
@@ -168,11 +159,9 @@ def main() -> None:
     def _ensure_env_snapshot(trigger_at: dt.datetime) -> tuple[str, str]:
         nonlocal ensured_key, ensured_ready
 
-        trade_day = _next_trading_day(trigger_at.date(), runner)
-        monitor_date = trade_day.isoformat()
-
-        # open_monitor 严格按 run_id 匹配，因此这里必须用当前触发点计算 run_id
-        run_id = runner._calc_run_id(trigger_at)  # noqa: SLF001
+        monitor_date = runner.repo.resolve_monitor_trade_date(trigger_at)
+        biz_ts = dt.datetime.combine(dt.date.fromisoformat(monitor_date), trigger_at.time())
+        run_id = runner._calc_run_id(biz_ts)  # noqa: SLF001
         runner.repo.ensure_run_context(
             monitor_date,
             run_id,
@@ -201,25 +190,7 @@ def main() -> None:
             ensured_ready = False
             return monitor_date, run_id
 
-        # 兜底：避免触发点跨 run_id 桶（±60s）
-        candidate_times = [
-            trigger_at - dt.timedelta(seconds=60),
-            trigger_at,
-            trigger_at + dt.timedelta(seconds=60),
-        ]
-        for ts in candidate_times:
-            rid = runner._calc_run_id(ts)  # noqa: SLF001
-            if not rid:
-                continue
-            runner.repo.ensure_run_context(
-                monitor_date,
-                rid,
-                checked_at=ts,
-                triggered_at=ts,
-                params_json=runner._build_run_params_json(),  # noqa: SLF001
-            )
-            if _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=rid):
-                continue
+        def _try_build_env(ts: dt.datetime, rid: str) -> bool:
             try:
                 runner.build_and_persist_env_snapshot(
                     latest_trade_date,
@@ -233,6 +204,7 @@ def main() -> None:
                     rid,
                     latest_trade_date,
                 )
+                return True
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "自动补齐环境快照失败（monitor_date=%s, run_id=%s）：%s",
@@ -240,6 +212,30 @@ def main() -> None:
                     rid,
                     exc,
                 )
+                return False
+
+        candidate_times = [
+            biz_ts,
+            biz_ts - dt.timedelta(seconds=60),
+            biz_ts + dt.timedelta(seconds=60),
+        ]
+        seen_run_ids: set[str] = set()
+        for ts in candidate_times:
+            rid = runner._calc_run_id(ts)  # noqa: SLF001
+            if not rid or rid in seen_run_ids:
+                continue
+            seen_run_ids.add(rid)
+            runner.repo.ensure_run_context(
+                monitor_date,
+                rid,
+                checked_at=trigger_at,
+                triggered_at=trigger_at,
+                params_json=runner._build_run_params_json(),  # noqa: SLF001
+            )
+            if _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=rid):
+                break
+            if _try_build_env(trigger_at, rid):
+                break
 
         ensured_key = key
         ensured_ready = _env_snapshot_exists(runner, monitor_date=monitor_date, run_id=run_id)
@@ -276,7 +272,7 @@ def main() -> None:
                 logger.info("下一次触发：%s（%.1fs 后）", run_at.strftime("%Y-%m-%d %H:%M:%S"), sleep_s)
                 time.sleep(sleep_s)
 
-            trigger_at = dt.datetime.now()
+            trigger_at = run_at
             monitor_date, run_id = _ensure_env_snapshot(trigger_at)
 
             logger.info(
@@ -286,7 +282,7 @@ def main() -> None:
                 run_id,
             )
             try:
-                runner.run(force=True)
+                runner.run(force=True, checked_at=trigger_at)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("开盘监测执行异常（将等待下一轮）：%s", exc)
 
