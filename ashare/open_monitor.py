@@ -42,13 +42,16 @@ from .open_monitor_eval import (
 from .open_monitor_market_data import OpenMonitorMarketData
 from .open_monitor_repo import OpenMonitorRepository, calc_run_id
 from .open_monitor_rules import Rule, RuleEngine, RuleResult
+from .market_indicator_builder import MarketIndicatorBuilder
 from .schema_manager import (
-    TABLE_STRATEGY_REALTIME_MARKET_SNAPSHOT,
-    TABLE_STRATEGY_WEEKLY_MARKET_ENV,
+    STRATEGY_CODE_MA5_MA20_TREND,
+    TABLE_STRATEGY_DAILY_MARKET_INDICATOR,
+    TABLE_STRATEGY_MARKET_ENV_SNAPSHOT,
     TABLE_STRATEGY_OPEN_MONITOR_EVAL,
     TABLE_STRATEGY_OPEN_MONITOR_QUOTE,
     TABLE_STRATEGY_OPEN_MONITOR_RUN,
-    STRATEGY_CODE_MA5_MA20_TREND,
+    TABLE_STRATEGY_REALTIME_MARKET_SNAPSHOT,
+    TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR,
     VIEW_STRATEGY_OPEN_MONITOR,
     VIEW_STRATEGY_OPEN_MONITOR_WIDE,
     VIEW_STRATEGY_READY_SIGNALS,
@@ -113,10 +116,12 @@ class OpenMonitorParams:
     run_id_minutes: int = 5
 
     # 环境快照表：存储周线计划等“批次级别”信息，避免在每条标的记录里重复。
-    env_snapshot_table: str = TABLE_STRATEGY_WEEKLY_MARKET_ENV
+    env_snapshot_table: str = TABLE_STRATEGY_MARKET_ENV_SNAPSHOT
 
     # 指数环境快照表：按哈希去重存储单份指数环境，避免在事实表重复写入。
     env_index_snapshot_table: str = TABLE_STRATEGY_REALTIME_MARKET_SNAPSHOT
+    weekly_indicator_table: str = TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR
+    daily_indicator_table: str = TABLE_STRATEGY_DAILY_MARKET_INDICATOR
 
     # 同一批次内同一 code 只保留“最新 date（信号日）”那条 BUY 信号。
     # 目的：避免同一批次出现重复 code（例如同一只股票在 12-09 与 12-11 都触发 BUY）。
@@ -224,6 +229,14 @@ class OpenMonitorParams:
                 sec.get("env_index_snapshot_table", cls.env_index_snapshot_table)
             ).strip()
                                      or cls.env_index_snapshot_table,
+            weekly_indicator_table=str(
+                sec.get("weekly_indicator_table", cls.weekly_indicator_table)
+            ).strip()
+                                   or cls.weekly_indicator_table,
+            daily_indicator_table=str(
+                sec.get("daily_indicator_table", cls.daily_indicator_table)
+            ).strip()
+                                  or cls.daily_indicator_table,
             output_mode=str(sec.get("output_mode", cls.output_mode)).strip().upper()
                         or cls.output_mode,
             persist_env_snapshot=_get_bool("persist_env_snapshot", cls.persist_env_snapshot),
@@ -277,6 +290,10 @@ class MA5MA20OpenMonitorRunner:
             self.logger,
             self.params,
             self.env_builder,
+            MarketIndicatorBuilder(
+                env_builder=self.env_builder,
+                logger=self.logger,
+            ),
         )
         self.evaluator = OpenMonitorEvaluator(
             self.logger, self.params, self.rule_engine, self.rule_config, self.rules
@@ -306,12 +323,14 @@ class MA5MA20OpenMonitorRunner:
             *,
             monitor_date: str | None = None,
             run_id: str | None = None,
+            run_pk: int | None = None,
             checked_at: dt.datetime | None = None,
     ) -> dict[str, Any] | None:
         return self.env_service.build_and_persist_env_snapshot(
             latest_trade_date,
             monitor_date=monitor_date,
             run_id=run_id,
+            run_pk=run_pk,
             checked_at=checked_at,
             fetch_index_live_quote=self.market_data.fetch_index_live_quote,
         )
@@ -319,9 +338,9 @@ class MA5MA20OpenMonitorRunner:
     def load_env_snapshot_context(
             self,
             monitor_date: str,
-            run_id: str | None = None,
+            run_pk: int | None = None,
     ) -> dict[str, Any] | None:
-        return self.env_service.load_env_snapshot_context(monitor_date, run_id)
+        return self.env_service.load_env_snapshot_context(monitor_date, run_pk)
 
     def run(self, *, force: bool = False, checked_at: dt.datetime | None = None) -> None:
         """执行开盘监测。
@@ -347,13 +366,16 @@ class MA5MA20OpenMonitorRunner:
         self.market_data.params = self.params
         run_id = self._calc_run_id(biz_ts)
         run_params_json = self._build_run_params_json()
-        self.repo.ensure_run_context(
+        run_pk = self.repo.ensure_run_context(
             monitor_date,
             run_id,
             checked_at=checked_at,
             triggered_at=checked_at,
             params_json=run_params_json,
         )
+        if run_pk is None:
+            self.logger.error("未获取 run_pk，无法继续执行开盘监测。")
+            return
 
         latest_trade_date, signal_dates, signals = self.repo.load_recent_buy_signals()
         if not latest_trade_date or signals.empty:
@@ -362,12 +384,13 @@ class MA5MA20OpenMonitorRunner:
         codes = signals["code"].dropna().astype(str).unique().tolist()
         self.logger.info("待监测标的数量：%s（信号日：%s）", len(codes), signal_dates)
 
-        if not self.repo.env_snapshot_exists(monitor_date, run_id):
+        if run_pk and not self.repo.env_snapshot_exists(monitor_date, run_pk):
             try:
                 self.build_and_persist_env_snapshot(
                     latest_trade_date,
                     monitor_date=monitor_date,
                     run_id=run_id,
+                    run_pk=run_pk,
                     checked_at=checked_at,
                 )
                 self.logger.info(
@@ -385,7 +408,7 @@ class MA5MA20OpenMonitorRunner:
                 )
                 return
 
-        env_context = self.load_env_snapshot_context(monitor_date, run_id)
+        env_context = self.load_env_snapshot_context(monitor_date, run_pk)
         if not env_context:
             self.logger.error(
                 "未找到环境快照（monitor_date=%s, run_id=%s），本次开盘监测终止。",

@@ -1,4 +1,4 @@
-"""回填周线市场指标。"""
+"""回填日线市场指标。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,9 @@ from ashare.open_monitor import MA5MA20OpenMonitorRunner
 from ashare.schema_manager import ensure_schema
 
 
-def run_weekly_market_indicator(
+def run_daily_market_indicator(
     *, start_date: str | None = None, end_date: str | None = None, mode: str = "incremental"
 ) -> dict:
-    """回填周线指标（增量/全量由 mode 控制）。"""
     ensure_schema()
     runner = MA5MA20OpenMonitorRunner()
     builder = MarketIndicatorBuilder(env_builder=runner.env_builder, logger=runner.logger)
@@ -20,7 +19,7 @@ def run_weekly_market_indicator(
         builder=builder,
         logger=runner.logger,
     )
-    return indicator_runner.run_weekly_indicator(
+    return indicator_runner.run_daily_indicator(
         start_date=start_date,
         end_date=end_date,
         mode=mode,
@@ -28,7 +27,7 @@ def run_weekly_market_indicator(
 
 
 def main() -> None:
-    run_weekly_market_indicator()
+    run_daily_market_indicator()
 
 
 if __name__ == "__main__":

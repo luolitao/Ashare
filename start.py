@@ -1,6 +1,5 @@
 """项目启动脚本入口, 直接执行即可运行示例."""
 
-import argparse
 import datetime as dt
 import json
 import logging
@@ -12,7 +11,7 @@ from ashare.app import AshareApp
 from ashare.ma5_ma20_trend_strategy import MA5MA20StrategyRunner
 from ashare.open_monitor import MA5MA20OpenMonitorRunner
 from ashare.schema_manager import ensure_schema
-from run_index_weekly_channel import run_weekly_env
+from run_index_weekly_channel import run_weekly_market_indicator
 
 
 def _parse_asof_date(raw: str | None) -> str | None:
@@ -114,25 +113,25 @@ def _self_check(
     if skipped_weekly:
         print("[CHECK] 周线环境：已跳过。")
         return
-    if weekly_status.get("exists_after"):
-        print(f"[CHECK] 周线环境 OK（run_id={weekly_status.get('run_id')}）。")
+    written = weekly_status.get("written", 0)
+    if written:
+        print(f"[CHECK] 周线指标 OK（写入 {written} 条）。")
     else:
-        print("[CHECK] 周线环境缺失，请检查周线环境生成流程。")
+        print("[CHECK] 周线指标缺失，请检查周线指标生成流程。")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="启动离线准备器")
-    parser.add_argument("--skip-fetch", action="store_true", help="跳过基础数据刷新")
-    parser.add_argument("--skip-strategy", action="store_true", help="跳过策略指标/信号计算")
-    parser.add_argument("--skip-weekly", action="store_true", help="跳过周线环境准备")
-    parser.add_argument("--asof-date", help="指定周线 asof_date（YYYY-MM-DD）")
-    args = parser.parse_args()
-
+def main(
+    *,
+    skip_fetch: bool = False,
+    skip_strategy: bool = False,
+    skip_weekly: bool = False,
+    asof_date: str | None = None,
+) -> None:
     ensure_schema()
-    if not args.skip_fetch:
+    if not skip_fetch:
         AshareApp().run()
     strategy_runner = MA5MA20StrategyRunner()
-    if not args.skip_strategy:
+    if not skip_strategy:
         # 策略是否执行由 config.yaml: strategy_ma5_ma20_trend.enabled 控制
         strategy_runner.run()
 
@@ -142,12 +141,16 @@ def main() -> None:
     ready_view = str(params.ready_signals_view or "").strip() or None
     signal_table = str(getattr(strategy_runner.params, "signal_events_table", "") or "").strip()
 
-    weekly_status: dict = {"written": False, "exists_after": False, "run_id": None}
-    skipped_weekly = bool(args.skip_weekly)
+    weekly_status: dict = {"written": 0}
+    skipped_weekly = bool(skip_weekly)
     if not skipped_weekly:
-        asof_date = _parse_asof_date(args.asof_date)
+        asof_date = _parse_asof_date(asof_date)
         try:
-            weekly_status = run_weekly_env(asof_date=asof_date)
+            weekly_status = run_weekly_market_indicator(
+                start_date=asof_date,
+                end_date=asof_date,
+                mode="incremental",
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[WARN] 周线环境生成失败：{exc}")
 

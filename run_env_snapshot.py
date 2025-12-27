@@ -20,18 +20,22 @@ def main() -> None:
     latest_trade_date = runner.repo._resolve_latest_trade_date(  # noqa: SLF001
         ready_view=view
     ) or monitor_date
-    runner.repo.ensure_run_context(
+    run_pk = runner.repo.ensure_run_context(
         monitor_date,
         run_id,
         checked_at=checked_at,
         triggered_at=checked_at,
         params_json=runner._build_run_params_json(),  # noqa: SLF001
     )
+    if run_pk is None:
+        print("run_pk 获取失败，已跳过环境快照写入。")
+        return
 
     runner.build_and_persist_env_snapshot(
         latest_trade_date=latest_trade_date,
         monitor_date=monitor_date,
         run_id=run_id,
+        run_pk=run_pk,
         checked_at=checked_at,
     )
 
