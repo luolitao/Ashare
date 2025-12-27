@@ -308,7 +308,7 @@ class MA5MA20StrategyRunner:
                         SELECT DISTINCT CAST(`{date_col}` AS CHAR) AS d
                         FROM `{base_table}`
                         WHERE `{date_col}` <= :base_date
-                        ORDER BY `{date_col}` DESC
+                        ORDER BY d DESC
                         LIMIT {lookback}
                         """
                     ),

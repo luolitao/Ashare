@@ -230,7 +230,7 @@ class OpenMonitorRepository:
             SELECT DISTINCT CAST(`date` AS CHAR) AS d
             FROM `{daily}`
             WHERE `date` <= :base_date AND `date` >= :min_date
-            ORDER BY `date` DESC
+            ORDER BY d DESC
             """
         )
         try:
