@@ -1271,6 +1271,7 @@ class OpenMonitorRepository:
             ON DUPLICATE KEY UPDATE {", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)}
             """
         )
+        df = df.where(pd.notna(df), None)
         payloads = df.to_dict(orient="records")
         try:
             with self.engine.begin() as conn:

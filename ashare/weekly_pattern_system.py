@@ -883,7 +883,10 @@ class WeeklyPlanSystem:
             confirm_tags = set(candidate.confirm_tags)
             if "VOL_CONFIRM" in confirm_tags:
                 modifier += 0.1
-            if "VOL_WEAK" in confirm_tags:
+            wk_vol_ratio_20 = None
+            if "wk_vol_ratio_20" in df.columns and not df.empty:
+                wk_vol_ratio_20 = df["wk_vol_ratio_20"].iloc[-1]
+            if wk_vol_ratio_20 is not None and not pd.isna(wk_vol_ratio_20) and float(wk_vol_ratio_20) < 0.9:
                 modifier -= 0.1
             if chan_pos is not None:
                 if chan_pos >= 0.85:

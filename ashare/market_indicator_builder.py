@@ -217,13 +217,13 @@ class MarketIndicatorBuilder:
                 "BREAKDOWN",
             )
             status = status.mask(
-                (status != "UNKNOWN") & risk_off_condition,
+                (status == "RISK_ON") & risk_off_condition,
                 "RISK_OFF",
             )
             pullback_mask = (grp["ma60"].notna()) & (close < grp["ma60"])
-            status = status.mask((status != "UNKNOWN") & pullback_mask, "PULLBACK")
+            status = status.mask((status == "RISK_ON") & pullback_mask, "PULLBACK")
             pullback_mask = (grp["ma20"].notna()) & (close < grp["ma20"])
-            status = status.mask((status != "UNKNOWN") & pullback_mask, "PULLBACK")
+            status = status.mask((status == "RISK_ON") & pullback_mask, "PULLBACK")
             grp["status"] = status
 
             score = (
@@ -417,11 +417,14 @@ class MarketIndicatorBuilder:
             float(risk_off_mask.sum()) / float(denom.sum()) if denom.any() else None
         )
 
-        dispersion = (
-            float(group["dev_ma20_atr"].std())
-            if group["dev_ma20_atr"].notna().any()
-            else None
-        )
+        dispersion = None
+        if group["dev_ma20_atr"].notna().sum() >= 2:
+            try:
+                val = float(group["dev_ma20_atr"].std())
+            except Exception:
+                val = None
+            if val is not None and not pd.isna(val):
+                dispersion = val
 
         return pd.Series(
             {
