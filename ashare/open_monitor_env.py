@@ -65,11 +65,8 @@ class OpenMonitorEnvService:
         row = df.iloc[0]
         weekly_asof = row.get("env_weekly_asof_trade_date")
         daily_asof = row.get("env_daily_asof_trade_date")
-        index_code = str(self.params.index_code or "").strip()
         weekly_indicator = (
-            self.repo.load_weekly_indicator(str(weekly_asof), index_code)
-            if weekly_asof
-            else {}
+            self.repo.load_weekly_indicator(str(weekly_asof)) if weekly_asof else {}
         )
         daily_indicator = (
             self.repo.load_daily_indicator(str(daily_asof), index_code)
@@ -90,6 +87,7 @@ class OpenMonitorEnvService:
             "weekly_money_proxy": weekly_indicator.get("weekly_money_proxy"),
             "weekly_tags": weekly_indicator.get("weekly_tags"),
             "weekly_note": weekly_indicator.get("weekly_note"),
+            "weekly_plan_json": weekly_indicator.get("weekly_plan_json"),
         }
 
         index_snapshot_hash = row.get("env_index_snapshot_hash")
@@ -141,9 +139,8 @@ class OpenMonitorEnvService:
     def build_environment_context(
         self, latest_trade_date: str, *, checked_at: dt.datetime | None = None
     ) -> dict[str, Any]:
-        index_code = str(self.params.index_code or "").strip()
         weekly_asof = None
-        weekly_asof_date = self.repo.get_latest_weekly_indicator_date(index_code)
+        weekly_asof_date = self.repo.get_latest_weekly_indicator_date()
         if weekly_asof_date:
             weekly_asof = weekly_asof_date.isoformat()
         if not weekly_asof:
@@ -154,6 +151,7 @@ class OpenMonitorEnvService:
             if weekly_rows:
                 weekly_asof = str(weekly_rows[0].get("weekly_asof_trade_date"))
 
+        index_code = str(self.params.index_code or "").strip()
         daily_indicator = self.repo.load_daily_indicator(latest_trade_date, index_code)
         if not daily_indicator:
             start_date = dt.date.fromisoformat(latest_trade_date)
@@ -164,7 +162,7 @@ class OpenMonitorEnvService:
             daily_indicator = self.repo.load_daily_indicator(latest_trade_date, index_code)
 
         weekly_indicator = (
-            self.repo.load_weekly_indicator(weekly_asof, index_code) if weekly_asof else {}
+            self.repo.load_weekly_indicator(weekly_asof) if weekly_asof else {}
         )
         weekly_scenario = {
             "weekly_asof_trade_date": weekly_indicator.get("weekly_asof_trade_date")
@@ -181,6 +179,7 @@ class OpenMonitorEnvService:
             "weekly_money_proxy": weekly_indicator.get("weekly_money_proxy"),
             "weekly_tags": weekly_indicator.get("weekly_tags"),
             "weekly_note": weekly_indicator.get("weekly_note"),
+            "weekly_plan_json": weekly_indicator.get("weekly_plan_json"),
         }
         weekly_gate_policy = weekly_indicator.get("weekly_gate_policy")
         env_context = {

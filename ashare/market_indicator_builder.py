@@ -48,30 +48,27 @@ class MarketIndicatorBuilder:
         weekly_money_proxy = env_context.get("weekly_money_proxy")
         weekly_tags = env_context.get("weekly_tags")
         weekly_note = env_context.get("weekly_note")
+        weekly_plan_json = weekly_scenario.get("weekly_plan_json")
 
-        rows: list[dict[str, Any]] = []
-        index_codes = self.index_codes or ["sh.000001"]
-        for index_code in index_codes:
-            rows.append(
-                {
-                    "weekly_asof_trade_date": weekly_asof,
-                    "index_code": index_code,
-                    "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),
-                    "weekly_structure_status": weekly_scenario.get("weekly_structure_status"),
-                    "weekly_pattern_status": weekly_scenario.get("weekly_pattern_status"),
-                    "weekly_risk_score": weekly_scenario.get("weekly_risk_score"),
-                    "weekly_risk_level": weekly_scenario.get("weekly_risk_level"),
-                    "weekly_gate_policy": weekly_gate_policy,
-                    "weekly_plan_a_exposure_cap": weekly_scenario.get(
-                        "weekly_plan_a_exposure_cap"
-                    ),
-                    "weekly_key_levels_str": weekly_scenario.get("weekly_key_levels_str"),
-                    "weekly_money_proxy": weekly_money_proxy,
-                    "weekly_tags": weekly_tags,
-                    "weekly_note": weekly_note,
-                }
-            )
-        return rows
+        benchmark_code = self.env_builder.benchmark_code
+        return [
+            {
+                "weekly_asof_trade_date": weekly_asof,
+                "benchmark_code": benchmark_code,
+                "weekly_scene_code": weekly_scenario.get("weekly_scene_code"),
+                "weekly_structure_status": weekly_scenario.get("weekly_structure_status"),
+                "weekly_pattern_status": weekly_scenario.get("weekly_pattern_status"),
+                "weekly_risk_score": weekly_scenario.get("weekly_risk_score"),
+                "weekly_risk_level": weekly_scenario.get("weekly_risk_level"),
+                "weekly_gate_policy": weekly_gate_policy,
+                "weekly_plan_a_exposure_cap": weekly_scenario.get("weekly_plan_a_exposure_cap"),
+                "weekly_key_levels_str": weekly_scenario.get("weekly_key_levels_str"),
+                "weekly_money_proxy": weekly_money_proxy,
+                "weekly_tags": weekly_tags,
+                "weekly_note": weekly_note,
+                "weekly_plan_json": weekly_plan_json,
+            }
+        ]
 
     def resolve_weekly_asof_dates(
         self, start_date: dt.date, end_date: dt.date

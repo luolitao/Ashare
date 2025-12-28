@@ -13,6 +13,7 @@ from sqlalchemy import bindparam, text
 from .baostock_core import BaostockDataFetcher
 from .baostock_session import BaostockSession
 from .market_regime import MarketRegimeClassifier
+from .schema_manager import WEEKLY_MARKET_BENCHMARK_CODE
 from .utils.convert import to_float
 from .weekly_channel_regime import WeeklyChannelClassifier
 from .weekly_pattern_system import WeeklyPlanSystem
@@ -41,7 +42,8 @@ class WeeklyEnvironmentBuilder:
         self.weekly_soft_gate_strength_threshold = weekly_soft_gate_strength_threshold
 
         self.market_regime = MarketRegimeClassifier()
-        self.weekly_channel = WeeklyChannelClassifier(primary_code="sh.000001")
+        self.benchmark_code = WEEKLY_MARKET_BENCHMARK_CODE
+        self.weekly_channel = WeeklyChannelClassifier(primary_code=self.benchmark_code)
         self.weekly_plan_system = WeeklyPlanSystem()
 
         self._calendar_cache: set[str] = set()

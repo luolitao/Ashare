@@ -51,7 +51,8 @@ from .schema_manager import (
     TABLE_STRATEGY_OPEN_MONITOR_QUOTE,
     TABLE_STRATEGY_OPEN_MONITOR_RUN,
     TABLE_STRATEGY_REALTIME_MARKET_SNAPSHOT,
-    TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR,
+    TABLE_STRATEGY_WEEKLY_MARKET_ENV,
+    WEEKLY_MARKET_BENCHMARK_CODE,
     VIEW_STRATEGY_OPEN_MONITOR,
     VIEW_STRATEGY_OPEN_MONITOR_WIDE,
     VIEW_STRATEGY_READY_SIGNALS,
@@ -120,8 +121,9 @@ class OpenMonitorParams:
 
     # 指数环境快照表：按哈希去重存储单份指数环境，避免在事实表重复写入。
     env_index_snapshot_table: str = TABLE_STRATEGY_REALTIME_MARKET_SNAPSHOT
-    weekly_indicator_table: str = TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR
+    weekly_indicator_table: str = TABLE_STRATEGY_WEEKLY_MARKET_ENV
     daily_indicator_table: str = TABLE_STRATEGY_DAILY_MARKET_INDICATOR
+    weekly_benchmark_code: str = WEEKLY_MARKET_BENCHMARK_CODE
 
     # 同一批次内同一 code 只保留“最新 date（信号日）”那条 BUY 信号。
     # 目的：避免同一批次出现重复 code（例如同一只股票在 12-09 与 12-11 都触发 BUY）。
@@ -229,14 +231,12 @@ class OpenMonitorParams:
                 sec.get("env_index_snapshot_table", cls.env_index_snapshot_table)
             ).strip()
                                      or cls.env_index_snapshot_table,
-            weekly_indicator_table=str(
-                sec.get("weekly_indicator_table", cls.weekly_indicator_table)
-            ).strip()
-                                   or cls.weekly_indicator_table,
+            weekly_indicator_table=cls.weekly_indicator_table,
             daily_indicator_table=str(
                 sec.get("daily_indicator_table", cls.daily_indicator_table)
             ).strip()
-                                  or cls.daily_indicator_table,
+            or cls.daily_indicator_table,
+            weekly_benchmark_code=cls.weekly_benchmark_code,
             output_mode=str(sec.get("output_mode", cls.output_mode)).strip().upper()
                         or cls.output_mode,
             persist_env_snapshot=_get_bool("persist_env_snapshot", cls.persist_env_snapshot),
