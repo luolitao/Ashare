@@ -242,8 +242,8 @@ class MarketIndicatorRunner:
         df_daily_valid["index_code"] = df_daily_valid["index_code"].astype(str)
         df_weekly["index_code"] = df_weekly["index_code"].astype(str)
 
-        df_daily_valid = df_daily_valid.sort_values(["index_code", "__asof_trade_date"])
-        df_weekly = df_weekly.sort_values(["index_code", "weekly_asof_trade_date"])
+        df_daily_valid = df_daily_valid.sort_values(["__asof_trade_date", "index_code"]).reset_index(drop=True)
+        df_weekly = df_weekly.sort_values(["weekly_asof_trade_date", "index_code"]).reset_index(drop=True)
 
         merged = pd.merge_asof(
             df_daily_valid,
