@@ -5,7 +5,7 @@ import logging
 from typing import Any, Optional
 
 import pandas as pd
-from sqlalchemy import bindparam, text
+from sqlalchemy import text
 
 from .market_indicator_builder import MarketIndicatorBuilder
 from .open_monitor_repo import OpenMonitorRepository
@@ -32,8 +32,8 @@ class MarketIndicatorRunner:
         end_date: str | None = None,
         mode: str = "incremental",
     ) -> dict[str, Any]:
-        index_code = str(self.repo.params.index_code or "").strip()
-        end_dt = self._resolve_end_date(end_date, index_code)
+        benchmark_code = str(self.repo.params.weekly_benchmark_code or "").strip()
+        end_dt = self._resolve_end_date(end_date, benchmark_code)
         if end_dt is None:
             raise ValueError("无法解析 weekly 指标的 end_date。")
 
@@ -41,7 +41,7 @@ class MarketIndicatorRunner:
             start_date,
             end_dt,
             mode=mode,
-            latest_date=self.repo.get_latest_weekly_indicator_date(index_code),
+            latest_date=self.repo.get_latest_weekly_indicator_date(),
         )
         weekly_dates = self.builder.resolve_weekly_asof_dates(start_dt, end_dt)
         if not weekly_dates:
@@ -175,31 +175,15 @@ class MarketIndicatorRunner:
         min_date_floor = (min_date - pd.Timedelta(days=14)).date()
         max_date_val = max_date.date()
 
-        codes = (
-            df_daily["index_code"]
-            .dropna()
-            .astype(str)
-            .map(str.strip)
-            .loc[lambda s: s != ""]
-            .unique()
-            .tolist()
-        )
-        if not codes:
-            df_daily = df_daily.sort_values("__order")
-            df_daily = df_daily.drop(columns=["__order", "__asof_trade_date"])
-            return df_daily.to_dict(orient="records")
-
-        stmt = (
-            text(
-                f"""
-                SELECT weekly_asof_trade_date, index_code, weekly_scene_code
-                FROM `{table}`
-                WHERE index_code IN :codes
-                  AND weekly_asof_trade_date <= :max_date
-                  AND weekly_asof_trade_date >= :min_date
-                """
-            )
-            .bindparams(bindparam("codes", expanding=True))
+        benchmark_code = self.repo.params.weekly_benchmark_code
+        stmt = text(
+            f"""
+            SELECT weekly_asof_trade_date, weekly_scene_code
+            FROM `{table}`
+            WHERE benchmark_code = :benchmark_code
+              AND weekly_asof_trade_date <= :max_date
+              AND weekly_asof_trade_date >= :min_date
+            """
         )
         try:
             with self.repo.engine.begin() as conn:
@@ -207,9 +191,9 @@ class MarketIndicatorRunner:
                     stmt,
                     conn,
                     params={
-                        "codes": codes,
                         "max_date": max_date_val,
                         "min_date": min_date_floor,
+                        "benchmark_code": benchmark_code,
                     },
                 )
         except Exception as exc:  # noqa: BLE001
@@ -227,30 +211,26 @@ class MarketIndicatorRunner:
         df_weekly["weekly_asof_trade_date"] = pd.to_datetime(
             df_weekly["weekly_asof_trade_date"], errors="coerce"
         )
-        df_weekly = df_weekly.dropna(subset=["weekly_asof_trade_date", "index_code"])
+        df_weekly = df_weekly.dropna(subset=["weekly_asof_trade_date"])
         if df_weekly.empty:
             df_daily = df_daily.sort_values("__order")
             df_daily = df_daily.drop(columns=["__order", "__asof_trade_date"])
             return df_daily.to_dict(orient="records")
 
-        df_daily_valid = df_daily.dropna(subset=["__asof_trade_date", "index_code"]).copy()
+        df_daily_valid = df_daily.dropna(subset=["__asof_trade_date"]).copy()
         if df_daily_valid.empty:
             df_daily = df_daily.sort_values("__order")
             df_daily = df_daily.drop(columns=["__order", "__asof_trade_date"])
             return df_daily.to_dict(orient="records")
 
-        df_daily_valid["index_code"] = df_daily_valid["index_code"].astype(str)
-        df_weekly["index_code"] = df_weekly["index_code"].astype(str)
-
-        df_daily_valid = df_daily_valid.sort_values(["__asof_trade_date", "index_code"]).reset_index(drop=True)
-        df_weekly = df_weekly.sort_values(["weekly_asof_trade_date", "index_code"]).reset_index(drop=True)
+        df_daily_valid = df_daily_valid.sort_values("__asof_trade_date").reset_index(drop=True)
+        df_weekly = df_weekly.sort_values("weekly_asof_trade_date").reset_index(drop=True)
 
         merged = pd.merge_asof(
             df_daily_valid,
             df_weekly,
             left_on="__asof_trade_date",
             right_on="weekly_asof_trade_date",
-            by="index_code",
             direction="backward",
         )
         df_daily.loc[df_daily_valid.index, "cycle_phase"] = merged["weekly_scene_code"].values

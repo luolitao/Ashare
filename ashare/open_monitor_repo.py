@@ -1129,20 +1129,21 @@ class OpenMonitorRepository:
         }
         return normalized
 
-    def get_latest_weekly_indicator_date(self, index_code: str) -> dt.date | None:
+    def get_latest_weekly_indicator_date(self) -> dt.date | None:
         table = self.params.weekly_indicator_table
         if not (table and self._table_exists(table)):
             return None
+        benchmark_code = self.params.weekly_benchmark_code
         stmt = text(
             f"""
             SELECT MAX(`weekly_asof_trade_date`) AS latest_date
             FROM `{table}`
-            WHERE `index_code` = :code
+            WHERE `benchmark_code` = :code
             """
         )
         try:
             with self.engine.begin() as conn:
-                row = conn.execute(stmt, {"code": index_code}).mappings().first()
+                row = conn.execute(stmt, {"code": benchmark_code}).mappings().first()
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取周线指标最新日期失败：%s", exc)
             return None
@@ -1191,15 +1192,16 @@ class OpenMonitorRepository:
                 return None
         return None
 
-    def load_weekly_indicator(self, asof_trade_date: str, index_code: str) -> dict[str, Any]:
+    def load_weekly_indicator(self, asof_trade_date: str) -> dict[str, Any]:
         table = self.params.weekly_indicator_table
         if not (table and self._table_exists(table)):
             return {}
+        benchmark_code = self.params.weekly_benchmark_code
         stmt = text(
             f"""
             SELECT *
             FROM `{table}`
-            WHERE `weekly_asof_trade_date` = :d AND `index_code` = :code
+            WHERE `weekly_asof_trade_date` = :d AND `benchmark_code` = :code
             LIMIT 1
             """
         )
@@ -1208,7 +1210,7 @@ class OpenMonitorRepository:
                 df = pd.read_sql_query(
                     stmt,
                     conn,
-                    params={"d": asof_trade_date, "code": index_code},
+                    params={"d": asof_trade_date, "code": benchmark_code},
                 )
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取周线指标失败：%s", exc)
@@ -1253,7 +1255,11 @@ class OpenMonitorRepository:
         if df.empty:
             return 0
         columns = df.columns.tolist()
-        update_cols = [c for c in columns if c not in {"weekly_asof_trade_date", "index_code"}]
+        update_cols = [
+            c
+            for c in columns
+            if c not in {"weekly_asof_trade_date", "benchmark_code"}
+        ]
         stmt = text(
             f"""
             INSERT INTO `{table}` ({", ".join(f"`{c}`" for c in columns)})

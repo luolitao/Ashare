@@ -31,7 +31,8 @@ VIEW_STRATEGY_PNL = "v_pnl"
 # 开盘监测输出
 TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_open_monitor_eval"
 TABLE_STRATEGY_OPEN_MOTOR_ENV = "strategy_open_motor_env"
-TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR = "strategy_weekly_market_indicator"
+TABLE_STRATEGY_WEEKLY_MARKET_ENV = "strategy_weekly_market_env"
+WEEKLY_MARKET_BENCHMARK_CODE = "sh.000001"
 TABLE_STRATEGY_DAILY_MARKET_INDICATOR = "strategy_daily_market_indicator"
 TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_open_monitor_quote"
 TABLE_STRATEGY_OPEN_MONITOR_RUN = "strategy_open_monitor_run"
@@ -217,14 +218,16 @@ class SchemaManager:
                 or TABLE_STRATEGY_OPEN_MONITOR_QUOTE
         )
         weekly_indicator_table = (
-                str(
-                    open_monitor_cfg.get(
-                        "weekly_indicator_table",
-                        TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR,
-                    )
-                ).strip()
-                or TABLE_STRATEGY_WEEKLY_MARKET_INDICATOR
+            str(
+                open_monitor_cfg.get(
+                    "weekly_indicator_table",
+                    TABLE_STRATEGY_WEEKLY_MARKET_ENV,
+                )
+            ).strip()
+            or TABLE_STRATEGY_WEEKLY_MARKET_ENV
         )
+        if weekly_indicator_table == "strategy_weekly_market_indicator":
+            weekly_indicator_table = TABLE_STRATEGY_WEEKLY_MARKET_ENV
         daily_indicator_table = (
                 str(
                     open_monitor_cfg.get(
@@ -1595,7 +1598,7 @@ class SchemaManager:
               ON env.`env_index_snapshot_hash` = idx.`snapshot_hash`
             LEFT JOIN `{weekly_table}` weekly
               ON env.`env_weekly_asof_trade_date` = weekly.`weekly_asof_trade_date`
-             AND idx.`index_code` = weekly.`index_code`
+             AND weekly.`benchmark_code` = '{WEEKLY_MARKET_BENCHMARK_CODE}'
             LEFT JOIN `{daily_table}` daily
               ON env.`env_daily_asof_trade_date` = daily.`asof_trade_date`
              AND idx.`index_code` = daily.`index_code`
@@ -1608,7 +1611,7 @@ class SchemaManager:
     def _ensure_weekly_indicator_table(self, table: str) -> None:
         columns = {
             "weekly_asof_trade_date": "DATE NOT NULL",
-            "index_code": "VARCHAR(16) NOT NULL",
+            "benchmark_code": "VARCHAR(16) NOT NULL",
             "weekly_scene_code": "VARCHAR(32) NULL",
             "weekly_structure_status": "VARCHAR(32) NULL",
             "weekly_pattern_status": "VARCHAR(32) NULL",
@@ -1620,17 +1623,18 @@ class SchemaManager:
             "weekly_money_proxy": "VARCHAR(255) NULL",
             "weekly_tags": "VARCHAR(255) NULL",
             "weekly_note": "VARCHAR(255) NULL",
+            "weekly_plan_json": "TEXT NULL",
         }
         if not self._table_exists(table):
             self._create_table(
                 table,
                 columns,
-                primary_key=("weekly_asof_trade_date", "index_code"),
+                primary_key=("weekly_asof_trade_date", "benchmark_code"),
             )
         else:
             self._add_missing_columns(table, columns)
         self._ensure_date_column(table, "weekly_asof_trade_date", not_null=True)
-        self._ensure_varchar_length(table, "index_code", 16)
+        self._ensure_varchar_length(table, "benchmark_code", 16)
 
     def _ensure_daily_indicator_table(self, table: str) -> None:
         columns = {
