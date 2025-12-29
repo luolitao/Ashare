@@ -17,7 +17,6 @@ from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
 from .env_snapshot_utils import load_trading_calendar
 from .ma5_ma20_trend_strategy import _atr, _macd
-from .open_monitor_consts import ENV_RUN_IDS, ENV_RUN_PREOPEN
 from .utils.convert import to_float as _to_float
 
 
@@ -87,27 +86,16 @@ def calc_run_id(ts: dt.datetime, run_id_minutes: int | None) -> str:
 
     t = ts.time()
     if t < auction_start:
-        run_id = "PREOPEN"
-        if run_id in ENV_RUN_IDS:
-            return f"TRADE_{run_id}"
-        return run_id
+        return "PREOPEN"
     if lunch_break_start <= t < lunch_break_end:
-        run_id = "BREAK"
-        if run_id in ENV_RUN_IDS:
-            return f"TRADE_{run_id}"
-        return run_id
+        return "BREAK"
     if t >= market_close:
-        run_id = "POSTCLOSE"
-        if run_id in ENV_RUN_IDS:
-            return f"TRADE_{run_id}"
-        return run_id
+        return "POSTCLOSE"
 
     minute_of_day = ts.hour * 60 + ts.minute
     slot_minute = (minute_of_day // window_minutes) * window_minutes
     slot_time = dt.datetime.combine(ts.date(), dt.time(slot_minute // 60, slot_minute % 60))
     run_id = slot_time.strftime("%Y-%m-%d %H:%M")
-    if run_id in ENV_RUN_IDS:
-        return f"TRADE_{run_id}"
     return run_id
 
 
@@ -1042,30 +1030,10 @@ class OpenMonitorRepository:
             self.logger.debug("读取 run_pk 失败：%s", exc)
         return None
 
-    def env_snapshot_exists(self, monitor_date: str, run_pk: int) -> bool:
-        table = self.params.env_snapshot_table
-        if not (table and monitor_date and run_pk and self._table_exists(table)):
-            return False
-
-        stmt = text(
-            f"""
-            SELECT 1 FROM `{table}`
-            WHERE `run_pk` = :b AND `monitor_date` = :d
-            LIMIT 1
-            """
-        )
-        try:
-            with self.engine.begin() as conn:
-                row = conn.execute(stmt, {"b": run_pk, "d": monitor_date}).fetchone()
-                return row is not None
-        except Exception as exc:  # noqa: BLE001
-            self.logger.debug("检查环境快照是否存在失败：%s", exc)
-            return False
-
-    def load_env_snapshot_row(
+    def load_open_monitor_env_row(
         self, monitor_date: str, run_pk: int | None
     ) -> pd.DataFrame | None:
-        table = self.params.env_snapshot_table
+        table = self.params.open_monitor_env_table
         if not (table and monitor_date and self._table_exists(table)):
             return None
         if run_pk is None:
@@ -1120,31 +1088,6 @@ class OpenMonitorRepository:
             return None
 
         return df.iloc[0].to_dict()
-
-    def get_env_broadcast_run_pk(
-        self, monitor_date: str, env_run_id: str = ENV_RUN_PREOPEN
-    ) -> int | None:
-        table = self.params.run_table
-        if not (table and monitor_date and env_run_id and self._table_exists(table)):
-            return None
-
-        stmt = text(
-            f"""
-            SELECT `run_pk`
-            FROM `{table}`
-            WHERE `monitor_date` = :d AND `run_id` = :r
-            ORDER BY `checked_at` DESC, `run_pk` DESC
-            LIMIT 1
-            """
-        )
-        try:
-            with self.engine.begin() as conn:
-                row = conn.execute(stmt, {"d": monitor_date, "r": env_run_id}).fetchone()
-            if row:
-                return int(row[0])
-        except Exception as exc:  # noqa: BLE001
-            self.logger.debug("读取环境广播 run_pk 失败：%s", exc)
-        return None
 
     def get_latest_weekly_indicator_date(self) -> dt.date | None:
         table = self.params.weekly_indicator_table
@@ -1455,7 +1398,7 @@ class OpenMonitorRepository:
         )
         return merged.to_dict(orient="records")
 
-    def persist_env_snapshot(
+    def persist_open_monitor_env(
         self,
         env_context: dict[str, Any] | None,
         monitor_date: str,
@@ -1464,7 +1407,7 @@ class OpenMonitorRepository:
         if not env_context:
             return
 
-        table = self.params.env_snapshot_table
+        table = self.params.open_monitor_env_table
         if not table:
             return
 

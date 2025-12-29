@@ -113,8 +113,8 @@ class OpenMonitorParams:
     interval_minutes: int = 5
     run_id_minutes: int = 5
 
-    # 环境快照表：存储周线计划等“批次级别”信息，避免在每条标的记录里重复。
-    env_snapshot_table: str = TABLE_STRATEGY_OPEN_MONITOR_ENV
+    # 环境表：存储周线计划等“批次级别”信息，避免在每条标的记录里重复。
+    open_monitor_env_table: str = TABLE_STRATEGY_OPEN_MONITOR_ENV
 
     weekly_indicator_table: str = TABLE_STRATEGY_WEEKLY_MARKET_ENV
     daily_indicator_table: str = TABLE_STRATEGY_DAILY_MARKET_ENV
@@ -222,10 +222,10 @@ class OpenMonitorParams:
             unique_code_latest_date_only=_get_bool(
                 "unique_code_latest_date_only", cls.unique_code_latest_date_only
             ),
-            env_snapshot_table=str(
-                sec.get("env_snapshot_table", cls.env_snapshot_table)
+            open_monitor_env_table=str(
+                sec.get("open_monitor_env_table", cls.open_monitor_env_table)
             ).strip()
-                               or cls.env_snapshot_table,
+            or cls.open_monitor_env_table,
             weekly_indicator_table=cls.weekly_indicator_table,
             daily_indicator_table=str(
                 sec.get("daily_indicator_table", cls.daily_indicator_table)
@@ -312,7 +312,7 @@ class MA5MA20OpenMonitorRunner:
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    def build_and_persist_env_snapshot(
+    def build_and_persist_open_monitor_env(
         self,
         latest_trade_date: str,
         *,
@@ -323,7 +323,7 @@ class MA5MA20OpenMonitorRunner:
         allow_auto_compute: bool = False,
         fetch_index_live_quote: Callable[[], dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        return self.env_service.build_and_persist_env_snapshot(
+        return self.env_service.build_and_persist_open_monitor_env(
             latest_trade_date,
             monitor_date=monitor_date,
             run_id=run_id,
@@ -337,12 +337,12 @@ class MA5MA20OpenMonitorRunner:
             ),
         )
 
-    def load_env_snapshot_context(
+    def load_open_monitor_env_context(
             self,
             monitor_date: str,
             run_pk: int | None = None,
     ) -> dict[str, Any] | None:
-        return self.env_service.load_env_snapshot_context(monitor_date, run_pk)
+        return self.env_service.load_open_monitor_env_context(monitor_date, run_pk)
 
     def run(self, *, force: bool = False, checked_at: dt.datetime | None = None) -> None:
         """执行开盘监测。
@@ -386,7 +386,7 @@ class MA5MA20OpenMonitorRunner:
         codes = signals["code"].dropna().astype(str).unique().tolist()
         self.logger.info("待监测标的数量：%s（信号日：%s）", len(codes), signal_dates)
 
-        env_context = self.build_and_persist_env_snapshot(
+        env_context = self.build_and_persist_open_monitor_env(
             latest_trade_date,
             monitor_date=monitor_date,
             run_id=run_id,

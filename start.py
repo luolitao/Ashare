@@ -198,7 +198,7 @@ if __name__ == "__main__":
 
 # 验收自检（最小）
 # 1) python -m py_compile ashare/open_monitor_repo.py run_open_monitor_scheduler.py run_index_weekly_channel.py start.py
-# 2) 周末/非交易日：python run_env_snapshot.py 或 python run_open_monitor_scheduler.py --once
-#    - monitor_date 回落到最近交易日，env_snapshot 能被 open_monitor 找到
+# 2) 周末/非交易日：python run_open_monitor_scheduler.py --once
+#    - monitor_date 回落到最近交易日，open_monitor 可正常构建环境
 # 3) python start.py
 #    - 报告中的 BUY 总数与 SQL 查询一致，周线 run_id= WEEKLY_{asof_date} 存在
