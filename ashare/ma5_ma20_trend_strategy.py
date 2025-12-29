@@ -1322,6 +1322,26 @@ class MA5MA20StrategyRunner:
         chip_reason = out.get("chip_reason")
         chip_reason = chip_reason.replace("", pd.NA) if isinstance(chip_reason, pd.Series) else chip_reason
         chip_penalty = pd.to_numeric(out.get("chip_penalty"), errors="coerce").fillna(0.0)
+        chip_age_days = pd.to_numeric(out.get("age_days"), errors="coerce")
+        chip_stale = out.get("stale_hit")
+        if isinstance(chip_stale, pd.Series):
+            chip_stale_flag = chip_stale.fillna(False)
+            if chip_stale_flag.dtype != bool:
+                chip_stale_flag = chip_stale_flag.astype(bool)
+        else:
+            chip_stale_flag = pd.Series(bool(chip_stale), index=out.index)
+        chip_reason_str = (
+            chip_reason.astype("string")
+            if isinstance(chip_reason, pd.Series)
+            else pd.Series("", index=out.index, dtype="string")
+        )
+        chip_effective = (
+            (~chip_stale_flag)
+            & chip_age_days.notna()
+            & (chip_age_days <= 45)
+            & ~chip_reason_str.str.startswith("DATA_", na=False)
+            & ~chip_reason_str.str.contains("OUTLIER", case=False, na=False)
+        )
         raw_signal = out.get("raw_signal")
         raw_signal_upper = raw_signal.astype(str).str.upper() if isinstance(raw_signal, pd.Series) else None
 
@@ -1334,31 +1354,27 @@ class MA5MA20StrategyRunner:
             buy_confirm_raw = raw_signal_upper == "BUY_CONFIRM"
             vol_guard = vol_ratio_filled < 1.0
             structure_weak = (out["ma5"] < out["ma20"]) | (out["macd_hist"] <= 0)
-            chip_reason_str = chip_reason.astype("string") if isinstance(chip_reason, pd.Series) else pd.Series("", index=out.index, dtype="string")
-            disperse_risk = chip_reason_str.eq("CHIP_DISPERSE_STRONG")
-            outlier_risk = chip_reason_str.str.contains("OUTLIER", case=False, na=False)
-            degrade_wait = buy_confirm_raw & entry_mask & (
-                outlier_risk | (disperse_risk & (structure_weak | vol_guard))
+            degrade_wait = (
+                buy_confirm_raw
+                & entry_mask
+                & chip_effective
+                & (chip_score <= -0.5)
+                & (structure_weak | vol_guard)
             )
             # 筹码/数据异常：避免把 BUY_CONFIRM “硬拦”成 WAIT（会直接从信号池消失）
             # 改为降级为 BUY + 小仓位，让信号还能进入候选池，但仓位明显受控
             final_action = final_action.mask(degrade_wait, "BUY")
             wait_reason = chip_reason.fillna("CHIP_WEAK") if isinstance(chip_reason, pd.Series) else "CHIP_WEAK"
             final_reason = final_reason.mask(degrade_wait, wait_reason)
-            final_cap = final_cap.mask(degrade_wait, 0.1)
+            final_cap = final_cap.mask(degrade_wait, 0.2)
 
             weak_confirm = buy_confirm_raw & entry_mask & ~degrade_wait
-            confirm_cap = np.where(chip_score >= 0.2, 0.2, 0.1)
+            confirm_cap = 0.2
             final_cap = final_cap.mask(weak_confirm, np.minimum(final_cap, confirm_cap))
 
-        chip_score_filled = chip_score.fillna(0) if isinstance(chip_score, pd.Series) else 0.0
         hold_like = entry_mask & ~final_action.isin(["WAIT"])
-        cap_tier = np.select(
-            [chip_score_filled >= 0.5, chip_score_filled >= 0, chip_score_filled < 0],
-            [0.3, 0.2, 0.1],
-            default=final_cap,
-        )
-        final_cap = final_cap.mask(hold_like, np.minimum(final_cap, cap_tier))
+        weak_chip = chip_effective & (chip_score <= -0.5)
+        final_cap = final_cap.mask(hold_like & weak_chip, np.minimum(final_cap, 0.2))
 
         chip_missing = (
             chip_reason.astype("string").str.startswith("DATA_MISSING").fillna(False)
@@ -1372,7 +1388,9 @@ class MA5MA20StrategyRunner:
         final_reason = final_reason.mask(chip_missing & final_reason.isna(), missing_reason_fill)
 
         entry_mask = ~final_action.isin(["SELL", "REDUCE"])
-        final_cap = final_cap.mask(entry_mask, np.maximum(0.0, final_cap - chip_penalty))
+        final_cap = final_cap.mask(
+            entry_mask & chip_effective, np.maximum(0.0, final_cap - chip_penalty)
+        )
         vol_ratio = pd.to_numeric(out.get("vol_ratio"), errors="coerce")
         low_vol_entry = vol_ratio_filled < 1.5
         final_cap = final_cap.mask(entry_mask & low_vol_entry & (final_cap > 0), 0.3)
