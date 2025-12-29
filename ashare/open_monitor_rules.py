@@ -305,12 +305,16 @@ class DecisionContext:
         status_reason = self.action_reason
         summary_line = f"{state} {self.action} | {self.action_reason}"
 
+        entry_exposure_cap = self.entry_exposure_cap
+        if self.action != "EXECUTE":
+            entry_exposure_cap = 0.0
+
         return DecisionResult(
             state=state,
             action=self.action,
             action_reason=self.action_reason,
             status_reason=status_reason,
-            entry_exposure_cap=self.entry_exposure_cap,
+            entry_exposure_cap=entry_exposure_cap,
             env_gate_action=self.env_gate_action,
             rule_hits_json=rule_hits_json,
             summary_line=summary_line,

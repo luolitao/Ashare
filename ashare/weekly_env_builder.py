@@ -684,26 +684,28 @@ class WeeklyEnvironmentBuilder:
         if not gating_enabled:
             return "ALLOW"
 
+        baseline_gate = "ALLOW"
         if weekly_phase == "BREAKDOWN_RISK":
-            return "WAIT"
+            baseline_gate = "WAIT"
+        elif risk_level == "HIGH":
+            baseline_gate = "WAIT"
+        elif risk_level == "MEDIUM" and structure_status == "FORMING":
+            # feat: MEDIUM 风险周线不一票 WAIT，改为 ALLOW_SMALL 以降仓放行
+            baseline_gate = "ALLOW_SMALL"
+
+        def _tighten(current: str, target: str) -> str:
+            severity = {"ALLOW": 0, "ALLOW_SMALL": 1, "WAIT": 2, "STOP": 3}
+            if severity.get(target, 0) > severity.get(current, 0):
+                return target
+            return current
 
         if weekly_phase == "BEAR_TREND" and risk_level in {"MEDIUM", "HIGH"}:
-            return "ALLOW_SMALL"
+            baseline_gate = _tighten(baseline_gate, "ALLOW_SMALL")
 
         if "VOL_WEAK" in weekly_tags and risk_level != "LOW":
-            return "ALLOW_SMALL"
+            baseline_gate = _tighten(baseline_gate, "ALLOW_SMALL")
 
-        if risk_level == "HIGH":
-            return "WAIT"
-
-        if risk_level == "MEDIUM" and structure_status == "FORMING":
-            # feat: MEDIUM 风险周线不一票 WAIT，改为 ALLOW_SMALL 以降仓放行
-            return "ALLOW_SMALL"
-
-        if risk_level in {"LOW", "MEDIUM"}:
-            return "ALLOW"
-
-        return None
+        return baseline_gate
 
     @staticmethod
     def _merge_gate_actions(*actions: str | None) -> str | None:
@@ -888,6 +890,14 @@ class WeeklyEnvironmentBuilder:
         base_cap = min(filtered_caps) if filtered_caps else 1.0
         final_cap = base_cap * daily_cap_multiplier * breadth_factor * live_cap_multiplier
         final_cap = min(max(final_cap, 0.0), 1.0)
+        small_cap_limit = 0.25
+        if final_gate in {"STOP", "WAIT"}:
+            final_cap = 0.0
+            reason_parts["gate_cap_limit"] = f"{final_gate}_0"
+        elif final_gate == "ALLOW_SMALL":
+            if final_cap > small_cap_limit:
+                final_cap = small_cap_limit
+                reason_parts["gate_cap_limit"] = f"ALLOW_SMALL_{small_cap_limit:.2f}"
         env_context["env_final_gate_action"] = final_gate
         env_context["env_final_cap_pct"] = final_cap
         env_context["env_final_reason_json"] = self._clip(
