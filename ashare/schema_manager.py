@@ -48,7 +48,7 @@ class TableNames:
     signal_events_table: str
     ready_signals_view: str
     open_monitor_eval_table: str
-    env_snapshot_table: str
+    open_monitor_env_table: str
     open_monitor_run_table: str
     open_monitor_env_view: str
     open_monitor_view: str
@@ -106,10 +106,10 @@ class SchemaManager:
         self._ensure_open_monitor_quote_table(tables.open_monitor_quote_table)
         self._ensure_weekly_indicator_table(tables.weekly_indicator_table)
         self._ensure_daily_market_env_table(tables.daily_indicator_table)
-        self._ensure_env_snapshot_table(tables.env_snapshot_table)
+        self._ensure_open_monitor_env_table(tables.open_monitor_env_table)
         self._ensure_open_monitor_env_view(
             tables.open_monitor_env_view,
-            tables.env_snapshot_table,
+            tables.open_monitor_env_table,
             tables.weekly_indicator_table,
             tables.daily_indicator_table,
             tables.open_monitor_run_table,
@@ -158,14 +158,14 @@ class SchemaManager:
                 str(open_monitor_cfg.get("run_table", TABLE_STRATEGY_OPEN_MONITOR_RUN)).strip()
                 or TABLE_STRATEGY_OPEN_MONITOR_RUN
         )
-        env_snapshot_table = (
-                str(
-                    open_monitor_cfg.get(
-                        "env_snapshot_table",
-                        TABLE_STRATEGY_OPEN_MONITOR_ENV,
-                    )
-                ).strip()
-                or TABLE_STRATEGY_OPEN_MONITOR_ENV
+        open_monitor_env_table = (
+            str(
+                open_monitor_cfg.get(
+                    "open_monitor_env_table",
+                    TABLE_STRATEGY_OPEN_MONITOR_ENV,
+                )
+            ).strip()
+            or TABLE_STRATEGY_OPEN_MONITOR_ENV
         )
         open_monitor_env_view = (
                 str(
@@ -229,7 +229,7 @@ class SchemaManager:
             signal_events_table=signal_events_table,
             ready_signals_view=ready_signals_view,
             open_monitor_eval_table=open_monitor_eval_table,
-            env_snapshot_table=env_snapshot_table,
+            open_monitor_env_table=open_monitor_env_table,
             open_monitor_run_table=open_monitor_run_table,
             open_monitor_env_view=open_monitor_env_view,
             open_monitor_view=open_monitor_view,
@@ -1382,7 +1382,7 @@ class SchemaManager:
             self.logger.info("表 %s 已新增索引 %s。", table, code_time_index)
 
     # ---------- Environment snapshots ----------
-    def _ensure_env_snapshot_table(self, table: str) -> None:
+    def _ensure_open_monitor_env_table(self, table: str) -> None:
         columns = {
             "run_pk": "BIGINT NOT NULL",
             "monitor_date": "DATE NOT NULL",

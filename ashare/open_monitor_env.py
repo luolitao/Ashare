@@ -49,17 +49,17 @@ class OpenMonitorEnvService:
         self.env_builder = env_builder
         self.indicator_builder = indicator_builder
 
-    def load_env_snapshot_context(
+    def load_open_monitor_env_context(
         self,
         monitor_date: str,
         run_pk: int | None = None,
     ) -> dict[str, Any] | None:
-        return self._load_env_snapshot_context(monitor_date, run_pk)
+        return self._load_open_monitor_env_context(monitor_date, run_pk)
 
-    def _load_env_snapshot_context(
+    def _load_open_monitor_env_context(
         self, monitor_date: str, run_pk: int | None = None
     ) -> dict[str, Any] | None:
-        df = self.repo.load_env_snapshot_row(monitor_date, run_pk)
+        df = self.repo.load_open_monitor_env_row(monitor_date, run_pk)
         if df is None or df.empty:
             return None
 
@@ -340,7 +340,7 @@ class OpenMonitorEnvService:
         )
         return env_context
 
-    def build_and_persist_env_snapshot(
+    def build_and_persist_open_monitor_env(
         self,
         latest_trade_date: str,
         *,
@@ -390,7 +390,7 @@ class OpenMonitorEnvService:
             self.logger.error("环境快照缺少 run_pk，已跳过写入。")
             return env_context
 
-        self.repo.persist_env_snapshot(env_context, monitor_date, run_pk)
+        self.repo.persist_open_monitor_env(env_context, monitor_date, run_pk)
 
         return env_context
 

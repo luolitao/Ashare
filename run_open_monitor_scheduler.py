@@ -9,7 +9,6 @@ import time
 from ashare.config import get_section
 from ashare.open_monitor import MA5MA20OpenMonitorRunner
 from ashare.env_snapshot_utils import load_trading_calendar
-from ashare.open_monitor_consts import ENV_RUN_PREOPEN
 from ashare.schema_manager import ensure_schema
 
 
@@ -104,19 +103,6 @@ def main(*, interval_minutes: int | None = None, once: bool = False) -> None:
     if interval_min <= 0:
         raise ValueError("interval must be positive")
 
-    def _ensure_env_snapshot(trigger_at: dt.datetime) -> tuple[str, str]:
-        monitor_date = runner.repo.resolve_monitor_trade_date(trigger_at)
-        biz_ts = dt.datetime.combine(dt.date.fromisoformat(monitor_date), trigger_at.time())
-        run_id = runner._calc_run_id(biz_ts)  # noqa: SLF001
-        env_run_pk = runner.repo.get_env_broadcast_run_pk(monitor_date, ENV_RUN_PREOPEN)
-        if env_run_pk is None or not runner.repo.env_snapshot_exists(monitor_date, env_run_pk):
-            logger.warning(
-                "环境广播不存在（monitor_date=%s, env_run_id=%s），open_monitor 将直接失败。",
-                monitor_date,
-                ENV_RUN_PREOPEN,
-            )
-        return monitor_date, run_id
-
     logger.info("开盘监测调度器启动：interval=%s 分钟（整点对齐）", interval_min)
 
     try:
@@ -143,13 +129,9 @@ def main(*, interval_minutes: int | None = None, once: bool = False) -> None:
                 time.sleep(sleep_s)
 
             trigger_at = run_at
-            monitor_date, run_id = _ensure_env_snapshot(trigger_at)
-
             logger.info(
-                "触发开盘监测：%s（monitor_date=%s, run_id=%s）",
+                "触发开盘监测：%s",
                 trigger_at.strftime("%Y-%m-%d %H:%M:%S"),
-                monitor_date,
-                run_id,
             )
             try:
                 runner.run(force=True, checked_at=trigger_at)
