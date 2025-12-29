@@ -30,7 +30,7 @@ VIEW_STRATEGY_PNL = "v_pnl"
 
 # 开盘监测输出
 TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_open_monitor_eval"
-TABLE_STRATEGY_OPEN_MOTOR_ENV = "strategy_open_motor_env"
+TABLE_STRATEGY_OPEN_MONITOR_ENV = "strategy_open_monitor_env"
 TABLE_STRATEGY_WEEKLY_MARKET_ENV = "strategy_weekly_market_env"
 WEEKLY_MARKET_BENCHMARK_CODE = "sh.000001"
 TABLE_STRATEGY_DAILY_MARKET_ENV = "strategy_daily_market_env"
@@ -161,10 +161,10 @@ class SchemaManager:
                 str(
                     open_monitor_cfg.get(
                         "env_snapshot_table",
-                        TABLE_STRATEGY_OPEN_MOTOR_ENV,
+                        TABLE_STRATEGY_OPEN_MONITOR_ENV,
                     )
                 ).strip()
-                or TABLE_STRATEGY_OPEN_MOTOR_ENV
+                or TABLE_STRATEGY_OPEN_MONITOR_ENV
         )
         open_monitor_env_view = (
                 str(
