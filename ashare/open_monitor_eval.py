@@ -439,6 +439,21 @@ class OpenMonitorEvaluator:
             ma20_thresh = pullback_min_vs_ma20 if is_pullback else min_vs_ma20
 
             chip_score = _to_float(row.get("sig_chip_score"))
+            chip_reason = row.get("sig_chip_reason")
+            chip_age_days = _to_float(row.get("sig_chip_age_days"))
+            chip_stale_raw = row.get("sig_chip_stale")
+            chip_stale_hit = None
+            if chip_stale_raw is not None and not pd.isna(chip_stale_raw):
+                if isinstance(chip_stale_raw, bool):
+                    chip_stale_hit = chip_stale_raw
+                elif isinstance(chip_stale_raw, (int, float)):
+                    chip_stale_hit = bool(int(chip_stale_raw))
+                else:
+                    flag = str(chip_stale_raw).strip().lower()
+                    if flag in {"1", "true", "yes", "y", "on"}:
+                        chip_stale_hit = True
+                    elif flag in {"0", "false", "no", "n", "off"}:
+                        chip_stale_hit = False
 
             breach = False
             breach_reason = None
@@ -462,10 +477,17 @@ class OpenMonitorEvaluator:
                 except Exception:
                     signal_age = None
 
+            chip_reason_val = None
+            if chip_reason is not None and not pd.isna(chip_reason):
+                chip_reason_val = str(chip_reason).strip() or None
+
             ctx = DecisionContext(
                 entry_exposure_cap=env.position_cap_pct,
                 env=env,
                 chip_score=chip_score,
+                chip_reason=chip_reason_val,
+                chip_age_days=chip_age_days,
+                chip_stale_hit=chip_stale_hit,
                 price_now=price_now,
                 live_gap=live_gap,
                 live_pct=live_pct,
@@ -949,7 +971,7 @@ class OpenMonitorEvaluator:
 
         quality_col = None
         quality_series = None
-        for cand in ["signal_strength", "sig_chip_score", "sig_vol_ratio"]:
+        for cand in ["signal_strength", "sig_vol_ratio", "sig_chip_score"]:
             if cand in ranked.columns:
                 s = pd.to_numeric(ranked[cand], errors="coerce")
                 if s.notna().sum() >= 3:
@@ -963,7 +985,11 @@ class OpenMonitorEvaluator:
         else:
             pct = quality_series.rank(pct=True)
             median = float(pct.dropna().median()) if pct.notna().any() else 0.5
-            ranked["stock_quality_weight"] = pct.fillna(median)
+            pct_filled = pct.fillna(median)
+            if quality_col == "sig_chip_score":
+                ranked["stock_quality_weight"] = 0.5 + (pct_filled - 0.5) * 0.2
+            else:
+                ranked["stock_quality_weight"] = pct_filled
             meta["stock_quality_source"] = quality_col
 
         ranked["final_rank_score"] = (

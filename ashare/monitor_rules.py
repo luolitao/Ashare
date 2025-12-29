@@ -49,18 +49,16 @@ class MonitorRuleConfig:
     enable_signal_expired: bool = True
 
     # --- thresholds ---
-    chip_score_wait_threshold: float = 0.0
+    chip_score_wait_threshold: float = -0.5
 
-    chip_score_allow_small_gate_action: str = "ALLOW_SMALL"
-    chip_score_allow_small_cap: float = 0.1
+    chip_score_allow_small_cap: float = 0.2
 
     # --- actions & reasons ---
     env_stop_action: str = "SKIP"
     env_stop_reason: str = "环境阻断"
     env_wait_action: str = "WAIT"
     env_wait_reason: str = "环境等待"
-    chip_score_action: str = "WAIT"
-    chip_score_reason: str = "筹码评分<0"
+    chip_score_reason: str = "筹码评分<=-0.5"
     quote_missing_action: str = "SKIP"
     quote_missing_reason: str = "行情数据不可用"
     gap_up_action: str = "SKIP"
@@ -201,13 +199,6 @@ class MonitorRuleConfig:
             chip_score_wait_threshold=_get_float(
                 "chip_score_wait_threshold", defaults.chip_score_wait_threshold
             ),
-            chip_score_allow_small_gate_action=str(
-                cfg.get(
-                    "chip_score_allow_small_gate_action",
-                    defaults.chip_score_allow_small_gate_action,
-                )
-            ).strip()
-            or defaults.chip_score_allow_small_gate_action,
             chip_score_allow_small_cap=_get_float(
                 "chip_score_allow_small_cap", defaults.chip_score_allow_small_cap
             ),
@@ -219,8 +210,6 @@ class MonitorRuleConfig:
             or defaults.env_wait_action,
             env_wait_reason=str(cfg.get("env_wait_reason", defaults.env_wait_reason)).strip()
             or defaults.env_wait_reason,
-            chip_score_action=str(cfg.get("chip_score_action", defaults.chip_score_action)).strip()
-            or defaults.chip_score_action,
             chip_score_reason=str(cfg.get("chip_score_reason", defaults.chip_score_reason)).strip()
             or defaults.chip_score_reason,
             quote_missing_action=str(
@@ -293,23 +282,23 @@ def build_default_monitor_rules(
     - predicate 依赖 DecisionContext 上的字段（由 open_monitor 在 per-row 构造 ctx 时填充）。
     """
 
-    def _get_weekly_gate_action(ctx: Any) -> str | None:
-        env = getattr(ctx, "env", None)
-        if env is None:
-            return None
-        raw = getattr(env, "raw", None)
-        if not isinstance(raw, dict):
-            return None
-        val = (
-            raw.get("env_weekly_gate_action")
-            or raw.get("weekly_gate_action")
-            or raw.get("env_weekly_gate_policy")
-            or raw.get("weekly_gate_policy")
-        )
-        if val is None:
-            return None
-        norm = str(val).strip().upper()
-        return norm or None
+    def _chip_effective(ctx: Any) -> bool:
+        chip_score = getattr(ctx, "chip_score", None)
+        if chip_score is None:
+            return False
+        chip_age = getattr(ctx, "chip_age_days", None)
+        if chip_age is None:
+            return False
+        if chip_age > 45:
+            return False
+        if getattr(ctx, "chip_stale_hit", None):
+            return False
+        chip_reason = str(getattr(ctx, "chip_reason", "") or "").strip()
+        if chip_reason.startswith("DATA_"):
+            return False
+        if "OUTLIER" in chip_reason.upper():
+            return False
+        return True
 
     return [
         Rule(
@@ -363,18 +352,13 @@ def build_default_monitor_rules(
             predicate=lambda ctx: bool(
                 config.enable_chip_score
                 and getattr(ctx, "chip_score", None) is not None
+                and _chip_effective(ctx)
                 and getattr(ctx, "chip_score") < config.chip_score_wait_threshold
             ),
             effect=lambda ctx: (
                 RuleResult(
-                    reason=f"{config.chip_score_reason}({config.chip_score_allow_small_gate_action})",
-                    action_override="EXECUTE",
-                    cap_override=config.chip_score_allow_small_cap,
-                )
-                if _get_weekly_gate_action(ctx) == config.chip_score_allow_small_gate_action
-                else RuleResult(
                     reason=config.chip_score_reason,
-                    action_override=config.chip_score_action,
+                    cap_override=config.chip_score_allow_small_cap,
                 )
             ),
         ),

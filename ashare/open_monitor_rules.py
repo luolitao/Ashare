@@ -174,6 +174,9 @@ class DecisionContext:
     # --- inputs for RuleEngine predicates (optional) ---
     env: MarketEnvironment | None = None
     chip_score: float | None = None
+    chip_reason: str | None = None
+    chip_age_days: float | None = None
+    chip_stale_hit: bool | None = None
     price_now: float | None = None
     live_gap: float | None = None
     live_pct: float | None = None
