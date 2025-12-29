@@ -505,11 +505,11 @@ class OpenMonitorEnvService:
         events: list[str] = []
 
         if live_pct is not None:
-            if live_pct <= -0.03:
+            if live_pct <= -3.0:
                 actions.append("PAUSE")
                 cap_candidates.append(0.0)
                 events.append("INTRADAY_CRASH")
-            elif live_pct <= -0.02:
+            elif live_pct <= -2.0:
                 actions.append("REDUCE")
                 cap_candidates.append(0.25)
                 events.append("INTRADAY_DROP")

@@ -552,8 +552,14 @@ class OpenMonitorEvaluator:
                 hits.append({"rule": reason, "severity": 100, "reason": reason})
                 rule_hits_json = json.dumps(hits, ensure_ascii=False)
 
+            row2 = row.copy()
+            row2["dev_ma5_atr"] = dev_ma5_atr
+            row2["dev_ma20_atr"] = dev_ma20_atr
+            row2["runup_from_sigclose_atr"] = runup_metrics.runup_from_sigclose_atr
+            row2["live_intraday_vol_ratio"] = live_intraday
+
             strength, strength_note = self._calc_signal_strength(
-                row,
+                row2,
                 rule_hits_json=rule_hits_json,
                 state=state,
                 status_reason=status_reason,
