@@ -23,7 +23,7 @@ TABLE_STRATEGY_INDICATOR_DAILY = "strategy_indicator_daily"
 TABLE_STRATEGY_SIGNAL_EVENTS = "strategy_signal_events"
 TABLE_STRATEGY_CANDIDATES = "strategy_candidates"
 # 策略准备就绪信号（含筹码）
-VIEW_STRATEGY_READY_SIGNALS = "v_strategy_ready_signals"
+TABLE_STRATEGY_READY_SIGNALS = "strategy_ready_signals"
 TABLE_STRATEGY_CHIP_FILTER = "strategy_chip_filter"
 TABLE_STRATEGY_TRADE_METRICS = "strategy_trade_metrics"
 VIEW_STRATEGY_BACKTEST = "v_backtest"
@@ -197,8 +197,8 @@ class SchemaManager:
                 or TABLE_STRATEGY_SIGNAL_EVENTS
         )
         ready_signals_view = (
-                str(open_monitor_cfg.get("ready_signals_view", VIEW_STRATEGY_READY_SIGNALS)).strip()
-                or VIEW_STRATEGY_READY_SIGNALS
+                str(open_monitor_cfg.get("ready_signals_view", TABLE_STRATEGY_READY_SIGNALS)).strip()
+                or TABLE_STRATEGY_READY_SIGNALS
         )
         open_monitor_eval_table = (
                 str(open_monitor_cfg.get("output_table", TABLE_STRATEGY_OPEN_MONITOR_EVAL)).strip()
@@ -1651,6 +1651,27 @@ class SchemaManager:
             "live_trade_date": "DATE NULL",
             "signal_age": "INT NULL",
             "code": "VARCHAR(20) NOT NULL",
+            "avg_volume_20": "DOUBLE NULL",
+            "sig_close": "DOUBLE NULL",
+            "sig_ma5": "DOUBLE NULL",
+            "sig_ma20": "DOUBLE NULL",
+            "sig_ma60": "DOUBLE NULL",
+            "sig_ma250": "DOUBLE NULL",
+            "sig_vol_ratio": "DOUBLE NULL",
+            "sig_macd_hist": "DOUBLE NULL",
+            "sig_kdj_k": "DOUBLE NULL",
+            "sig_kdj_d": "DOUBLE NULL",
+            "sig_atr14": "DOUBLE NULL",
+            "sig_stop_ref": "DOUBLE NULL",
+            "asof_close": "DOUBLE NULL",
+            "asof_ma5": "DOUBLE NULL",
+            "asof_ma20": "DOUBLE NULL",
+            "asof_ma60": "DOUBLE NULL",
+            "asof_ma250": "DOUBLE NULL",
+            "asof_vol_ratio": "DOUBLE NULL",
+            "asof_macd_hist": "DOUBLE NULL",
+            "asof_atr14": "DOUBLE NULL",
+            "asof_stop_ref": "DOUBLE NULL",
             "live_gap_pct": "DOUBLE NULL",
             "live_pct_change": "DOUBLE NULL",
             "live_intraday_vol_ratio": "DOUBLE NULL",
@@ -1718,6 +1739,30 @@ class SchemaManager:
         self._ensure_date_column(table, "live_trade_date", not_null=False)
         self._ensure_numeric_column(table, "run_pk", "BIGINT NOT NULL")
 
+        for col in [
+            "avg_volume_20",
+            "sig_close",
+            "sig_ma5",
+            "sig_ma20",
+            "sig_ma60",
+            "sig_ma250",
+            "sig_vol_ratio",
+            "sig_macd_hist",
+            "sig_kdj_k",
+            "sig_kdj_d",
+            "sig_atr14",
+            "sig_stop_ref",
+            "asof_close",
+            "asof_ma5",
+            "asof_ma20",
+            "asof_ma60",
+            "asof_ma250",
+            "asof_vol_ratio",
+            "asof_macd_hist",
+            "asof_atr14",
+            "asof_stop_ref",
+        ]:
+            self._ensure_numeric_column(table, col, "DOUBLE NULL")
         self._ensure_numeric_column(table, "live_intraday_vol_ratio", "DOUBLE NULL")
         self._ensure_numeric_column(table, "signal_strength", "DOUBLE NULL")
         self._ensure_numeric_column(table, "strength_delta", "DOUBLE NULL")
@@ -2201,9 +2246,30 @@ class SchemaManager:
               e.`asof_trade_date`,
               e.`live_trade_date`,
               e.`signal_age`,
+              e.`avg_volume_20`,
               {live_gap_expr} AS `live_gap_pct`,
               {live_pct_expr} AS `live_pct_change`,
               {live_intraday_expr} AS `live_intraday_vol_ratio`,
+              e.`sig_close`,
+              e.`sig_ma5`,
+              e.`sig_ma20`,
+              e.`sig_ma60`,
+              e.`sig_ma250`,
+              e.`sig_vol_ratio`,
+              e.`sig_macd_hist`,
+              e.`sig_kdj_k`,
+              e.`sig_kdj_d`,
+              e.`sig_atr14`,
+              e.`sig_stop_ref`,
+              e.`asof_close`,
+              e.`asof_ma5`,
+              e.`asof_ma20`,
+              e.`asof_ma60`,
+              e.`asof_ma250`,
+              e.`asof_vol_ratio`,
+              e.`asof_macd_hist`,
+              e.`asof_atr14`,
+              e.`asof_stop_ref`,
               e.`dev_ma5`,
               e.`dev_ma20`,
               e.`dev_ma5_atr`,

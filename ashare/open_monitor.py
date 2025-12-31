@@ -51,7 +51,7 @@ from .schema_manager import (
     VIEW_STRATEGY_OPEN_MONITOR,
     VIEW_STRATEGY_OPEN_MONITOR_ENV,
     VIEW_STRATEGY_OPEN_MONITOR_WIDE,
-    VIEW_STRATEGY_READY_SIGNALS,
+    TABLE_STRATEGY_READY_SIGNALS,
 )
 from .utils.convert import to_float as _to_float
 from .utils.logger import setup_logger
@@ -68,7 +68,7 @@ class OpenMonitorParams:
     monitor_date: str | None = None
 
     # 信号输入：只接受 ready_signals_view（由 SchemaManager 负责生成/维护）
-    ready_signals_view: str = VIEW_STRATEGY_READY_SIGNALS
+    ready_signals_view: str = TABLE_STRATEGY_READY_SIGNALS
     # 契约与 fail-fast（默认开启）
     strict_ready_signals_required: bool = True
     strict_quotes: bool = True
@@ -383,6 +383,38 @@ class MA5MA20OpenMonitorRunner:
         run_id = self._calc_run_id(biz_ts)
 
         latest_trade_date, signal_dates, signals = self.repo.load_recent_buy_signals()
+        if latest_trade_date and (signals is not None) and (not signals.empty):
+            codes = signals["code"].dropna().astype(str).unique().tolist()
+            asof_df = self.repo.load_latest_indicators(latest_trade_date, codes)
+            if asof_df is not None and not asof_df.empty:
+                asof_df = asof_df.copy()
+                asof_df["code"] = asof_df["code"].astype(str)
+                asof_df = asof_df.rename(
+                    columns={
+                        "trade_date": "asof_trade_date",
+                        "close": "asof_close",
+                        "ma5": "asof_ma5",
+                        "ma20": "asof_ma20",
+                        "ma60": "asof_ma60",
+                        "ma250": "asof_ma250",
+                        "vol_ratio": "asof_vol_ratio",
+                        "macd_hist": "asof_macd_hist",
+                        "atr14": "asof_atr14",
+                        "avg_volume_20": "asof_avg_volume_20",
+                    }
+                )
+                signals = signals.merge(asof_df, on="code", how="left")
+                if "avg_volume_20" in signals.columns and "asof_avg_volume_20" in signals.columns:
+                    signals["avg_volume_20"] = signals["avg_volume_20"].fillna(
+                        signals["asof_avg_volume_20"]
+                    )
+                    signals = signals.drop(columns=["asof_avg_volume_20"])
+            if "asof_trade_date" not in signals.columns:
+                signals["asof_trade_date"] = latest_trade_date
+            else:
+                signals["asof_trade_date"] = signals["asof_trade_date"].fillna(
+                    latest_trade_date
+                )
 
         run_id_norm = str(run_id or "").strip()
         run_stage = run_id_norm.split(" ", 1)[0] if " " in run_id_norm else ""

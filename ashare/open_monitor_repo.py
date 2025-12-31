@@ -120,6 +120,37 @@ class OpenMonitorRepository:
     def ready_signals_used(self) -> bool:
         return self._ready_signals_used
 
+    def _resolve_ready_signals_view(self) -> str | None:
+        view = str(self.params.ready_signals_view or "").strip()
+        if not view:
+            return None
+
+        view_exists = self._table_exists(view)
+        if view.startswith("v_"):
+            candidate = view[2:]
+            if candidate and self._table_exists(candidate):
+                candidate_cols = set(self._get_table_columns(candidate))
+                required_cols = set(READY_SIGNALS_REQUIRED_COLS)
+                if required_cols.issubset(candidate_cols):
+                    if not view_exists:
+                        self.logger.warning(
+                            "ready_signals_view=%s missing, falling back to table %s.",
+                            view,
+                            candidate,
+                        )
+                    else:
+                        self.logger.info(
+                            "ready_signals_view=%s resolved to materialized table %s.",
+                            view,
+                            candidate,
+                        )
+                    return candidate
+
+        if not view_exists:
+            return None
+
+        return view
+
     def _table_exists(self, table: str) -> bool:
         try:
             with self.engine.begin() as conn:
@@ -175,6 +206,23 @@ class OpenMonitorRepository:
             if name:
                 return name
         return "history_daily_kline"
+
+    def _indicator_table(self) -> str:
+        open_cfg = get_section("open_monitor") or {}
+        if isinstance(open_cfg, dict):
+            name = str(open_cfg.get("indicator_table") or "").strip()
+            if name:
+                return name
+
+        strat = get_section("strategy_ma5_ma20_trend") or {}
+        if isinstance(strat, dict):
+            name = str(
+                strat.get("indicator_table") or strat.get("signals_indicator_table") or ""
+            ).strip()
+            if name:
+                return name
+
+        return "strategy_indicator_daily"
 
     def _is_trading_day(self, date_str: str, latest_trade_date: str | None = None) -> bool:
         """粗略判断是否为交易日（优先用日线表，其次用工作日）。"""
@@ -290,7 +338,7 @@ class OpenMonitorRepository:
             except Exception as exc:  # noqa: BLE001
                 self.logger.debug("推导 latest_trade_date 失败（daily_table）：%s", exc)
 
-        view = ready_view or str(self.params.ready_signals_view or "").strip()
+        view = ready_view or self._resolve_ready_signals_view()
         if view and self._table_exists(view):
             try:
                 with self.engine.begin() as conn:
@@ -332,7 +380,7 @@ class OpenMonitorRepository:
                 if calendar_dates:
                     return max(calendar_dates).isoformat()
 
-            view = str(getattr(self.params, "ready_signals_view", "") or "").strip() or None
+            view = self._resolve_ready_signals_view()
             latest_trade_date = self._resolve_latest_trade_date(ready_view=view)
             if latest_trade_date and self._is_trading_day(candidate_date.isoformat(), latest_trade_date):
                 return candidate_date.isoformat()
@@ -396,7 +444,7 @@ class OpenMonitorRepository:
     def load_recent_buy_signals(self) -> Tuple[str | None, List[str], pd.DataFrame]:
         """从 ready_signals_view 读取最近 BUY 信号（严格模式，无旧逻辑回退）。"""
 
-        view = str(self.params.ready_signals_view or "").strip()
+        view = self._resolve_ready_signals_view()
         strict_ready = bool(getattr(self.params, "strict_ready_signals_required", True))
         if not view:
             msg = "未配置 ready_signals_view"
@@ -684,6 +732,38 @@ class OpenMonitorRepository:
             merged = merged.merge(stop_df, on=["trade_date", "code"], how="left")
         merged["trade_date"] = pd.to_datetime(merged["trade_date"]).dt.strftime("%Y-%m-%d")
         return merged
+
+    def load_latest_indicators(self, latest_trade_date: str, codes: List[str]) -> pd.DataFrame:
+        if not latest_trade_date or not codes:
+            return pd.DataFrame()
+
+        table = self._indicator_table()
+        if not table or not self._table_exists(table):
+            return pd.DataFrame()
+
+        codes = [str(c) for c in codes if str(c).strip()]
+        if not codes:
+            return pd.DataFrame()
+
+        stmt = (
+            text(
+                f"""
+                SELECT `trade_date`, `code`,
+                       `close`, `avg_volume_20`,
+                       `ma5`, `ma20`, `ma60`, `ma250`,
+                       `vol_ratio`, `macd_hist`, `kdj_k`, `kdj_d`, `atr14`
+                FROM `{table}`
+                WHERE `trade_date` = :d AND `code` IN :codes
+                """
+            )
+            .bindparams(bindparam("codes", expanding=True))
+        )
+        try:
+            with self.engine.begin() as conn:
+                return pd.read_sql_query(stmt, conn, params={"d": latest_trade_date, "codes": codes})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取指标表 %s 失败：%s", table, exc)
+            return pd.DataFrame()
 
     def load_index_history(self, latest_trade_date: str) -> dict[str, Any]:
         code = str(self.params.index_code or "").strip()
