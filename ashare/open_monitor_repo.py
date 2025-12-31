@@ -964,13 +964,35 @@ class OpenMonitorRepository:
         where_clauses = ["`monitor_date` = :d"]
         params: dict[str, Any] = {"d": monitor_date}
 
-        if stage_norm in {"PREOPEN", "BREAK", "POSTCLOSE"}:
-            where_clauses.append("`run_id` LIKE :p")
-            params["p"] = f"{stage_norm} %"
-        elif stage_norm == "INTRADAY":
-            where_clauses.append("`run_id` NOT LIKE 'PREOPEN %'")
-            where_clauses.append("`run_id` NOT LIKE 'BREAK %'")
-            where_clauses.append("`run_id` NOT LIKE 'POSTCLOSE %'")
+        has_run_stage = self._column_exists(table, "run_stage")
+        if stage_norm in {"PREOPEN", "BREAK", "POSTCLOSE", "INTRADAY"}:
+            if has_run_stage:
+                params["stage"] = stage_norm
+                fallback_parts = []
+                if stage_norm in {"PREOPEN", "BREAK", "POSTCLOSE"}:
+                    fallback_parts.append("`run_id` LIKE :p")
+                    params["p"] = f"{stage_norm} %"
+                elif stage_norm == "INTRADAY":
+                    fallback_parts.append("`run_id` NOT LIKE 'PREOPEN %'")
+                    fallback_parts.append("`run_id` NOT LIKE 'BREAK %'")
+                    fallback_parts.append("`run_id` NOT LIKE 'POSTCLOSE %'")
+
+                if fallback_parts:
+                    where_clauses.append(
+                        "(`run_stage` = :stage OR (`run_stage` IS NULL AND "
+                        + " AND ".join(fallback_parts)
+                        + "))"
+                    )
+                else:
+                    where_clauses.append("`run_stage` = :stage")
+            else:
+                if stage_norm in {"PREOPEN", "BREAK", "POSTCLOSE"}:
+                    where_clauses.append("`run_id` LIKE :p")
+                    params["p"] = f"{stage_norm} %"
+                elif stage_norm == "INTRADAY":
+                    where_clauses.append("`run_id` NOT LIKE 'PREOPEN %'")
+                    where_clauses.append("`run_id` NOT LIKE 'BREAK %'")
+                    where_clauses.append("`run_id` NOT LIKE 'POSTCLOSE %'")
 
         stmt = text(
             f"""
@@ -1019,6 +1041,7 @@ class OpenMonitorRepository:
         *,
         checked_at: dt.datetime | None,
         triggered_at: dt.datetime | None = None,
+        run_stage: str | None = None,
         params_json: str | dict[str, Any] | None = None,
     ) -> int | None:
         table = getattr(self.params, "run_table", None)
@@ -1033,6 +1056,7 @@ class OpenMonitorRepository:
         payload = {
             "monitor_date": monitor_date_val,
             "run_id": run_id,
+            "run_stage": run_stage,
             "triggered_at": triggered_at,
             "checked_at": checked_at,
             "params_json": params_payload,
@@ -1041,6 +1065,7 @@ class OpenMonitorRepository:
         update_clause = """
             `triggered_at` = COALESCE(`triggered_at`, VALUES(`triggered_at`)),
             `checked_at` = VALUES(`checked_at`),
+            `run_stage` = COALESCE(VALUES(`run_stage`), `run_stage`),
             `params_json` = COALESCE(VALUES(`params_json`), `params_json`)
         """
         stmt = text(

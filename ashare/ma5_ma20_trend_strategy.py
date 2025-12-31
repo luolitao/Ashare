@@ -36,6 +36,7 @@ from .env_snapshot_utils import load_trading_calendar
 from .indicator_utils import consecutive_true
 from .schema_manager import (
     STRATEGY_CODE_MA5_MA20_TREND,
+    SchemaManager,
     TABLE_STRATEGY_CHIP_FILTER,
     TABLE_STRATEGY_INDICATOR_DAILY,
     TABLE_STRATEGY_CANDIDATES,
@@ -382,6 +383,7 @@ class MA5MA20StrategyRunner:
         vol_win = int(self.params.volume_ma_window)
         df["vol_ma"] = g_vol.rolling(vol_win, min_periods=vol_win).mean().reset_index(level=0, drop=True)
         df["vol_ratio"] = df["volume"] / df["vol_ma"]
+        df["avg_volume_20"] = g_vol.rolling(20, min_periods=20).mean().reset_index(level=0, drop=True)
 
         def _add_oscillators(sub: pd.DataFrame) -> pd.DataFrame:
             group_code = getattr(sub, "name", None)
@@ -1345,6 +1347,7 @@ class MA5MA20StrategyRunner:
             "close",
             "volume",
             "amount",
+            "avg_volume_20",
             "ma5",
             "ma10",
             "ma20",
@@ -1677,6 +1680,63 @@ class MA5MA20StrategyRunner:
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("筹码预计算失败（已跳过，不影响信号写入）：%s", exc)
 
+    def _refresh_ready_signals_table(self, sig_dates: List[dt.date]) -> None:
+        if not sig_dates:
+            return
+
+        schema_manager = SchemaManager(self.db_writer.engine)
+        table_names = schema_manager.get_table_names()
+        ready_table = table_names.ready_signals_view
+        if not ready_table or not self._table_exists(ready_table):
+            self.logger.warning("ready_signals 表 %s 不存在，跳过刷新。", ready_table)
+            return
+
+        select_sql, column_order = schema_manager.build_ready_signals_select(
+            self.params.signal_events_table,
+            self.params.indicator_table,
+            TABLE_STRATEGY_CHIP_FILTER,
+        )
+        if not select_sql or not column_order:
+            self.logger.warning("ready_signals 物化 SQL 未生成，跳过刷新。")
+            return
+
+        sig_dates_clean = sorted({d for d in sig_dates if isinstance(d, dt.date)})
+        if not sig_dates_clean:
+            return
+
+        filtered_select = f"""{select_sql}
+              AND e.`strategy_code` = :strategy_code
+              AND e.`sig_date` IN :sig_dates
+            """
+        columns_clause = ", ".join(f"`{col}`" for col in column_order)
+        delete_stmt = (
+            text(
+                f"""
+                DELETE FROM `{ready_table}`
+                WHERE `strategy_code` = :strategy_code AND `sig_date` IN :sig_dates
+                """
+            ).bindparams(bindparam("sig_dates", expanding=True))
+        )
+        insert_stmt = text(
+            f"""
+            INSERT INTO `{ready_table}` ({columns_clause})
+            {filtered_select}
+            """
+        ).bindparams(bindparam("sig_dates", expanding=True))
+
+        payload = {
+            "strategy_code": STRATEGY_CODE_MA5_MA20_TREND,
+            "sig_dates": sig_dates_clean,
+        }
+        with self.db_writer.engine.begin() as conn:
+            conn.execute(delete_stmt, payload)
+            conn.execute(insert_stmt, payload)
+        self.logger.info(
+            "ready_signals 表 %s 已刷新（sig_dates=%s）。",
+            ready_table,
+            ",".join([d.isoformat() for d in sig_dates_clean]),
+        )
+
     def run(self, *, force: bool = False) -> None:
         """执行 MA5-MA20 策略。
 
@@ -1810,6 +1870,8 @@ class MA5MA20StrategyRunner:
             )
 
         self._precompute_chip_filter(sig_for_write)
+        sig_dates = sig_for_write["date"].dropna().dt.date.unique().tolist()
+        self._refresh_ready_signals_table(sig_dates)
 
         latest_sig = sig[sig["date"].dt.date == latest_date]
         dup_count = int(latest_sig.duplicated(subset=["code", "date"]).sum())

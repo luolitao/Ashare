@@ -652,6 +652,30 @@ class AshareApp:
         except Exception:  # noqa: BLE001
             return False
 
+    def _column_exists(self, table_name: str, column: str) -> bool:
+        if not table_name or not column:
+            return False
+        stmt = text(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM information_schema.columns
+            WHERE table_schema = :schema AND table_name = :table AND column_name = :column
+            """
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                row = conn.execute(
+                    stmt,
+                    {
+                        "schema": self.db_writer.config.db_name,
+                        "table": table_name,
+                        "column": column,
+                    },
+                ).mappings().first()
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(row and row.get("cnt"))
+
     def _load_table(self, table_name: str) -> pd.DataFrame:
         """从数据库读取整表；表不存在则返回空 DataFrame。"""
 
@@ -765,6 +789,9 @@ class AshareApp:
         combined = pd.concat(batch, ignore_index=True)
         if {"code", "date"}.issubset(combined.columns):
             combined = combined.drop_duplicates(subset=["code", "date"])
+            combined["trade_date"] = pd.to_datetime(
+                combined["date"], errors="coerce"
+            ).dt.date
 
         codes = (
             combined.get("code", pd.Series(dtype=str))
@@ -789,10 +816,14 @@ class AshareApp:
             elif not self._table_exists(table_name):
                 self.logger.info("表 %s 不存在，跳过旧数据删除。", table_name)
             else:
+                date_column = (
+                    "trade_date" if self._column_exists(table_name, "trade_date") else "date"
+                )
                 delete_stmt = (
                     text(
-                        "DELETE FROM `{table}` WHERE `code` IN :codes AND `date` BETWEEN :start_date AND :end_date".format(
-                            table=table_name
+                        "DELETE FROM `{table}` WHERE `code` IN :codes AND `{date_col}` BETWEEN :start_date AND :end_date".format(
+                            table=table_name,
+                            date_col=date_column,
                         )
                     ).bindparams(bindparam("codes", expanding=True))
                 )
@@ -849,8 +880,14 @@ class AshareApp:
             return
 
         cutoff = (end_day - dt.timedelta(days=self.history_retention_days)).isoformat()
+        date_column = (
+            "trade_date" if self._column_exists(table_name, "trade_date") else "date"
+        )
         purge_stmt = text(
-            "DELETE FROM `{table}` WHERE `date` < :cutoff".format(table=table_name)
+            "DELETE FROM `{table}` WHERE `{date_col}` < :cutoff".format(
+                table=table_name,
+                date_col=date_column,
+            )
         )
         try:
             with self.db_writer.engine.begin() as conn:
@@ -1163,11 +1200,20 @@ class AshareApp:
 
         merged = pd.concat(frames, ignore_index=True)
         merged = merged.drop_duplicates(subset=["date", "code"], keep="last")
+        if "date" in merged.columns:
+            merged["trade_date"] = pd.to_datetime(merged["date"], errors="coerce").dt.date
         with self.db_writer.engine.begin() as conn:
             if self._table_exists("history_index_daily_kline"):
+                date_column = (
+                    "trade_date"
+                    if self._column_exists("history_index_daily_kline", "trade_date")
+                    else "date"
+                )
                 conn.execute(
                     text(
-                        "DELETE FROM history_index_daily_kline WHERE `date` >= :start_date AND `date` <= :end_date"
+                        "DELETE FROM history_index_daily_kline WHERE `{date_col}` >= :start_date AND `{date_col}` <= :end_date".format(
+                            date_col=date_column
+                        )
                     ),
                     {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
                 )

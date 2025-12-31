@@ -461,6 +461,7 @@ class MA5MA20OpenMonitorRunner:
             run_id,
             checked_at=checked_at,
             triggered_at=checked_at,
+            run_stage=run_stage,
             params_json=run_params,
         )
         if run_pk is None:
