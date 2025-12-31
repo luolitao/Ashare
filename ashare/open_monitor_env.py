@@ -387,12 +387,17 @@ class OpenMonitorEnvService:
             monitor_date = checked_at.date().isoformat()
         if run_id is None:
             run_id = calc_run_id(checked_at, self.params.run_id_minutes)
+        run_id_norm = str(run_id or "").strip()
+        run_stage = run_id_norm.split(" ", 1)[0] if " " in run_id_norm else ""
+        if run_stage not in {"PREOPEN", "BREAK", "POSTCLOSE"}:
+            run_stage = "INTRADAY"
         if run_pk is None:
             run_pk = self.repo.ensure_run_context(
                 monitor_date,
                 run_id,
                 checked_at=checked_at,
                 triggered_at=checked_at,
+                run_stage=run_stage,
                 params_json=None,
             )
 

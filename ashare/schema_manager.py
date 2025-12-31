@@ -43,6 +43,51 @@ VIEW_STRATEGY_OPEN_MONITOR_ENV = "v_strategy_open_monitor_env"
 # 开盘监测默认查询视图（精简字段；完整字段请查 v_strategy_open_monitor_wide）
 VIEW_STRATEGY_OPEN_MONITOR = "v_strategy_open_monitor"
 
+READY_SIGNALS_COLUMNS: Dict[str, str] = {
+    "sig_date": "DATE NOT NULL",
+    "code": "VARCHAR(20) NOT NULL",
+    "strategy_code": "VARCHAR(32) NOT NULL",
+    "signal": "VARCHAR(64) NULL",
+    "final_action": "VARCHAR(16) NULL",
+    "final_reason": "VARCHAR(255) NULL",
+    "final_cap": "DOUBLE NULL",
+    "reason": "VARCHAR(255) NULL",
+    "risk_tag": "VARCHAR(255) NULL",
+    "risk_note": "VARCHAR(255) NULL",
+    "extra_json": "TEXT NULL",
+    "valid_days": "INT NULL",
+    "expires_on": "DATE NULL",
+    "stop_ref": "DOUBLE NULL",
+    "macd_event": "VARCHAR(32) NULL",
+    "fear_score": "DOUBLE NULL",
+    "wave_type": "VARCHAR(64) NULL",
+    "yearline_state": "VARCHAR(50) NULL",
+    "close": "DOUBLE NULL",
+    "ma5": "DOUBLE NULL",
+    "ma20": "DOUBLE NULL",
+    "ma60": "DOUBLE NULL",
+    "ma250": "DOUBLE NULL",
+    "vol_ratio": "DOUBLE NULL",
+    "macd_hist": "DOUBLE NULL",
+    "kdj_k": "DOUBLE NULL",
+    "kdj_d": "DOUBLE NULL",
+    "atr14": "DOUBLE NULL",
+    "avg_volume_20": "DOUBLE NULL",
+    "gdhs_delta_pct": "DOUBLE NULL",
+    "gdhs_announce_date": "DATE NULL",
+    "chip_score": "DOUBLE NULL",
+    "chip_reason": "VARCHAR(255) NULL",
+    "chip_penalty": "DOUBLE NULL",
+    "chip_note": "VARCHAR(255) NULL",
+    "age_days": "INT NULL",
+    "deadzone_hit": "TINYINT(1) NULL",
+    "stale_hit": "TINYINT(1) NULL",
+    "industry": "VARCHAR(255) NULL",
+    "industry_classification": "VARCHAR(255) NULL",
+    "board_name": "VARCHAR(255) NULL",
+    "board_code": "VARCHAR(64) NULL",
+}
+
 @dataclass(frozen=True)
 class TableNames:
     indicator_table: str
@@ -83,6 +128,9 @@ class SchemaManager:
 
     def ensure_all(self) -> None:
         tables = self._resolve_table_names()
+
+        self._ensure_history_daily_kline_table()
+        self._ensure_history_index_daily_kline_table()
 
         self._ensure_dim_stock_basic_view()
         self._ensure_fact_stock_daily_view()
@@ -278,6 +326,26 @@ class SchemaManager:
         with self.engine.connect() as conn:
             row = conn.execute(stmt, params).mappings().first()
         return bool(row and row.get("cnt"))
+
+    def _relation_type(self, name: str) -> str | None:
+        if not name:
+            return None
+        condition = "TABLE_SCHEMA = :schema" if self.db_name else "TABLE_SCHEMA = DATABASE()"
+        stmt = text(
+            f"""
+            SELECT TABLE_TYPE
+            FROM information_schema.TABLES
+            WHERE {condition} AND TABLE_NAME = :name
+            """
+        )
+        params: Dict[str, str] = {"name": name}
+        if self.db_name:
+            params["schema"] = str(self.db_name)
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt, params).mappings().first()
+        if not row:
+            return None
+        return str(row.get("TABLE_TYPE") or "").strip() or None
 
     def _index_exists(self, table: str, index: str) -> bool:
         condition = "table_schema = :schema" if self.db_name else "table_schema = DATABASE()"
@@ -483,6 +551,141 @@ class SchemaManager:
         with self.engine.begin() as conn:
             conn.execute(text(f"DROP VIEW IF EXISTS `{name}`"))
             conn.execute(text(f"DROP TABLE IF EXISTS `{name}`"))
+
+    # ---------- History tables ----------
+    def _ensure_history_daily_kline_table(self) -> None:
+        self._ensure_history_kline_table("history_daily_kline")
+
+    def _ensure_history_index_daily_kline_table(self) -> None:
+        self._ensure_history_kline_table("history_index_daily_kline")
+
+    def _ensure_history_kline_table(self, table: str) -> None:
+        columns = {
+            "date": "VARCHAR(10) NOT NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "trade_date": "DATE NOT NULL",
+            "open": "DOUBLE NULL",
+            "high": "DOUBLE NULL",
+            "low": "DOUBLE NULL",
+            "close": "DOUBLE NULL",
+            "preclose": "DOUBLE NULL",
+            "volume": "DOUBLE NULL",
+            "amount": "DOUBLE NULL",
+            "pctChg": "DOUBLE NULL",
+            "adjustflag": "VARCHAR(8) NULL",
+            "tradestatus": "VARCHAR(8) NULL",
+            "isST": "VARCHAR(8) NULL",
+            "source": "VARCHAR(16) NULL",
+            "created_at": "DATETIME(6) NULL",
+        }
+
+        if not self._table_exists(table):
+            self._create_table(table, columns)
+        else:
+            alter_columns = columns.copy()
+            alter_columns["trade_date"] = "DATE NULL"
+            self._add_missing_columns(table, alter_columns)
+            self._ensure_varchar_length(table, "date", 10)
+            self._ensure_varchar_length(table, "code", 20)
+            self._ensure_date_column(table, "trade_date", not_null=False)
+            self._backfill_trade_date(table)
+            self._ensure_trade_date_not_null(table)
+
+        self._ensure_history_kline_indexes(table)
+
+    def _backfill_trade_date(self, table: str) -> None:
+        meta = self._column_meta(table)
+        if "trade_date" not in meta or "date" not in meta:
+            return
+        stmt = text(
+            f"""
+            UPDATE `{table}`
+            SET `trade_date` = STR_TO_DATE(`date`, '%Y-%m-%d')
+            WHERE `trade_date` IS NULL
+              AND `date` REGEXP '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+            """
+        )
+        with self.engine.begin() as conn:
+            result = conn.execute(stmt)
+        updated = int(getattr(result, "rowcount", 0) or 0)
+        if updated:
+            self.logger.info("表 %s 已回填 trade_date：%s 条。", table, updated)
+
+    def _ensure_trade_date_not_null(self, table: str) -> None:
+        meta = self._column_meta(table)
+        if "trade_date" not in meta:
+            return
+        stmt = text(f"SELECT COUNT(*) AS cnt FROM `{table}` WHERE `trade_date` IS NULL")
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row and int(row.get("cnt") or 0) > 0:
+            raise RuntimeError(
+                f"{table}.trade_date 仍存在空值，请先清理异常 date 再重试。"
+            )
+        self._ensure_date_column(table, "trade_date", not_null=True)
+
+    def _ensure_history_kline_indexes(self, table: str) -> None:
+        trade_date_index = f"idx_{table}_trade_date"
+        if not self._index_exists(table, trade_date_index):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE INDEX `{trade_date_index}`
+                        ON `{table}` (`trade_date`)
+                        """
+                    )
+                )
+            self.logger.info("表 %s 已新增索引 %s。", table, trade_date_index)
+
+        code_date_index = f"idx_{table}_code_trade_date"
+        if not self._index_exists(table, code_date_index):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE INDEX `{code_date_index}`
+                        ON `{table}` (`code`, `trade_date`)
+                        """
+                    )
+                )
+            self.logger.info("表 %s 已新增索引 %s。", table, code_date_index)
+
+        unique_index = f"ux_{table}_code_trade_date"
+        if not self._index_exists(table, unique_index):
+            dup_stmt = text(
+                f"""
+                SELECT `code`, `trade_date`, COUNT(*) AS cnt
+                FROM `{table}`
+                WHERE `trade_date` IS NOT NULL
+                GROUP BY `code`, `trade_date`
+                HAVING cnt > 1
+                LIMIT 20
+                """
+            )
+            with self.engine.connect() as conn:
+                dup_rows = conn.execute(dup_stmt).mappings().all()
+            if dup_rows:
+                sample = ", ".join(
+                    f"{row['code']}@{row['trade_date']}({row['cnt']})"
+                    for row in dup_rows
+                )
+                self.logger.error(
+                    "表 %s 存在重复 (code, trade_date)：%s。", table, sample
+                )
+                raise RuntimeError(
+                    f"{table} 存在重复 (code, trade_date)，请先清理后再创建唯一索引。"
+                )
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE UNIQUE INDEX `{unique_index}`
+                        ON `{table}` (`code`, `trade_date`)
+                        """
+                    )
+                )
+            self.logger.info("表 %s 已新增唯一索引 %s。", table, unique_index)
 
     # ---------- Base dims/facts ----------
     def _ensure_dim_stock_basic_view(self) -> None:
@@ -781,6 +984,7 @@ class SchemaManager:
             "close": "DOUBLE NULL",
             "volume": "DOUBLE NULL",
             "amount": "DOUBLE NULL",
+            "avg_volume_20": "DOUBLE NULL",
             "ma5": "DOUBLE NULL",
             "ma10": "DOUBLE NULL",
             "ma20": "DOUBLE NULL",
@@ -916,32 +1120,19 @@ class SchemaManager:
         self._ensure_date_column(table, "asof_trade_date", not_null=True)
         self._ensure_date_column(table, "latest_sig_date", not_null=False)
         self._ensure_datetime_column(table, "created_at")
-    def _ensure_ready_signals_view(
-            self,
-            view: str,
-            events_table: str,
-            indicator_table: str,
-            chip_table: str,
-    ) -> None:
-        if not view or not events_table:
-            return
+
+    def build_ready_signals_select(
+        self,
+        events_table: str,
+        indicator_table: str,
+        chip_table: str,
+    ) -> tuple[str, list[str]]:
+        if not events_table:
+            return "", []
 
         ind_join = ""
-        ind_fields = """
-              NULL AS `close`,
-              NULL AS `ma5`,
-              NULL AS `ma20`,
-              NULL AS `ma60`,
-              NULL AS `ma250`,
-              NULL AS `vol_ratio`,
-              NULL AS `macd_hist`,
-              NULL AS `kdj_k`,
-              NULL AS `kdj_d`,
-              NULL AS `atr14`,
-              NULL AS `yearline_state`
-            """
-        avg_volume_expr = "NULL AS `avg_volume_20`"
-        if indicator_table and self._table_exists(indicator_table):
+        indicator_exists = bool(indicator_table and self._table_exists(indicator_table))
+        if indicator_exists:
             ind_join = (
                 f"""
                 LEFT JOIN `{indicator_table}` ind
@@ -949,34 +1140,8 @@ class SchemaManager:
                  AND e.`code` = ind.`code`
                 """
             )
-            ind_fields = """
-              ind.`close`,
-              ind.`ma5`,
-              ind.`ma20`,
-              ind.`ma60`,
-              ind.`ma250`,
-              ind.`vol_ratio`,
-              ind.`macd_hist`,
-              ind.`kdj_k`,
-              ind.`kdj_d`,
-              ind.`atr14`,
-              ind.`yearline_state`
-            """
-            avg_volume_expr = f"""
-              (
-                SELECT AVG(t.`volume`)
-                FROM (
-                  SELECT `volume`
-                  FROM `{indicator_table}` hist
-                  WHERE hist.`code` = e.`code`
-                    AND hist.`trade_date` <= e.`sig_date`
-                  ORDER BY hist.`trade_date` DESC
-                  LIMIT 20
-                ) t
-              ) AS `avg_volume_20`
-            """
         elif indicator_table:
-            self.logger.warning("指标表 %s 不存在，ready_signals_view 将以 NULL 补齐指标列。", indicator_table)
+            self.logger.warning("指标表 %s 不存在，ready_signals 将以 NULL 补齐指标列。", indicator_table)
 
         chip_join = ""
         chip_enabled = False
@@ -992,41 +1157,48 @@ class SchemaManager:
 
         meta = self._column_meta(events_table)
 
-        def _col(name: str) -> str | None:
-            return name if name in meta else None
+        def _event_expr(name: str) -> str:
+            return f"e.`{name}`" if name in meta else "NULL"
 
-        # feat: reason 字段优先使用 final_reason，减少下游口径回填
-        field_exprs = [
-            "e.`sig_date`",
-            "e.`code`",
-            "e.`strategy_code`",
-            "COALESCE(e.`final_action`, e.`signal`) AS `signal`",
-            "COALESCE(e.`final_action`, e.`signal`) AS `final_action`",
-            "COALESCE(e.`final_reason`, e.`reason`) AS `final_reason`",
-            "e.`final_cap`",
-            "COALESCE(e.`final_reason`, e.`reason`) AS `reason`",
-            "e.`risk_tag`",
-            "e.`risk_note`",
-            "e.`extra_json`",
-            "e.`valid_days`",
-            "e.`expires_on`",
-        ]
-        optional_cols = [
-            "stop_ref",
-            "macd_event",
-            "fear_score",
-            "wave_type",
-            "yearline_state",
-        ]
-        for col in optional_cols:
-            expr = _col(col)
-            if expr:
-                field_exprs.append(f"e.`{expr}`")
+        def _ind_expr(name: str) -> str:
+            return f"ind.`{name}`" if indicator_exists else "NULL"
 
-        def _coalesce_expr(cols: list[str], alias: str) -> str:
+        def _coalesce_expr(cols: list[str]) -> str:
             if not cols:
-                return f"NULL AS `{alias}`"
-            return f"COALESCE({', '.join(cols)}) AS `{alias}`"
+                return "NULL"
+            return f"COALESCE({', '.join(cols)})"
+
+        field_exprs: Dict[str, str] = {
+            "sig_date": "e.`sig_date`",
+            "code": "e.`code`",
+            "strategy_code": "e.`strategy_code`",
+            "signal": "COALESCE(e.`final_action`, e.`signal`)",
+            "final_action": "COALESCE(e.`final_action`, e.`signal`)",
+            "final_reason": "COALESCE(e.`final_reason`, e.`reason`)",
+            "final_cap": "e.`final_cap`",
+            "reason": "COALESCE(e.`final_reason`, e.`reason`)",
+            "risk_tag": "e.`risk_tag`",
+            "risk_note": "e.`risk_note`",
+            "extra_json": "e.`extra_json`",
+            "valid_days": "e.`valid_days`",
+            "expires_on": "e.`expires_on`",
+            "stop_ref": _event_expr("stop_ref"),
+            "macd_event": _event_expr("macd_event"),
+            "fear_score": _event_expr("fear_score"),
+            "wave_type": _event_expr("wave_type"),
+            "yearline_state": _ind_expr("yearline_state"),
+            "close": _ind_expr("close"),
+            "ma5": _ind_expr("ma5"),
+            "ma20": _ind_expr("ma20"),
+            "ma60": _ind_expr("ma60"),
+            "ma250": _ind_expr("ma250"),
+            "vol_ratio": _ind_expr("vol_ratio"),
+            "macd_hist": _ind_expr("macd_hist"),
+            "kdj_k": _ind_expr("kdj_k"),
+            "kdj_d": _ind_expr("kdj_d"),
+            "atr14": _ind_expr("atr14"),
+            "avg_volume_20": _ind_expr("avg_volume_20"),
+        }
 
         gdhs_delta_sources = []
         announce_sources = []
@@ -1038,28 +1210,24 @@ class SchemaManager:
         chip_deadzone_sources = []
         chip_stale_sources = []
 
-        if _col("gdhs_delta_pct"):
+        if "gdhs_delta_pct" in meta:
             gdhs_delta_sources.append("e.`gdhs_delta_pct`")
-        if _col("gdhs_announce_date"):
+        if "gdhs_announce_date" in meta:
             announce_sources.append("e.`gdhs_announce_date`")
-        if _col("chip_score"):
+        if "chip_score" in meta:
             chip_score_sources.append("e.`chip_score`")
-        if _col("chip_reason"):
+        if "chip_reason" in meta:
             chip_reason_sources.append("e.`chip_reason`")
-        if _col("chip_penalty"):
+        if "chip_penalty" in meta:
             chip_penalty_sources.append("e.`chip_penalty`")
-        if _col("chip_note"):
+        if "chip_note" in meta:
             chip_note_sources.append("e.`chip_note`")
-        if _col("age_days"):
+        if "age_days" in meta:
             chip_age_sources.append("e.`age_days`")
-        if _col("deadzone_hit"):
+        if "deadzone_hit" in meta:
             chip_deadzone_sources.append("e.`deadzone_hit`")
-        if _col("stale_hit"):
+        if "stale_hit" in meta:
             chip_stale_sources.append("e.`stale_hit`")
-
-        if ind_fields:
-            field_exprs.append(ind_fields.strip())
-        field_exprs.append(avg_volume_expr.strip())
 
         if chip_enabled:
             gdhs_delta_sources.append("cf.`gdhs_delta_pct`")
@@ -1072,22 +1240,21 @@ class SchemaManager:
             chip_deadzone_sources.append("cf.`deadzone_hit`")
             chip_stale_sources.append("cf.`stale_hit`")
 
-        field_exprs.extend(
-            [
-                _coalesce_expr(gdhs_delta_sources, "gdhs_delta_pct"),
-                _coalesce_expr(announce_sources, "gdhs_announce_date"),
-                _coalesce_expr(chip_score_sources, "chip_score"),
-                _coalesce_expr(chip_reason_sources, "chip_reason"),
-                _coalesce_expr(chip_penalty_sources, "chip_penalty"),
-                _coalesce_expr(chip_note_sources, "chip_note"),
-                _coalesce_expr(chip_age_sources, "age_days"),
-                _coalesce_expr(chip_deadzone_sources, "deadzone_hit"),
-                _coalesce_expr(chip_stale_sources, "stale_hit"),
-            ]
-        )
+        field_exprs["gdhs_delta_pct"] = _coalesce_expr(gdhs_delta_sources)
+        field_exprs["gdhs_announce_date"] = _coalesce_expr(announce_sources)
+        field_exprs["chip_score"] = _coalesce_expr(chip_score_sources)
+        field_exprs["chip_reason"] = _coalesce_expr(chip_reason_sources)
+        field_exprs["chip_penalty"] = _coalesce_expr(chip_penalty_sources)
+        field_exprs["chip_note"] = _coalesce_expr(chip_note_sources)
+        field_exprs["age_days"] = _coalesce_expr(chip_age_sources)
+        field_exprs["deadzone_hit"] = _coalesce_expr(chip_deadzone_sources)
+        field_exprs["stale_hit"] = _coalesce_expr(chip_stale_sources)
 
         industry_join = ""
-        industry_fields: list[str] = ["NULL AS `industry`", "NULL AS `industry_classification`"]
+        industry_fields: Dict[str, str] = {
+            "industry": "NULL",
+            "industry_classification": "NULL",
+        }
         for candidate in ("dim_stock_industry", "a_share_stock_industry"):
             if self._table_exists(candidate):
                 industry_join = (
@@ -1102,17 +1269,24 @@ class SchemaManager:
                     if key in industry_meta:
                         industry_name_col = key
                         break
-                industry_class_col = "industry_classification" if "industry_classification" in industry_meta else None
-                industry_fields = [
-                    f"ind_dim.`{industry_name_col}` AS `industry`" if industry_name_col else "NULL AS `industry`",
-                    f"ind_dim.`{industry_class_col}` AS `industry_classification`"
-                    if industry_class_col
-                    else "NULL AS `industry_classification`",
-                ]
+                industry_class_col = (
+                    "industry_classification"
+                    if "industry_classification" in industry_meta
+                    else None
+                )
+                industry_fields = {
+                    "industry": f"ind_dim.`{industry_name_col}`" if industry_name_col else "NULL",
+                    "industry_classification": (
+                        f"ind_dim.`{industry_class_col}`" if industry_class_col else "NULL"
+                    ),
+                }
                 break
 
         board_join = ""
-        board_fields: list[str] = ["NULL AS `board_name`", "NULL AS `board_code`"]
+        board_fields: Dict[str, str] = {
+            "board_name": "NULL",
+            "board_code": "NULL",
+        }
         board_table = "dim_stock_board_industry"
         if self._table_exists(board_table):
             board_join = (
@@ -1124,18 +1298,18 @@ class SchemaManager:
             board_meta = self._column_meta(board_table)
             board_name_col = "board_name" if "board_name" in board_meta else None
             board_code_col = "board_code" if "board_code" in board_meta else None
-            board_fields = [
-                f"bd.`{board_name_col}` AS `board_name`" if board_name_col else "NULL AS `board_name`",
-                f"bd.`{board_code_col}` AS `board_code`" if board_code_col else "NULL AS `board_code`",
-            ]
+            board_fields = {
+                "board_name": f"bd.`{board_name_col}`" if board_name_col else "NULL",
+                "board_code": f"bd.`{board_code_col}`" if board_code_col else "NULL",
+            }
 
-        field_exprs.extend(industry_fields)
-        field_exprs.extend(board_fields)
+        field_exprs.update(industry_fields)
+        field_exprs.update(board_fields)
 
-        select_clause = ",\n              ".join(field_exprs)
-        stmt = text(
-            f"""
-            CREATE OR REPLACE VIEW `{view}` AS
+        select_clause = ",\n              ".join(
+            f"{field_exprs[col]} AS `{col}`" for col in READY_SIGNALS_COLUMNS.keys()
+        )
+        select_sql = f"""
             SELECT
               {select_clause}
             FROM `{events_table}` e
@@ -1145,10 +1319,95 @@ class SchemaManager:
             {board_join}
             WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM')
             """
-        )
-        with self.engine.begin() as conn:
-            conn.execute(stmt)
-        self.logger.info("已创建/更新视图 %s（含筹码预计算）。", view)
+        return select_sql, list(READY_SIGNALS_COLUMNS.keys())
+
+    def _ensure_ready_signals_view(
+        self,
+        view: str,
+        events_table: str,
+        indicator_table: str,
+        chip_table: str,
+    ) -> None:
+        if not view or not events_table:
+            return
+
+        relation_type = self._relation_type(view)
+        if relation_type == "VIEW":
+            self._drop_relation(view)
+
+        if not self._table_exists(view):
+            self._create_table(
+                view,
+                READY_SIGNALS_COLUMNS,
+                primary_key=("strategy_code", "sig_date", "code"),
+            )
+        else:
+            self._add_missing_columns(view, READY_SIGNALS_COLUMNS)
+            self._ensure_primary_key(view, ("strategy_code", "sig_date", "code"))
+
+        for col, length in {
+            "code": 20,
+            "strategy_code": 32,
+            "signal": 64,
+            "final_action": 16,
+            "final_reason": 255,
+            "reason": 255,
+            "risk_tag": 255,
+            "risk_note": 255,
+            "macd_event": 32,
+            "wave_type": 64,
+            "yearline_state": 50,
+            "chip_reason": 255,
+            "chip_note": 255,
+            "industry": 255,
+            "industry_classification": 255,
+            "board_name": 255,
+            "board_code": 64,
+        }.items():
+            self._ensure_varchar_length(view, col, length)
+
+        for col, definition in {
+            "final_cap": "DOUBLE NULL",
+            "stop_ref": "DOUBLE NULL",
+            "fear_score": "DOUBLE NULL",
+            "close": "DOUBLE NULL",
+            "ma5": "DOUBLE NULL",
+            "ma20": "DOUBLE NULL",
+            "ma60": "DOUBLE NULL",
+            "ma250": "DOUBLE NULL",
+            "vol_ratio": "DOUBLE NULL",
+            "macd_hist": "DOUBLE NULL",
+            "kdj_k": "DOUBLE NULL",
+            "kdj_d": "DOUBLE NULL",
+            "atr14": "DOUBLE NULL",
+            "avg_volume_20": "DOUBLE NULL",
+            "gdhs_delta_pct": "DOUBLE NULL",
+            "chip_score": "DOUBLE NULL",
+            "chip_penalty": "DOUBLE NULL",
+            "age_days": "INT NULL",
+            "deadzone_hit": "TINYINT(1) NULL",
+            "stale_hit": "TINYINT(1) NULL",
+        }.items():
+            self._ensure_numeric_column(view, col, definition)
+
+        self._ensure_date_column(view, "sig_date", not_null=True)
+        self._ensure_date_column(view, "expires_on", not_null=False)
+        self._ensure_date_column(view, "gdhs_announce_date", not_null=False)
+
+        index_map = {
+            "idx_ready_signals_strategy_date": ("strategy_code", "sig_date"),
+            "idx_ready_signals_expires_on": ("expires_on",),
+            "idx_ready_signals_sig_date": ("sig_date",),
+            "idx_ready_signals_code": ("code",),
+        }
+        for index_name, cols in index_map.items():
+            if self._index_exists(view, index_name):
+                continue
+            cols_clause = ", ".join(f"`{c}`" for c in cols)
+            with self.engine.begin() as conn:
+                conn.execute(text(f"CREATE INDEX `{index_name}` ON `{view}` ({cols_clause})"))
+
+        self.logger.info("已创建/更新表 %s（准备信号）。", view)
 
     def _ensure_trade_metrics_table(self) -> None:
         columns = {
@@ -1278,6 +1537,7 @@ class SchemaManager:
             "run_pk": "BIGINT NOT NULL AUTO_INCREMENT",
             "monitor_date": "DATE NOT NULL",
             "run_id": "VARCHAR(64) NOT NULL",
+            "run_stage": "VARCHAR(16) NULL",
             "triggered_at": "DATETIME(6) NULL",
             "checked_at": "DATETIME(6) NULL",
             "status": "VARCHAR(32) NOT NULL DEFAULT 'RUNNING'",
@@ -1293,7 +1553,27 @@ class SchemaManager:
         self._ensure_datetime_column(table, "triggered_at")
         self._ensure_datetime_column(table, "checked_at")
         self._ensure_varchar_length(table, "run_id", 64)
+        self._ensure_varchar_length(table, "run_stage", 16)
         self._ensure_varchar_length(table, "status", 32)
+
+        if "run_stage" in self._column_meta(table):
+            stmt = text(
+                f"""
+                UPDATE `{table}`
+                SET `run_stage` = CASE
+                  WHEN `run_id` LIKE 'PREOPEN %' THEN 'PREOPEN'
+                  WHEN `run_id` LIKE 'BREAK %' THEN 'BREAK'
+                  WHEN `run_id` LIKE 'POSTCLOSE %' THEN 'POSTCLOSE'
+                  ELSE 'INTRADAY'
+                END
+                WHERE `run_stage` IS NULL AND `run_id` IS NOT NULL
+                """
+            )
+            with self.engine.begin() as conn:
+                result = conn.execute(stmt)
+            updated = int(getattr(result, "rowcount", 0) or 0)
+            if updated:
+                self.logger.info("开盘监测运行表 %s 已回填 run_stage：%s 条。", table, updated)
 
         unique_name = "ux_open_monitor_run"
         if not self._index_exists(table, unique_name):
@@ -1307,6 +1587,19 @@ class SchemaManager:
                     )
                 )
             self.logger.info("开盘监测运行表 %s 已新增唯一索引 %s。", table, unique_name)
+
+        stage_index = "idx_open_monitor_run_stage"
+        if not self._index_exists(table, stage_index):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE INDEX `{stage_index}`
+                        ON `{table}` (`monitor_date`, `run_stage`, `checked_at`)
+                        """
+                    )
+                )
+            self.logger.info("开盘监测运行表 %s 已新增索引 %s。", table, stage_index)
 
     def _ensure_open_monitor_quote_table(self, table: str) -> None:
         columns = {
