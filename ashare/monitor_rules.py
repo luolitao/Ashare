@@ -26,9 +26,14 @@ class MonitorRuleConfig:
     limit_up_trigger_pct: float = 9.7
     max_entry_vs_ma5_pct: float = 0.08
     runup_atr_max: float = 1.2
+    runup_atr_vol_mult: float = 1.2
+    runup_atr_max_cap: float = 2.0
     runup_atr_tol: float = 0.02
     pullback_runup_atr_max: float = 1.5
     pullback_runup_dev_ma20_atr_min: float = 1.0
+    ma20_atr_tol_mult: float = 0.5
+    ma20_dyn_min_pct: float = -0.03
+    ma20_prewarn_buffer_pct: float = 0.005
     dev_ma5_atr_max: float = 2.0
     dev_ma20_atr_max: float = 2.5
     stop_atr_mult: float = 2.0
@@ -45,6 +50,7 @@ class MonitorRuleConfig:
     enable_below_ma20: bool = True
     enable_limit_up: bool = True
     enable_runup_breach: bool = True
+    enable_ma20_prewarn: bool = True
 
     enable_signal_expired: bool = True
 
@@ -67,6 +73,7 @@ class MonitorRuleConfig:
     gap_down_reason: str = "低开破位"
     below_ma20_action: str = "SKIP"
     below_ma20_reason: str = "未站上MA20要求"
+    ma20_prewarn_reason: str = "接近MA20阈值"
     limit_up_action: str = "SKIP"
     limit_up_reason: str = "涨停不可成交"
     runup_breach_action: str = "WAIT"
@@ -85,6 +92,7 @@ class MonitorRuleConfig:
     sev_gap_up: int = 70
     sev_gap_down: int = 70
     sev_below_ma20: int = 60
+    sev_ma20_prewarn: int = 10
     sev_limit_up: int = 60
     sev_runup_breach: int = 55
 
@@ -163,12 +171,23 @@ class MonitorRuleConfig:
                 "max_entry_vs_ma5_pct",
             ),
             runup_atr_max=_get_float("runup_atr_max", defaults.runup_atr_max),
+            runup_atr_vol_mult=_get_float("runup_atr_vol_mult", defaults.runup_atr_vol_mult),
+            runup_atr_max_cap=_get_float("runup_atr_max_cap", defaults.runup_atr_max_cap),
             runup_atr_tol=_get_float("runup_atr_tol", defaults.runup_atr_tol),
             pullback_runup_atr_max=_get_float(
                 "pullback_runup_atr_max", defaults.pullback_runup_atr_max
             ),
             pullback_runup_dev_ma20_atr_min=_get_float(
                 "pullback_runup_dev_ma20_atr_min", defaults.pullback_runup_dev_ma20_atr_min
+            ),
+            ma20_atr_tol_mult=_get_float("ma20_atr_tol_mult", defaults.ma20_atr_tol_mult),
+            ma20_dyn_min_pct=_normalize_ratio_pct(
+                _get_float("ma20_dyn_min_pct", defaults.ma20_dyn_min_pct),
+                "ma20_dyn_min_pct",
+            ),
+            ma20_prewarn_buffer_pct=_normalize_ratio_pct(
+                _get_float("ma20_prewarn_buffer_pct", defaults.ma20_prewarn_buffer_pct),
+                "ma20_prewarn_buffer_pct",
             ),
             dev_ma5_atr_max=_get_float("dev_ma5_atr_max", defaults.dev_ma5_atr_max),
             dev_ma20_atr_max=_get_float("dev_ma20_atr_max", defaults.dev_ma20_atr_max),
@@ -193,6 +212,9 @@ class MonitorRuleConfig:
             enable_below_ma20=_get_bool("enable_below_ma20", defaults.enable_below_ma20),
             enable_limit_up=_get_bool("enable_limit_up", defaults.enable_limit_up),
             enable_runup_breach=_get_bool("enable_runup_breach", defaults.enable_runup_breach),
+            enable_ma20_prewarn=_get_bool(
+                "enable_ma20_prewarn", defaults.enable_ma20_prewarn
+            ),
             enable_signal_expired=_get_bool(
                 "enable_signal_expired", defaults.enable_signal_expired
             ),
@@ -236,6 +258,10 @@ class MonitorRuleConfig:
                 cfg.get("below_ma20_reason", defaults.below_ma20_reason)
             ).strip()
             or defaults.below_ma20_reason,
+            ma20_prewarn_reason=str(
+                cfg.get("ma20_prewarn_reason", defaults.ma20_prewarn_reason)
+            ).strip()
+            or defaults.ma20_prewarn_reason,
             limit_up_action=str(cfg.get("limit_up_action", defaults.limit_up_action)).strip()
             or defaults.limit_up_action,
             limit_up_reason=str(cfg.get("limit_up_reason", defaults.limit_up_reason)).strip()
@@ -264,6 +290,7 @@ class MonitorRuleConfig:
             sev_gap_up=int(cfg.get("sev_gap_up", defaults.sev_gap_up)),
             sev_gap_down=int(cfg.get("sev_gap_down", defaults.sev_gap_down)),
             sev_below_ma20=int(cfg.get("sev_below_ma20", defaults.sev_below_ma20)),
+            sev_ma20_prewarn=int(cfg.get("sev_ma20_prewarn", defaults.sev_ma20_prewarn)),
             sev_limit_up=int(cfg.get("sev_limit_up", defaults.sev_limit_up)),
             sev_runup_breach=int(cfg.get("sev_runup_breach", defaults.sev_runup_breach)),
         )
@@ -384,6 +411,19 @@ def build_default_monitor_rules(
             effect=lambda ctx: RuleResult(
                 reason=config.gap_down_reason,
                 action_override=config.gap_down_action,
+            ),
+        ),
+        Rule(
+            id="MA20_PREWARN",
+            category="ACTION",
+            severity=config.sev_ma20_prewarn,
+            predicate=lambda ctx: bool(
+                config.enable_ma20_prewarn
+                and getattr(ctx, "ma20_prewarn", False)
+            ),
+            effect=lambda ctx: RuleResult(
+                reason=getattr(ctx, "ma20_prewarn_reason", None)
+                or config.ma20_prewarn_reason,
             ),
         ),
         Rule(

@@ -159,6 +159,9 @@ class OpenMonitorEnvService:
             "weekly_zone_reason": weekly_scenario.get("weekly_zone_reason"),
             "regime": (daily_env or {}).get("regime")
             or (env_view_row or {}).get("env_regime"),
+            "regime_raw": (daily_env or {}).get("regime_raw")
+            or (env_view_row or {}).get("env_regime_raw")
+            or (env_view_row or {}).get("env_regime"),
             "index_score": (daily_env or {}).get("score")
             or (env_view_row or {}).get("env_index_score"),
             "position_hint": (daily_env or {}).get("position_hint")
@@ -198,6 +201,8 @@ class OpenMonitorEnvService:
             "env_live_reason": row.get("env_live_reason"),
         }
         env_context["index_intraday"] = index_snapshot
+        if not env_context.get("regime_raw"):
+            env_context["regime_raw"] = env_context.get("regime")
 
         return env_context
 
@@ -308,6 +313,7 @@ class OpenMonitorEnvService:
             if daily_env
             else None,
             "regime": daily_env.get("regime") if daily_env else None,
+            "regime_raw": daily_env.get("regime_raw") if daily_env else None,
             "position_hint": _to_float(daily_env.get("position_hint"))
             if daily_env
             else None,
@@ -347,6 +353,8 @@ class OpenMonitorEnvService:
             if daily_env
             else None,
         }
+        if not env_context.get("regime_raw"):
+            env_context["regime_raw"] = env_context.get("regime")
         if not weekly_gate_policy:
             weekly_gate_policy = self.env_builder.resolve_env_weekly_gate_policy(env_context)
             env_context["weekly_gate_policy"] = weekly_gate_policy
@@ -752,14 +760,21 @@ class OpenMonitorEnvService:
             gate_reason = index_env_snapshot.get("env_index_gate_reason") or "-"
             live_pct = _to_float(index_env_snapshot.get("env_index_live_pct_change"))
             dev_ma20_atr = _to_float(index_env_snapshot.get("env_index_dev_ma20_atr"))
+            regime_eff = None
+            regime_raw = None
+            if isinstance(ctx, dict):
+                regime_eff = ctx.get("regime")
+                regime_raw = ctx.get("regime_raw") or regime_eff
             self.logger.info(
-                "指数环境快照：%s asof=%s live=%s pct=%.2f%% dev_ma20_atr=%.2f gate=%s reason=%s",
+                "指数环境快照：%s asof=%s live=%s pct=%.2f%% dev_ma20_atr=%.2f index_gate=%s regime=%s(raw=%s) reason=%s",
                 index_env_snapshot.get("env_index_code"),
                 index_env_snapshot.get("env_index_asof_trade_date"),
                 index_env_snapshot.get("env_index_live_trade_date"),
                 live_pct if live_pct is not None else 0.0,
                 dev_ma20_atr if dev_ma20_atr is not None else 0.0,
                 gate_action,
+                regime_eff,
+                regime_raw,
                 gate_reason,
             )
 

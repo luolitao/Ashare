@@ -26,6 +26,7 @@ class MarketIndicatorBuilder:
         self.env_builder = env_builder
         self.logger = logger
         self.market_regime = MarketRegimeClassifier()
+        self.regime_confirm_days = 2
 
     @property
     def index_codes(self) -> list[str]:
@@ -269,6 +270,11 @@ class MarketIndicatorBuilder:
             .reset_index()
         )
         day_summary = day_summary.sort_values("trade_date").reset_index(drop=True)
+        if "regime" in day_summary.columns:
+            day_summary["regime_raw"] = day_summary["regime"]
+            day_summary = self._apply_regime_hysteresis(
+                day_summary, confirm_days=self.regime_confirm_days
+            )
         if "position_hint" in day_summary.columns:
             day_summary["position_hint_raw"] = day_summary["position_hint"]
             pos = pd.to_numeric(day_summary["position_hint"], errors="coerce")
@@ -428,8 +434,84 @@ class MarketIndicatorBuilder:
                 "score": score,
                 "regime": regime,
                 "position_hint": position_hint,
+                "pullback_fast": pullback_fast,
             }
         )
+
+    @staticmethod
+    def _apply_regime_hysteresis(
+        day_summary: pd.DataFrame, *, confirm_days: int
+    ) -> pd.DataFrame:
+        if day_summary.empty or "regime" not in day_summary.columns:
+            return day_summary
+
+        confirm_days = max(int(confirm_days), 1)
+        severe = {"BREAKDOWN", "BEAR_CONFIRMED"}
+        position_hint_map = {
+            "RISK_ON": 0.8,
+            "PULLBACK": 0.4,
+            "RISK_OFF": 0.1,
+            "BREAKDOWN": 0.0,
+            "BEAR_CONFIRMED": 0.0,
+            "UNKNOWN": None,
+        }
+
+        current = None
+        pending = None
+        pending_count = 0
+
+        smoothed = []
+        for _, row in day_summary.iterrows():
+            raw = str(row.get("regime") or "").upper()
+            if raw == "UNKNOWN":
+                smoothed.append(current or "UNKNOWN")
+                continue
+
+            if current is None:
+                current = raw
+                pending = None
+                pending_count = 0
+                smoothed.append(current)
+                continue
+
+            if raw == current:
+                pending = None
+                pending_count = 0
+                smoothed.append(current)
+                continue
+
+            if raw in severe:
+                current = raw
+                pending = None
+                pending_count = 0
+                smoothed.append(current)
+                continue
+
+            if pending != raw:
+                pending = raw
+                pending_count = 1
+            else:
+                pending_count += 1
+
+            if pending_count >= confirm_days:
+                current = pending
+                pending = None
+                pending_count = 0
+
+            smoothed.append(current)
+
+        day_summary = day_summary.copy()
+        day_summary["regime"] = smoothed
+
+        def _recalc_hint(row: pd.Series) -> float | None:
+            regime = str(row.get("regime") or "").upper()
+            hint = position_hint_map.get(regime)
+            if regime == "PULLBACK" and bool(row.get("pullback_fast")) and hint is not None:
+                hint = min(hint, 0.3)
+            return hint
+
+        day_summary["position_hint"] = day_summary.apply(_recalc_hint, axis=1)
+        return day_summary
 
     @staticmethod
     def _resolve_breadth_metrics(group: pd.DataFrame) -> pd.Series:

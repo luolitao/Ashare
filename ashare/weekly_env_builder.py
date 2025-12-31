@@ -758,6 +758,43 @@ class WeeklyEnvironmentBuilder:
         return None
 
     @staticmethod
+    def _resolve_risk_emotion_policy(env_context: dict[str, Any]) -> dict[str, Any]:
+        risk_level = str(env_context.get("weekly_risk_level") or "").upper()
+        regime = str(env_context.get("regime") or "").upper()
+
+        # Risk (weekly) x Emotion (daily regime) matrix.
+        matrix = {
+            "HIGH": {
+                "RISK_ON": ("WAIT", 0.15, "HIGH_RISK_RISK_ON"),
+                "PULLBACK": ("WAIT", 0.15, "HIGH_RISK_PULLBACK"),
+                "RISK_OFF": ("STOP", 0.0, "HIGH_RISK_RISK_OFF"),
+                "BREAKDOWN": ("STOP", 0.0, "HIGH_RISK_BREAKDOWN"),
+                "BEAR_CONFIRMED": ("STOP", 0.0, "HIGH_RISK_BEAR"),
+            },
+            "MEDIUM": {
+                "RISK_ON": ("ALLOW_SMALL", 0.3, "MEDIUM_RISK_RISK_ON"),
+                "PULLBACK": ("ALLOW_SMALL", 0.25, "MEDIUM_RISK_PULLBACK"),
+                "RISK_OFF": ("WAIT", 0.15, "MEDIUM_RISK_RISK_OFF"),
+                "BREAKDOWN": ("WAIT", 0.15, "MEDIUM_RISK_BREAKDOWN"),
+            },
+            "LOW": {
+                "RISK_ON": ("ALLOW", 1.0, "LOW_RISK_RISK_ON"),
+                "PULLBACK": ("ALLOW_SMALL", 0.5, "LOW_RISK_PULLBACK"),
+                "RISK_OFF": ("WAIT", 0.25, "LOW_RISK_RISK_OFF"),
+            },
+        }
+
+        if not risk_level or not regime:
+            return {}
+
+        row = matrix.get(risk_level, {})
+        if regime not in row:
+            return {}
+
+        gate_action, cap_limit, tag = row[regime]
+        return {"gate_action": gate_action, "cap_limit": cap_limit, "matrix_tag": tag}
+
+    @staticmethod
     def _resolve_weekly_zone(
         weekly_scenario: dict[str, Any] | None,
         weekly_gate_policy: str | None,
@@ -824,6 +861,8 @@ class WeeklyEnvironmentBuilder:
         if not isinstance(env_context, dict):
             return
 
+        risk_emotion = self._resolve_risk_emotion_policy(env_context)
+
         gate_candidates: list[str | None] = []
         reason_parts: dict[str, Any] = {}
         gate_norm = None
@@ -859,6 +898,18 @@ class WeeklyEnvironmentBuilder:
         )
         if regime_gate:
             reason_parts["regime_gate_action"] = regime_gate
+
+        if risk_emotion:
+            matrix_gate = risk_emotion.get("gate_action")
+            if matrix_gate:
+                gate_candidates.append(matrix_gate)
+                reason_parts["risk_emotion_gate_action"] = matrix_gate
+            matrix_cap = risk_emotion.get("cap_limit")
+            if matrix_cap is not None:
+                reason_parts["risk_emotion_cap_limit"] = f"{matrix_cap:.2f}"
+            matrix_tag = risk_emotion.get("matrix_tag")
+            if matrix_tag:
+                reason_parts["risk_emotion_matrix"] = matrix_tag
 
         effective_weekly_gate = gate_norm
         live_unlock_gate = str(env_context.get("env_live_unlock_gate") or "").strip().upper()
@@ -926,6 +977,25 @@ class WeeklyEnvironmentBuilder:
         final_cap = base_cap * daily_cap_multiplier * breadth_factor * live_cap_multiplier
         final_cap = min(max(final_cap, 0.0), 1.0)
         small_cap_limit = 0.25
+        if risk_emotion and risk_emotion.get("cap_limit") is not None:
+            cap_limit = float(risk_emotion["cap_limit"])
+            if final_cap > cap_limit:
+                final_cap = cap_limit
+                reason_parts["gate_cap_limit"] = f"RISK_EMOTION_{cap_limit:.2f}"
+        weekly_risk_level = str(env_context.get("weekly_risk_level") or "").strip().upper()
+        weekly_scene = str(
+            env_context.get("weekly_scene_code") or env_context.get("weekly_scene") or ""
+        ).strip().upper()
+        breadth_saturation = reason_parts.get("breadth_saturation")
+        tier_cap = None
+        if weekly_risk_level == "HIGH":
+            if breadth_saturation == "RISK_ON_PEAK":
+                tier_cap = 0.05
+            elif weekly_scene.startswith("WEDGE"):
+                tier_cap = 0.08
+        if tier_cap is not None and final_cap > tier_cap:
+            final_cap = tier_cap
+            reason_parts["risk_tier_cap"] = f"{weekly_risk_level}_{tier_cap:.2f}"
         if effective_weekly_gate == "ALLOW_SMALL" and gate_norm == "WAIT":
             small_cap_limit = 0.15
             reason_parts["unlock_cap_limit"] = f"{small_cap_limit:.2f}"

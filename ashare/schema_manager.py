@@ -131,6 +131,7 @@ class SchemaManager:
 
         self._ensure_history_daily_kline_table()
         self._ensure_history_index_daily_kline_table()
+        self._ensure_external_signal_tables()
 
         self._ensure_dim_stock_basic_view()
         self._ensure_fact_stock_daily_view()
@@ -686,6 +687,256 @@ class SchemaManager:
                     )
                 )
             self.logger.info("表 %s 已新增唯一索引 %s。", table, unique_index)
+
+    # ---------- External signal tables ----------
+    def _ensure_external_signal_tables(self) -> None:
+        self._ensure_lhb_detail_table()
+        self._ensure_margin_detail_table()
+        self._ensure_gdhs_tables()
+
+    def _ensure_yyyymmdd_date_column(
+        self, table: str, column: str, *, not_null: bool
+    ) -> None:
+        meta = self._column_meta(table)
+        info = meta.get(column)
+        target_def = "DATE NOT NULL" if not_null else "DATE NULL"
+        if not info:
+            self._add_missing_columns(table, {column: target_def})
+            return
+        if info["data_type"] == "date":
+            if not_null:
+                self._ensure_date_column(table, column, not_null=True)
+            return
+
+        invalid_stmt = text(
+            f"""
+            SELECT COUNT(*) AS cnt
+            FROM `{table}`
+            WHERE `{column}` IS NOT NULL
+              AND `{column}` NOT REGEXP '^[0-9]{{8}}$'
+              AND `{column}` NOT REGEXP '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+            """
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(invalid_stmt).mappings().first()
+        invalid = int(row.get("cnt") or 0) if row else 0
+        if invalid:
+            self.logger.warning(
+                "表 %s.%s 存在非日期值(%s)，已跳过 DATE 转换。",
+                table,
+                column,
+                invalid,
+            )
+            return
+
+        update_ymd = text(
+            f"""
+            UPDATE `{table}`
+            SET `{column}` = STR_TO_DATE(`{column}`, '%Y%m%d')
+            WHERE `{column}` REGEXP '^[0-9]{{8}}$'
+            """
+        )
+        update_iso = text(
+            f"""
+            UPDATE `{table}`
+            SET `{column}` = STR_TO_DATE(`{column}`, '%Y-%m-%d')
+            WHERE `{column}` REGEXP '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+            """
+        )
+        with self.engine.begin() as conn:
+            conn.execute(update_ymd)
+            conn.execute(update_iso)
+            conn.execute(text(f"ALTER TABLE `{table}` MODIFY COLUMN `{column}` {target_def}"))
+        self.logger.info("表 %s.%s 已调整为 %s。", table, column, target_def)
+
+    def _ensure_unique_index_if_clean(
+        self, table: str, index: str, columns: Iterable[str]
+    ) -> None:
+        if self._index_exists(table, index):
+            return
+        cols = [str(c) for c in columns if c]
+        if not cols:
+            return
+        col_sql = ", ".join(f"`{c}`" for c in cols)
+        dup_cols = ", ".join(f"`{c}`" for c in cols)
+        dup_stmt = text(
+            f"""
+            SELECT {dup_cols}, COUNT(*) AS cnt
+            FROM `{table}`
+            GROUP BY {dup_cols}
+            HAVING cnt > 1
+            LIMIT 1
+            """
+        )
+        with self.engine.connect() as conn:
+            dup_row = conn.execute(dup_stmt).mappings().first()
+        if dup_row:
+            self.logger.warning(
+                "表 %s 存在重复键，已跳过创建唯一索引 %s。", table, index
+            )
+            return
+        with self.engine.begin() as conn:
+            conn.execute(text(f"CREATE UNIQUE INDEX `{index}` ON `{table}` ({col_sql})"))
+        self.logger.info("表 %s 已新增唯一索引 %s。", table, index)
+
+    def _ensure_lhb_detail_table(self) -> None:
+        table = "a_share_lhb_detail"
+        columns = {
+            "序号": "BIGINT NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "名称": "VARCHAR(255) NULL",
+            "上榜日": "DATE NULL",
+            "解读": "VARCHAR(255) NULL",
+            "收盘价": "DOUBLE NULL",
+            "涨跌幅": "DOUBLE NULL",
+            "龙虎榜净买额": "DOUBLE NULL",
+            "龙虎榜买入额": "DOUBLE NULL",
+            "龙虎榜卖出额": "DOUBLE NULL",
+            "龙虎榜成交额": "DOUBLE NULL",
+            "市场总成交额": "DOUBLE NULL",
+            "净买额占总成交比": "DOUBLE NULL",
+            "成交额占总成交比": "DOUBLE NULL",
+            "换手率": "DOUBLE NULL",
+            "流通市值": "DOUBLE NULL",
+            "上榜原因": "VARCHAR(255) NULL",
+            "上榜后1日": "DOUBLE NULL",
+            "上榜后2日": "DOUBLE NULL",
+            "上榜后5日": "DOUBLE NULL",
+            "上榜后10日": "DOUBLE NULL",
+            "trade_date": "DATE NOT NULL",
+        }
+        if not self._table_exists(table):
+            self._create_table(table, columns)
+        else:
+            self._add_missing_columns(table, columns)
+        self._ensure_varchar_length(table, "code", 20)
+        self._ensure_varchar_length(table, "名称", 255)
+        self._ensure_varchar_length(table, "上榜原因", 255)
+        self._ensure_yyyymmdd_date_column(table, "trade_date", not_null=False)
+        self._ensure_yyyymmdd_date_column(table, "上榜日", not_null=False)
+
+        trade_idx = "idx_a_share_lhb_detail_trade_date"
+        if not self._index_exists(table, trade_idx):
+            with self.engine.begin() as conn:
+                conn.execute(text(f"CREATE INDEX `{trade_idx}` ON `{table}` (`trade_date`)"))
+            self.logger.info("表 %s 已新增索引 %s。", table, trade_idx)
+
+        code_trade_idx = "idx_a_share_lhb_detail_code_trade_date"
+        if not self._index_exists(table, code_trade_idx):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"CREATE INDEX `{code_trade_idx}` ON `{table}` (`code`, `trade_date`)"
+                    )
+                )
+            self.logger.info("表 %s 已新增索引 %s。", table, code_trade_idx)
+
+    def _ensure_margin_detail_table(self) -> None:
+        table = "a_share_margin_detail"
+        columns = {
+            "信用交易日期": "DATE NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "标的证券简称": "VARCHAR(255) NULL",
+            "融资余额": "DOUBLE NULL",
+            "融资买入额": "DOUBLE NULL",
+            "融资偿还额": "DOUBLE NULL",
+            "融券余量": "DOUBLE NULL",
+            "融券卖出量": "DOUBLE NULL",
+            "融券偿还量": "DOUBLE NULL",
+            "trade_date": "DATE NOT NULL",
+            "exchange": "VARCHAR(8) NULL",
+            "证券简称": "VARCHAR(255) NULL",
+            "融券余额": "DOUBLE NULL",
+            "融资融券余额": "DOUBLE NULL",
+        }
+        if not self._table_exists(table):
+            self._create_table(table, columns)
+        else:
+            self._add_missing_columns(table, columns)
+        self._ensure_varchar_length(table, "code", 20)
+        self._ensure_varchar_length(table, "exchange", 8)
+        self._ensure_varchar_length(table, "标的证券简称", 255)
+        self._ensure_varchar_length(table, "证券简称", 255)
+        self._ensure_yyyymmdd_date_column(table, "trade_date", not_null=False)
+        self._ensure_yyyymmdd_date_column(table, "信用交易日期", not_null=False)
+
+        trade_idx = "idx_a_share_margin_detail_trade_date"
+        if not self._index_exists(table, trade_idx):
+            with self.engine.begin() as conn:
+                conn.execute(text(f"CREATE INDEX `{trade_idx}` ON `{table}` (`trade_date`)"))
+            self.logger.info("表 %s 已新增索引 %s。", table, trade_idx)
+
+        code_trade_idx = "idx_a_share_margin_detail_code_trade_date"
+        if not self._index_exists(table, code_trade_idx):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"CREATE INDEX `{code_trade_idx}` ON `{table}` (`code`, `trade_date`)"
+                    )
+                )
+            self.logger.info("表 %s 已新增索引 %s。", table, code_trade_idx)
+
+        unique_idx = "ux_a_share_margin_detail_exchange_code_trade_date"
+        self._ensure_unique_index_if_clean(table, unique_idx, ("exchange", "code", "trade_date"))
+
+    def _ensure_gdhs_tables(self) -> None:
+        summary = "a_share_gdhs"
+        summary_cols = {
+            "code": "VARCHAR(20) NOT NULL",
+            "名称": "VARCHAR(255) NULL",
+            "最新价": "DOUBLE NULL",
+            "涨跌幅": "DOUBLE NULL",
+            "股东户数-本次": "BIGINT NULL",
+            "股东户数-上次": "BIGINT NULL",
+            "股东户数-增减": "BIGINT NULL",
+            "股东户数-增减比例": "DOUBLE NULL",
+            "区间涨跌幅": "DOUBLE NULL",
+            "period": "DATE NOT NULL",
+            "股东户数统计截止日-上次": "DATE NULL",
+            "户均持股市值": "DOUBLE NULL",
+            "户均持股数量": "DOUBLE NULL",
+            "总市值": "DOUBLE NULL",
+            "总股本": "DOUBLE NULL",
+            "公告日期": "DATE NULL",
+        }
+        if not self._table_exists(summary):
+            self._create_table(summary, summary_cols)
+        else:
+            self._add_missing_columns(summary, summary_cols)
+        self._ensure_varchar_length(summary, "code", 20)
+        self._ensure_varchar_length(summary, "名称", 255)
+        self._ensure_yyyymmdd_date_column(summary, "period", not_null=False)
+        self._ensure_yyyymmdd_date_column(summary, "股东户数统计截止日-上次", not_null=False)
+        self._ensure_yyyymmdd_date_column(summary, "公告日期", not_null=False)
+        self._ensure_unique_index_if_clean(summary, "ux_a_share_gdhs_code_period", ("code", "period"))
+
+        detail = "a_share_gdhs_detail"
+        detail_cols = {
+            "period": "DATE NOT NULL",
+            "区间涨跌幅": "DOUBLE NULL",
+            "股东户数-本次": "BIGINT NULL",
+            "股东户数-上次": "BIGINT NULL",
+            "股东户数-增减": "BIGINT NULL",
+            "股东户数-增减比例": "DOUBLE NULL",
+            "户均持股市值": "DOUBLE NULL",
+            "户均持股数量": "DOUBLE NULL",
+            "总市值": "DOUBLE NULL",
+            "总股本": "DOUBLE NULL",
+            "股本变动": "DOUBLE NULL",
+            "股本变动原因": "TEXT NULL",
+            "股东户数公告日期": "DATE NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "名称": "VARCHAR(255) NULL",
+        }
+        if not self._table_exists(detail):
+            self._create_table(detail, detail_cols)
+        else:
+            self._add_missing_columns(detail, detail_cols)
+        self._ensure_varchar_length(detail, "code", 20)
+        self._ensure_varchar_length(detail, "名称", 255)
+        self._ensure_yyyymmdd_date_column(detail, "period", not_null=False)
+        self._ensure_yyyymmdd_date_column(detail, "股东户数公告日期", not_null=False)
+        self._ensure_unique_index_if_clean(detail, "ux_a_share_gdhs_detail_code_period", ("code", "period"))
 
     # ---------- Base dims/facts ----------
     def _ensure_dim_stock_basic_view(self) -> None:
@@ -1986,19 +2237,27 @@ class SchemaManager:
               ELSE (q.`live_latest` - daily.`ma20`) / daily.`atr14`
             END
         """
-        gate_action_expr = """
+        effective_regime_expr = """
             CASE
-              WHEN UPPER(COALESCE(daily.`regime`, '')) IN ('BREAKDOWN', 'BEAR_CONFIRMED')
+              WHEN UPPER(COALESCE(weekly.`weekly_risk_level`, '')) = 'HIGH'
+                AND UPPER(COALESCE(daily.`regime`, '')) = 'RISK_ON'
+                THEN 'RISK_OFF'
+              ELSE daily.`regime`
+            END
+        """
+        gate_action_expr = f"""
+            CASE
+              WHEN UPPER(COALESCE({effective_regime_expr}, '')) IN ('BREAKDOWN', 'BEAR_CONFIRMED')
                 THEN 'STOP'
-              WHEN UPPER(COALESCE(daily.`regime`, '')) = 'RISK_OFF'
+              WHEN UPPER(COALESCE({effective_regime_expr}, '')) = 'RISK_OFF'
                 THEN 'WAIT'
-              WHEN UPPER(COALESCE(daily.`regime`, '')) = 'PULLBACK'
+              WHEN UPPER(COALESCE({effective_regime_expr}, '')) = 'PULLBACK'
                 THEN CASE
                   WHEN daily.`position_hint` IS NOT NULL AND daily.`position_hint` <= 0.3
                     THEN 'WAIT'
                   ELSE 'ALLOW'
                 END
-              WHEN UPPER(COALESCE(daily.`regime`, '')) = 'RISK_ON'
+              WHEN UPPER(COALESCE({effective_regime_expr}, '')) = 'RISK_ON'
                 THEN 'ALLOW'
               WHEN daily.`position_hint` IS NOT NULL THEN CASE
                 WHEN daily.`position_hint` <= 0 THEN 'STOP'
@@ -2029,7 +2288,8 @@ class SchemaManager:
               env.`env_live_event_tags`,
               env.`env_live_reason`,
               daily.`score` AS `env_index_score`,
-              daily.`regime` AS `env_regime`,
+              daily.`regime` AS `env_regime_raw`,
+              {effective_regime_expr} AS `env_regime`,
               daily.`position_hint` AS `env_position_hint`,
               weekly.`weekly_gate_policy` AS `env_weekly_gate_policy`,
               weekly.`weekly_risk_level` AS `env_weekly_risk_level`,
@@ -2072,7 +2332,7 @@ class SchemaManager:
               {gate_action_expr} AS `env_index_gate_action`,
               CONCAT(
                 'regime=',
-                COALESCE(daily.`regime`, ''),
+                COALESCE({effective_regime_expr}, ''),
                 ' pos_hint=',
                 COALESCE(daily.`position_hint`, '')
               ) AS `env_index_gate_reason`,

@@ -6,7 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, TypedDict
 
 import pandas as pd
 from sqlalchemy import bindparam, text
@@ -17,6 +17,8 @@ from .config import get_section
 from .db import DatabaseConfig, MySQLWriter
 from .env_snapshot_utils import load_trading_calendar
 from .ma5_ma20_trend_strategy import _atr, _macd
+from .open_monitor_df import normalize_asof_indicators
+from .open_monitor_persist import OpenMonitorPersister
 from .utils.convert import to_float as _to_float
 
 
@@ -35,6 +37,14 @@ READY_SIGNALS_REQUIRED_COLS = (
     "ma20",
     "atr14",
 )
+
+
+class RunContext(TypedDict):
+    run_pk: int | None
+    run_id: str | None
+    params_json: str | None
+    dedup_sig: Any
+    dedup_stage: Any
 
 
 def _normalize_snapshot_value(value: Any) -> Any:  # noqa: ANN401
@@ -102,7 +112,7 @@ def calc_run_id(ts: dt.datetime, run_id_minutes: int | None) -> str:
     return slot_text
 
 
-class OpenMonitorRepository:
+class OpenMonitorSqlStore:
     """开盘监测数据访问层，集中管理 SQL 与表结构。"""
 
     def __init__(self, engine, logger, params) -> None:
@@ -748,10 +758,19 @@ class OpenMonitorRepository:
         stmt = (
             text(
                 f"""
-                SELECT `trade_date`, `code`,
-                       `close`, `avg_volume_20`,
-                       `ma5`, `ma20`, `ma60`, `ma250`,
-                       `vol_ratio`, `macd_hist`, `kdj_k`, `kdj_d`, `atr14`
+                SELECT `trade_date` AS `asof_trade_date`,
+                       `code`,
+                       `close` AS `asof_close`,
+                       `avg_volume_20` AS `asof_avg_volume_20`,
+                       `ma5` AS `asof_ma5`,
+                       `ma20` AS `asof_ma20`,
+                       `ma60` AS `asof_ma60`,
+                       `ma250` AS `asof_ma250`,
+                       `vol_ratio` AS `asof_vol_ratio`,
+                       `macd_hist` AS `asof_macd_hist`,
+                       `kdj_k` AS `asof_kdj_k`,
+                       `kdj_d` AS `asof_kdj_d`,
+                       `atr14` AS `asof_atr14`
                 FROM `{table}`
                 WHERE `trade_date` = :d AND `code` IN :codes
                 """
@@ -760,7 +779,13 @@ class OpenMonitorRepository:
         )
         try:
             with self.engine.begin() as conn:
-                return pd.read_sql_query(stmt, conn, params={"d": latest_trade_date, "codes": codes})
+                df = pd.read_sql_query(
+                    stmt,
+                    conn,
+                    params={"d": latest_trade_date, "codes": codes},
+                )
+            df = normalize_asof_indicators(df)
+            return df
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取指标表 %s 失败：%s", table, exc)
             return pd.DataFrame()
@@ -1010,9 +1035,17 @@ class OpenMonitorRepository:
             except Exception as exc:  # noqa: BLE001
                 self.logger.debug("读取 %s 失败：%s", table, exc)
                 continue
-            if not df.empty:
-                df["code"] = df["code"].astype(str)
-                return df
+            if df.empty:
+                continue
+            if "code" not in df.columns:
+                self.logger.warning("Industry dim table %s missing code column; skipped.", table)
+                continue
+            df["code"] = df["code"].astype(str)
+            keep_cols = ["code", "name", "industry", "board_name", "board_code"]
+            existing = [c for c in keep_cols if c in df.columns]
+            if existing:
+                df = df[existing]
+            return df
         return pd.DataFrame()
 
     def load_board_constituent_dim(self) -> pd.DataFrame:
@@ -1035,14 +1068,25 @@ class OpenMonitorRepository:
         monitor_date: str,
         *,
         stage: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> RunContext | None:
         table = getattr(self.params, "run_table", None)
         if not (table and monitor_date and self._table_exists(table)):
             return None
 
+        parsed_monitor = pd.to_datetime(monitor_date, errors="coerce")
+        if pd.isna(parsed_monitor):
+            self.logger.debug("Ignoring invalid monitor_date for run_context: %s", monitor_date)
+            return None
+        monitor_date_val = parsed_monitor.date().isoformat()
+
+        allowed_stages = {"PREOPEN", "BREAK", "POSTCLOSE", "INTRADAY"}
         stage_norm = (str(stage).strip().upper() if stage else "") or None
+        if stage_norm and stage_norm not in allowed_stages:
+            self.logger.debug("Ignoring invalid run_stage for run_context: %s", stage_norm)
+            stage_norm = None
+
         where_clauses = ["`monitor_date` = :d"]
-        params: dict[str, Any] = {"d": monitor_date}
+        params: dict[str, Any] = {"d": monitor_date_val}
 
         has_run_stage = self._column_exists(table, "run_stage")
         if stage_norm in {"PREOPEN", "BREAK", "POSTCLOSE", "INTRADAY"}:
@@ -1106,8 +1150,15 @@ class OpenMonitorRepository:
         if not isinstance(parsed, dict):
             parsed = {}
 
+        run_pk = None
+        if run_pk_val is not None:
+            try:
+                run_pk = int(run_pk_val)
+            except (TypeError, ValueError):
+                self.logger.debug("Invalid run_pk in run_context: %s", run_pk_val)
+
         return {
-            "run_pk": int(run_pk_val) if run_pk_val is not None else None,
+            "run_pk": run_pk,
             "run_id": str(run_id_val) if run_id_val is not None else None,
             "params_json": params_json_raw,
             "dedup_sig": parsed.get("dedup_sig"),
@@ -1697,28 +1748,31 @@ class OpenMonitorRepository:
         if quotes.empty:
             return
 
-        monitor_dates = quotes["monitor_date"].dropna().astype(str).unique().tolist()
-        if self._table_exists(table) and monitor_dates:
-            for monitor in monitor_dates:
-                run_pks = (
-                    quotes.loc[quotes["monitor_date"].astype(str) == monitor, "run_pk"]
-                    .dropna()
-                    .unique()
-                    .tolist()
+        if self._table_exists(table):
+            quotes["monitor_date_str"] = quotes["monitor_date"].astype(str)
+            quotes["code_str"] = quotes["code"].astype(str)
+            delete_calls = 0
+            deleted_rows = 0
+            for (monitor_date_str, run_pk), group in quotes.groupby(
+                ["monitor_date_str", "run_pk"]
+            ):
+                run_pk_codes = group["code_str"].dropna().unique().tolist()
+                if not run_pk_codes:
+                    continue
+                deleted_rows += self._delete_existing_run_rows(
+                    table,
+                    monitor_date_str,
+                    int(run_pk),
+                    run_pk_codes,
                 )
-                for run_pk in run_pks:
-                    run_pk_codes = quotes.loc[
-                        (quotes["monitor_date"].astype(str) == monitor)
-                        & (quotes["run_pk"] == run_pk),
-                        "code",
-                    ].dropna().astype(str).unique().tolist()
-                    if run_pk_codes:
-                        self._delete_existing_run_rows(
-                            table,
-                            monitor,
-                            int(run_pk),
-                            run_pk_codes,
-                        )
+                delete_calls += 1
+            if delete_calls:
+                self.logger.debug(
+                    "open_monitor quote snapshot delete calls=%s rows=%s",
+                    delete_calls,
+                    deleted_rows,
+                )
+            quotes = quotes.drop(columns=["monitor_date_str", "code_str"])
 
         try:
             self.db_writer.write_dataframe(quotes, table, if_exists="append")
@@ -1862,3 +1916,36 @@ class OpenMonitorRepository:
         except Exception as exc:  # noqa: BLE001
             self.logger.debug("读取开盘监测视图 %s 失败：%s", view, exc)
             return pd.DataFrame()
+ 
+ 
+class OpenMonitorRepository:
+    """Facade for open monitor SQL store and persister."""
+
+    def __init__(self, engine, logger, params) -> None:
+        self.store = OpenMonitorSqlStore(engine, logger, params)
+        self.engine = self.store.engine
+        self.logger = self.store.logger
+        self.params = self.store.params
+        self.db_writer = self.store.db_writer
+        self.persister = OpenMonitorPersister(
+            engine=self.engine,
+            logger=self.logger,
+            params=self.params,
+            db_writer=self.db_writer,
+            table_exists=self.store._table_exists,
+            get_table_columns=self.store._get_table_columns,
+            make_snapshot_hash=make_snapshot_hash,
+        )
+
+    @property
+    def ready_signals_used(self) -> bool:
+        return self.store.ready_signals_used
+
+    def persist_quote_snapshots(self, df: pd.DataFrame) -> None:
+        self.persister.persist_quote_snapshots(df)
+
+    def persist_results(self, df: pd.DataFrame) -> None:
+        self.persister.persist_results(df)
+
+    def __getattr__(self, name: str):  # noqa: ANN204
+        return getattr(self.store, name)

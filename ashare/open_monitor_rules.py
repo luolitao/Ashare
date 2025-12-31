@@ -184,6 +184,8 @@ class DecisionContext:
     max_gap_down: float | None = None
     sig_ma20: float | None = None
     ma20_thresh: float | None = None
+    ma20_prewarn: bool = False
+    ma20_prewarn_reason: str | None = None
     limit_up_trigger: float | None = None
     runup_breach: bool = False
     runup_breach_reason: str | None = None

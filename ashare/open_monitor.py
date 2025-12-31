@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, List
 
@@ -131,6 +132,98 @@ class OpenMonitorParams:
     live_retest_pct: float = 0.003
     live_retest_atr_mult: float = 0.5
 
+    def validate(self, logger: logging.Logger) -> "OpenMonitorParams":
+        params = self
+
+        def _reset(field: str, reason: str) -> None:
+            nonlocal params
+            default_val = getattr(OpenMonitorParams, field)
+            logger.warning(
+                "open_monitor param %s invalid (%s); fallback=%s",
+                field,
+                reason,
+                default_val,
+            )
+            params = replace(params, **{field: default_val})
+
+        def _ensure_min_int(field: str, min_val: int) -> None:
+            val = getattr(params, field)
+            try:
+                val_int = int(val)
+            except Exception:
+                _reset(field, "not int")
+                return
+            if val_int < min_val:
+                _reset(field, f"<{min_val}")
+                return
+            if val_int != val:
+                params = replace(params, **{field: val_int})
+
+        def _ensure_float_range(field: str, min_val: float, max_val: float) -> None:
+            val = getattr(params, field)
+            try:
+                val_float = float(val)
+            except Exception:
+                _reset(field, "not float")
+                return
+            if (not math.isfinite(val_float)) or val_float < min_val or val_float > max_val:
+                _reset(field, f"range {min_val}..{max_val}")
+                return
+            if val_float != val:
+                params = replace(params, **{field: val_float})
+
+        _ensure_min_int("signal_lookback_days", 1)
+        _ensure_min_int("interval_minutes", 1)
+        _ensure_min_int("run_id_minutes", 1)
+        _ensure_min_int("export_top_n", 0)
+
+        if params.run_id_minutes < params.interval_minutes:
+            logger.warning(
+                "open_monitor param run_id_minutes < interval_minutes; clamp to %s",
+                params.interval_minutes,
+            )
+            params = replace(params, run_id_minutes=params.interval_minutes)
+
+        mode = str(params.output_mode or "").strip().upper()
+        if mode not in {"FULL", "COMPACT"}:
+            _reset("output_mode", "invalid enum")
+        elif mode != params.output_mode:
+            params = replace(params, output_mode=mode)
+
+        quote_source = str(params.quote_source or "").strip().lower()
+        if quote_source == "auto":
+            logger.warning("open_monitor quote_source=auto; using eastmoney")
+            quote_source = "eastmoney"
+        if quote_source not in {"eastmoney", "akshare"}:
+            _reset("quote_source", "invalid enum")
+        elif quote_source != params.quote_source:
+            params = replace(params, quote_source=quote_source)
+
+        _ensure_float_range("live_breakout_high_eps", 0.0, 0.1)
+        _ensure_float_range("live_breakout_latest_eps", 0.0, 0.1)
+        _ensure_float_range("live_retest_pct", 0.0, 0.1)
+        _ensure_float_range("live_retest_atr_mult", 0.0, 10.0)
+
+        name_pattern = re.compile(r"^[A-Za-z0-9_]+$")
+        name_fields = [
+            "ready_signals_view",
+            "quote_table",
+            "output_table",
+            "run_table",
+            "open_monitor_view",
+            "open_monitor_wide_view",
+            "open_monitor_env_view",
+            "open_monitor_env_table",
+            "weekly_indicator_table",
+            "daily_indicator_table",
+        ]
+        for field in name_fields:
+            val = getattr(params, field)
+            if not isinstance(val, str) or not name_pattern.match(val):
+                _reset(field, "invalid name")
+
+        return params
+
     @classmethod
     def from_config(cls) -> "OpenMonitorParams":
         sec = get_section("open_monitor") or {}
@@ -169,8 +262,6 @@ class OpenMonitorParams:
                 return default
 
         quote_source = str(sec.get("quote_source", cls.quote_source)).strip().lower() or "auto"
-        if quote_source == "auto":
-            quote_source = "eastmoney"
 
         interval_minutes = _get_int("interval_minutes", cls.interval_minutes)
 
@@ -181,7 +272,7 @@ class OpenMonitorParams:
             else interval_minutes
         )
 
-        return cls(
+        params = cls(
             enabled=_get_bool("enabled", cls.enabled),
             ready_signals_view=str(
                 sec.get("ready_signals_view", cls.ready_signals_view)
@@ -252,6 +343,7 @@ class OpenMonitorParams:
                 "live_retest_atr_mult", cls.live_retest_atr_mult
             ),
         )
+        return params.validate(logger)
 
 
 class MA5MA20OpenMonitorRunner:
@@ -387,22 +479,6 @@ class MA5MA20OpenMonitorRunner:
             codes = signals["code"].dropna().astype(str).unique().tolist()
             asof_df = self.repo.load_latest_indicators(latest_trade_date, codes)
             if asof_df is not None and not asof_df.empty:
-                asof_df = asof_df.copy()
-                asof_df["code"] = asof_df["code"].astype(str)
-                asof_df = asof_df.rename(
-                    columns={
-                        "trade_date": "asof_trade_date",
-                        "close": "asof_close",
-                        "ma5": "asof_ma5",
-                        "ma20": "asof_ma20",
-                        "ma60": "asof_ma60",
-                        "ma250": "asof_ma250",
-                        "vol_ratio": "asof_vol_ratio",
-                        "macd_hist": "asof_macd_hist",
-                        "atr14": "asof_atr14",
-                        "avg_volume_20": "asof_avg_volume_20",
-                    }
-                )
                 signals = signals.merge(asof_df, on="code", how="left")
                 if "avg_volume_20" in signals.columns and "asof_avg_volume_20" in signals.columns:
                     signals["avg_volume_20"] = signals["avg_volume_20"].fillna(
@@ -535,6 +611,14 @@ class MA5MA20OpenMonitorRunner:
             "position_cap": env_context.get("env_final_cap_pct"),
             "reason": env_context.get("env_final_reason_json"),
         }
+        reason_matrix = None
+        if env_instruction.get("reason"):
+            try:
+                reason_payload = json.loads(env_instruction["reason"])
+                if isinstance(reason_payload, dict):
+                    reason_matrix = reason_payload.get("risk_emotion_matrix")
+            except Exception:
+                reason_matrix = None
         env_payload = {
             "env_final_gate_action": env_instruction.get("gate_status"),
             "env_final_cap_pct": env_instruction.get("position_cap"),
@@ -545,14 +629,20 @@ class MA5MA20OpenMonitorRunner:
             "weekly_scene_code": env_context.get("weekly_scene_code"),
             "index_score": env_context.get("index_score"),
             "regime": env_context.get("regime"),
+            "regime_raw": env_context.get("regime_raw"),
             "position_hint": env_context.get("position_hint"),
         }
         env_final_gate_action = env_instruction.get("gate_status")
         self.logger.info(
-            "已构建环境快照（monitor_date=%s, run_id=%s, gate=%s）。",
+            "已构建环境快照（monitor_date=%s, run_id=%s, gate=%s, cap=%s, regime=%s(raw=%s), weekly_risk=%s, matrix=%s）。",
             monitor_date,
             run_id,
             env_final_gate_action,
+            env_instruction.get("position_cap"),
+            env_context.get("regime"),
+            env_context.get("regime_raw"),
+            env_context.get("weekly_risk_level"),
+            reason_matrix,
         )
         result = self.evaluator.evaluate(
             signals,

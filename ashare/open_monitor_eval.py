@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+from time import perf_counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
@@ -12,6 +13,7 @@ from typing import Any, List
 import pandas as pd
 
 from .config import get_section
+from .open_monitor_df import coalesce_asof_from_sig
 from .open_monitor_repo import calc_run_id, make_snapshot_hash
 from .open_monitor_rules import DecisionContext, MarketEnvironment, RuleEngine
 from .utils.convert import to_float as _to_float
@@ -360,9 +362,15 @@ class OpenMonitorEvaluator:
         limit_up_trigger = self.rule_config.limit_up_trigger_pct
         stop_atr_mult = self.rule_config.stop_atr_mult
         runup_atr_max = self.rule_config.runup_atr_max
+        runup_atr_vol_mult = self.rule_config.runup_atr_vol_mult
+        runup_atr_max_cap = self.rule_config.runup_atr_max_cap
         pullback_runup_atr_max = self.rule_config.pullback_runup_atr_max
         pullback_runup_dev_ma20_atr_min = self.rule_config.pullback_runup_dev_ma20_atr_min
         runup_atr_tol = self.rule_config.runup_atr_tol
+        ma20_atr_tol_mult = self.rule_config.ma20_atr_tol_mult
+        ma20_dyn_min_pct = self.rule_config.ma20_dyn_min_pct
+        ma20_prewarn_buffer_pct = self.rule_config.ma20_prewarn_buffer_pct
+        below_ma20_tol_pct = self.rule_config.below_ma20_tol_pct
         for _, row in merged.iterrows():
             sig_reason_text = str(row.get("sig_reason") or row.get("reason") or "")
             is_pullback = self._is_pullback_signal(sig_reason_text)
@@ -402,6 +410,9 @@ class OpenMonitorEvaluator:
             sig_ma5 = _to_float(row.get("sig_ma5"))
             sig_ma20 = _to_float(row.get("sig_ma20"))
             sig_atr14 = _to_float(row.get("sig_atr14"))
+            atr_pct = None
+            if sig_atr14 is not None and sig_ma20 is not None and sig_ma20 != 0:
+                atr_pct = sig_atr14 / sig_ma20
 
             dev_ma5 = None
             dev_ma20 = None
@@ -444,6 +455,29 @@ class OpenMonitorEvaluator:
                 threshold_gap_up = min(max_up, atr_gap)
 
             ma20_thresh = pullback_min_vs_ma20 if is_pullback else min_vs_ma20
+            if atr_pct is not None and ma20_atr_tol_mult is not None:
+                dyn_thresh = -ma20_atr_tol_mult * atr_pct
+                ma20_thresh = min(ma20_thresh, dyn_thresh)
+                if ma20_dyn_min_pct is not None:
+                    ma20_thresh = max(ma20_thresh, ma20_dyn_min_pct)
+
+            ma20_prewarn = False
+            ma20_prewarn_reason = None
+            if (
+                price_now is not None
+                and sig_ma20 is not None
+                and ma20_thresh is not None
+                and below_ma20_tol_pct is not None
+            ):
+                invalid_cut = sig_ma20 * (1 + ma20_thresh - below_ma20_tol_pct)
+                prewarn_cut = sig_ma20 * (
+                    1 + ma20_thresh - below_ma20_tol_pct + ma20_prewarn_buffer_pct
+                )
+                if price_now < prewarn_cut and price_now >= invalid_cut:
+                    ma20_prewarn = True
+                    ma20_prewarn_reason = (
+                        f"near_ma20_cut price={price_now:.2f} prewarn={prewarn_cut:.2f}"
+                    )
 
             chip_score = _to_float(row.get("sig_chip_score"))
             chip_reason = row.get("sig_chip_reason")
@@ -467,6 +501,10 @@ class OpenMonitorEvaluator:
             if price_now is not None:
                 dev_ma20_atr_val = dev_ma20_atr
                 runup_limit = pullback_runup_atr_max if is_pullback else runup_atr_max
+                if atr_pct is not None and runup_limit is not None and runup_atr_vol_mult is not None:
+                    runup_limit = runup_limit + runup_atr_vol_mult * atr_pct
+                    if runup_atr_max_cap is not None:
+                        runup_limit = min(runup_limit, runup_atr_max_cap)
                 breach, breach_reason = evaluate_runup_breach(
                     runup_metrics,
                     runup_atr_max=runup_limit,
@@ -502,6 +540,8 @@ class OpenMonitorEvaluator:
                 max_gap_down=max_down,
                 sig_ma20=sig_ma20,
                 ma20_thresh=ma20_thresh,
+                ma20_prewarn=ma20_prewarn,
+                ma20_prewarn_reason=ma20_prewarn_reason,
                 signal_age=signal_age,
                 limit_up_trigger=limit_up_trigger,
                 runup_breach=breach,
@@ -620,28 +660,7 @@ class OpenMonitorEvaluator:
         merged["strength_trend"] = strength_trend_list
         merged["strength_note"] = strength_note_list
 
-        def _coalesce_numeric_into(target: str, fallback: str) -> None:
-            if target not in merged.columns:
-                merged[target] = None
-            if fallback not in merged.columns:
-                return
-            left = pd.to_numeric(merged[target], errors="coerce")
-            right = pd.to_numeric(merged[fallback], errors="coerce")
-            merged[target] = left.fillna(right)
-
-        if "asof_trade_date" in merged.columns and "sig_date" in merged.columns:
-            mask = merged["asof_trade_date"].notna()
-            merged["asof_trade_date"] = merged["asof_trade_date"].where(mask, merged["sig_date"])
-
-        _coalesce_numeric_into("asof_close", "sig_close")
-        _coalesce_numeric_into("asof_ma5", "sig_ma5")
-        _coalesce_numeric_into("asof_ma20", "sig_ma20")
-        _coalesce_numeric_into("asof_ma60", "sig_ma60")
-        _coalesce_numeric_into("asof_ma250", "sig_ma250")
-        _coalesce_numeric_into("asof_vol_ratio", "sig_vol_ratio")
-        _coalesce_numeric_into("asof_macd_hist", "sig_macd_hist")
-        _coalesce_numeric_into("asof_atr14", "sig_atr14")
-        _coalesce_numeric_into("asof_stop_ref", "sig_stop_ref")
+        merged = coalesce_asof_from_sig(merged)
 
         full_keep_cols = [
             "monitor_date",
@@ -1054,6 +1073,7 @@ class OpenMonitorEvaluator:
     def export_csv(self, df: pd.DataFrame) -> None:
         if df.empty or (not self.params.export_csv):
             return
+        t0 = perf_counter()
 
         app_sec = get_section("app") or {}
         base_dir = "output"
@@ -1112,4 +1132,11 @@ class OpenMonitorEvaluator:
             export_df = export_df.head(self.params.export_top_n)
 
         export_df.to_csv(path, index=False, encoding="utf-8-sig")
-        self.logger.info("开盘监测 CSV 已导出：%s", path)
+        elapsed = perf_counter() - t0
+        self.logger.info(
+            "open_monitor CSV exported: %s rows=%s top_n=%s elapsed=%.3fs",
+            path,
+            len(export_df),
+            self.params.export_top_n,
+            elapsed,
+        )

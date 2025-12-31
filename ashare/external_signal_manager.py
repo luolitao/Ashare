@@ -97,7 +97,7 @@ class ExternalSignalManager:
             self.logger.info("表 %s 本次无新增数据，跳过写入。", table)
             return
 
-        deduped = df.copy()
+        deduped = df.drop_duplicates().copy()
         if subset:
             deduped.drop_duplicates(subset=list(subset), keep="last", inplace=True)
 
@@ -221,6 +221,9 @@ class ExternalSignalManager:
                 df[col] = df[col].apply(
                     lambda x: self._to_yyyymmdd(x) or normalized_default
                 )
+        self._coerce_yyyymmdd_date_column(df, "trade_date")
+        for col in ["上榜日", "信用交易日期", "日期", "交易日期"]:
+            self._coerce_yyyymmdd_date_column(df, col)
 
     def _normalize_period(self, df: pd.DataFrame, period: str | None = None) -> None:
         self._rename_first(
@@ -241,6 +244,7 @@ class ExternalSignalManager:
             or fallback_period
             or ("" if pd.isna(x) else str(x))
         )
+        self._coerce_yyyymmdd_date_column(df, "period")
 
     def _normalize_exchange(self, df: pd.DataFrame, exchange: str) -> None:
         self._rename_first(df, ["exchange", "交易所"], "exchange")
@@ -261,6 +265,28 @@ class ExternalSignalManager:
         if "." in code:
             return code.split(".", 1)[1]
         return code
+
+    def _coerce_yyyymmdd_date_column(self, df: pd.DataFrame, column: str) -> None:
+        if column not in df.columns:
+            return
+        series = df[column].apply(lambda x: self._to_yyyymmdd(x))
+        parsed = pd.to_datetime(series, format="%Y%m%d", errors="coerce")
+        df[column] = parsed.dt.date
+
+    def _coerce_any_date_column(self, df: pd.DataFrame, column: str) -> None:
+        if column not in df.columns:
+            return
+        df[column] = pd.to_datetime(df[column], errors="coerce").dt.date
+
+    def _normalize_security_name(self, df: pd.DataFrame) -> None:
+        if "证券简称" not in df.columns and "标的证券简称" in df.columns:
+            df.rename(columns={"标的证券简称": "证券简称"}, inplace=True)
+            return
+        if "证券简称" in df.columns and "标的证券简称" in df.columns:
+            df["证券简称"] = df["证券简称"].where(
+                df["证券简称"].notna(), df["标的证券简称"]
+            )
+            df.drop(columns=["标的证券简称"], inplace=True)
 
     # =========================
     # Trade-date backoff (核心：取最近一次可用数据)
@@ -436,6 +462,8 @@ class ExternalSignalManager:
         used_date_for_norm = used_iso or trade_date
         self._normalize_code_column(df)
         self._normalize_trade_date(df, used_date_for_norm)
+        if "上榜日" not in df.columns and "trade_date" in df.columns:
+            df["上榜日"] = df["trade_date"]
         subset = [col for col in ["code", "trade_date", "上榜日", "上榜原因"] if col in df.columns]
         self._upsert(df, "a_share_lhb_detail", subset=subset or None)
         return df
@@ -466,6 +494,9 @@ class ExternalSignalManager:
             self._normalize_code_column(df)
             self._normalize_trade_date(df, used_date_for_norm)
             self._normalize_exchange(df, exchange)
+            self._normalize_security_name(df)
+            if "信用交易日期" in df.columns and "trade_date" in df.columns:
+                df["信用交易日期"] = df["trade_date"]
             frames.append(df)
 
         if not frames:
@@ -494,6 +525,8 @@ class ExternalSignalManager:
                 period = str(period_from_data.iloc[0])
             self._normalize_code_column(summary_df)
             self._normalize_period(summary_df, period)
+            for col in ["股东户数统计截止日-上次", "公告日期"]:
+                self._coerce_any_date_column(summary_df, col)
             summary_subset = [col for col in ["code", "period"] if col in summary_df.columns]
             self._upsert(summary_df, "a_share_gdhs", subset=summary_subset or None)
         else:
@@ -528,6 +561,7 @@ class ExternalSignalManager:
 
         self._normalize_period(detail_df, period)
         self._normalize_code_column(detail_df)
+        self._coerce_any_date_column(detail_df, "股东户数公告日期")
         subset = [col for col in ["code", "period"] if col in detail_df.columns]
         self._upsert(
             detail_df,
