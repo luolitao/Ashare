@@ -2,8 +2,8 @@
 import pytest
 from sqlalchemy import inspect, text
 
-from ashare.db import DatabaseConfig, MySQLWriter
-from ashare.schema_manager import SchemaManager
+from ashare.core.db import DatabaseConfig, MySQLWriter
+from ashare.core.schema_manager import SchemaManager
 
 
 @pytest.mark.requires_db

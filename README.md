@@ -45,16 +45,16 @@
 
 ```
 AShare/
-├── ashare/                 # 核心模块
-│   ├── app.py             # 数据采集主入口
-│   ├── ma5_ma20_trend_strategy.py  # MA5-MA20 策略
-│   ├── chip_filter.py     # 筹码筛选
-│   ├── open_monitor.py    # 开盘监测
-│   ├── schema_manager.py  # 数据库表结构管理
-│   └── ...               # 其他功能模块
+├── ashare/                 # 核心模块（分包：core/data/indicators/strategies/monitor/utils）
+│   ├── core/              # 应用入口/配置/DB/表结构
+│   ├── data/              # 数据源与数据管理
+│   ├── indicators/        # 指标与市场环境
+│   ├── strategies/        # 策略与筛选
+│   ├── monitor/           # 开盘监测体系
+│   └── utils/             # 通用工具
 ├── config.yaml            # 配置文件
 ├── start.py              # 项目启动脚本
-├── run_*.py              # 各功能模块运行脚本
+├── scripts/              # 各功能模块运行脚本（run_*.py）
 ├── requirements.txt       # 依赖包
 └── README.md             # 项目说明
 ```
@@ -98,6 +98,8 @@ python start.py
 
 ### 2. 单独运行各模块
 
+说明：推荐使用 `python -m scripts.run_xxx` 运行；也可用 `python scripts/run_xxx.py`。
+
 #### 数据采集
 ```bash
 # 仅运行数据采集（股票列表、日线数据等）
@@ -107,40 +109,40 @@ python -c "from ashare.app import AshareApp; AshareApp().run()"
 #### MA5-MA20 策略
 ```bash
 # 运行 MA5-MA20 趋势策略
-python run_ma5_ma20_trend_strategy.py
+python -m scripts.run_ma5_ma20_trend_strategy
 ```
 
 #### 筹码筛选
 ```bash
 # 运行筹码筛选策略
-python run_chip_filter.py
+python -m scripts.run_chip_filter
 ```
 
 #### 开盘监测
 ```bash
 # 运行开盘监测
-python run_open_monitor.py
+python -m scripts.run_open_monitor
 
 # 定时运行开盘监测（每5分钟一次）
-python run_open_monitor_scheduler.py --interval 5
+python -m scripts.run_open_monitor_scheduler --interval 5
 ```
 
 #### 周线市场指标
 ```bash
 # 运行周线市场指标分析
-python run_index_weekly_channel.py
+python -m scripts.run_index_weekly_channel
 ```
 
 #### 日线市场指标
 ```bash
 # 运行日线市场指标分析
-python run_daily_market_indicator.py
+python -m scripts.run_daily_market_indicator
 ```
 
 #### 预开盘漏斗
 ```bash
 # 运行预开盘漏斗分析
-python run_premarket_funnel.py
+python -m scripts.run_premarket_funnel
 ```
 
 ## 配置说明

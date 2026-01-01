@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.market_indicator_builder import MarketIndicatorBuilder
+from ashare.indicators.market_indicator_builder import MarketIndicatorBuilder
 
 
 def test_resolve_daily_regime_pullback_fast_drop():

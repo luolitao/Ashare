@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Union
 
-from ashare.config import get_section
+from ashare.core.config import get_section
 
 _DEFAULT_FMT = "%(asctime)s [%(levelname)s] %(message)s"
 _DEFAULT_DATEFMT = "%Y-%m-%d %H:%M:%S"

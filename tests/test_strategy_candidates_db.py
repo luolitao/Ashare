@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import text
 
-from ashare.strategy_candidates import StrategyCandidatesService
+from ashare.strategies.strategy_candidates import StrategyCandidatesService
 
 
 @pytest.mark.requires_db

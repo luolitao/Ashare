@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.weekly_pattern_system import _clip_text, _fit_regression, WeeklyPlanSystem
+from ashare.indicators.weekly_pattern_system import _clip_text, _fit_regression, WeeklyPlanSystem
 
 
 def test_clip_text():

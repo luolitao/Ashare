@@ -1,8 +1,8 @@
 ﻿# Repository Guidelines
 
 ## Project Structure and Module Organization
-- `ashare/` contains core Python modules (data fetchers, strategies, monitoring, DB schema). Entry points and strategy runners import from here.
-- `run_*.py` scripts run individual workflows such as `run_ma5_ma20_trend_strategy.py` or `run_open_monitor.py`.
+- `ashare/` contains core Python modules (subpackages: core, data, indicators, strategies, monitor, utils). Entry points and runners import from here.
+- `scripts/` contains `run_*.py` workflow scripts such as `run_ma5_ma20_trend_strategy.py` or `run_open_monitor.py`.
 - `start.py` runs the end-to-end pipeline.
 - `config.yaml` holds environment, database, and proxy settings.
 - `tool/` contains utility scripts for exporting and network checks (ad-hoc tests).
@@ -10,8 +10,8 @@
 ## Build, Test, and Development Commands
 - Install dependencies: `pip install -r requirements.txt`
 - Run full pipeline: `python start.py`
-- Run a single module: `python run_ma5_ma20_trend_strategy.py` (swap in other `run_*.py` files)
-- Open monitor scheduler: `python run_open_monitor_scheduler.py --interval 5`
+- Run a single module: `python -m scripts.run_ma5_ma20_trend_strategy` (swap in other `scripts/run_*.py` files)
+- Open monitor scheduler: `python -m scripts.run_open_monitor_scheduler --interval 5`
 - Network checks: `python tool/test_baostock_network.py`, `python tool/test_akshare_network.py`
 
 ## Coding Style and Naming Conventions

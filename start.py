@@ -7,14 +7,14 @@ from pathlib import Path
 
 from sqlalchemy import text
 
-from ashare.app import AshareApp
-from ashare.ma5_ma20_trend_strategy import MA5MA20StrategyRunner
-from ashare.open_monitor import MA5MA20OpenMonitorRunner
-from ashare.schema_manager import ensure_schema
+from ashare.core.app import AshareApp
+from ashare.strategies.ma5_ma20_trend_strategy import MA5MA20StrategyRunner
+from ashare.monitor.open_monitor import MA5MA20OpenMonitorRunner
+from ashare.core.schema_manager import ensure_schema
 from ashare.utils.logger import setup_logger
-from run_index_weekly_channel import run_weekly_market_indicator
-from run_chip_filter import main as run_chip_filter
-from run_daily_market_indicator import run_daily_market_indicator
+from scripts.run_index_weekly_channel import run_weekly_market_indicator
+from scripts.run_chip_filter import main as run_chip_filter
+from scripts.run_daily_market_indicator import run_daily_market_indicator
 
 
 def _parse_asof_date(raw: str | None) -> str | None:
@@ -220,8 +220,8 @@ if __name__ == "__main__":
     main()
 
 # 验收自检（最小）
-# 1) python -m py_compile ashare/open_monitor_repo.py run_open_monitor_scheduler.py run_index_weekly_channel.py start.py
-# 2) 周末/非交易日：python run_open_monitor_scheduler.py --once
+# 1) python -m py_compile ashare/monitor/open_monitor_repo.py scripts/run_open_monitor_scheduler.py scripts/run_index_weekly_channel.py start.py
+# 2) 周末/非交易日：python -m scripts.run_open_monitor_scheduler --once
 #    - monitor_date 回落到最近交易日，open_monitor 可正常构建环境
 # 3) python start.py
 #    - 报告中的 BUY 总数与 SQL 查询一致，周线 run_id= WEEKLY_{asof_date} 存在

@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.market_regime import MarketRegimeClassifier
+from ashare.indicators.market_regime import MarketRegimeClassifier
 
 
 def test_market_regime_risk_on():

@@ -1,4 +1,4 @@
-﻿from ashare.weekly_env_builder import WeeklyEnvironmentBuilder
+﻿from ashare.indicators.weekly_env_builder import WeeklyEnvironmentBuilder
 
 
 def test_merge_gate_actions():

@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.indicator_utils import consecutive_true
+from ashare.indicators.indicator_utils import consecutive_true
 
 
 def test_consecutive_true():

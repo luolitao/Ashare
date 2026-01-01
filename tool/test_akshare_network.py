@@ -326,7 +326,7 @@ def build_cases(
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
 
-        from ashare.akshare_fetcher import AkshareDataFetcher  # noqa: WPS433
+        from ashare.data.akshare_fetcher import AkshareDataFetcher  # noqa: WPS433
 
         fetcher = AkshareDataFetcher()
         return fetcher.batch_get_shareholder_count_detail([test_symbol])

@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.weekly_channel_regime import _to_weekly_ohlcv, WeeklyChannelClassifier
+from ashare.indicators.weekly_channel_regime import _to_weekly_ohlcv, WeeklyChannelClassifier
 
 
 def test_to_weekly_ohlcv_aggregates():

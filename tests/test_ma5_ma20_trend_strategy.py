@@ -1,6 +1,6 @@
 ﻿import pandas as pd
 
-from ashare.ma5_ma20_trend_strategy import _atr, _macd, _rsi, _split_exchange_symbol
+from ashare.strategies.ma5_ma20_trend_strategy import _atr, _macd, _rsi, _split_exchange_symbol
 
 
 def test_split_exchange_symbol():

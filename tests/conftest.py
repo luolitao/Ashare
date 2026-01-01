@@ -4,7 +4,7 @@ from typing import Dict
 import pytest
 from sqlalchemy import create_engine, text
 
-from ashare.db import DatabaseConfig, MySQLWriter
+from ashare.core.db import DatabaseConfig, MySQLWriter
 
 
 def _mysql_available() -> bool:

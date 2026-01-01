@@ -2,7 +2,7 @@
 
 import pytest
 
-from ashare.config import CONFIG_FILE_ENV, ProxyConfig, get_section, load_config
+from ashare.core.config import CONFIG_FILE_ENV, ProxyConfig, get_section, load_config
 
 
 def _write_config(tmp_path: Path, content: str) -> Path:
