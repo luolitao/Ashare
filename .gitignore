@@ -1,11 +1,9 @@
 __pycache__/
-data
 dbn_trading_auto
 .idea
 /project_for_llm.txt
 ashare.log
 .qwen/
 gha-creds-*.json
-.codex/
 diff_output.txt
 output/

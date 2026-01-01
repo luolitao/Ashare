@@ -13,7 +13,7 @@ from sqlalchemy import inspect, text
 from ashare.core.config import get_section
 from ashare.core.db import DatabaseConfig, MySQLWriter
 from ashare.core.schema_manager import SchemaManager, TABLE_STRATEGY_CANDIDATES
-from ashare.strategies.ma5_ma20_trend_strategy import MA5MA20Params
+from ashare.strategies.ma5_ma20_params import MA5MA20Params
 
 
 @dataclass(frozen=True)

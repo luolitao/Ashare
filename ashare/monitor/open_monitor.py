@@ -104,7 +104,7 @@ class OpenMonitorParams:
     # 增量导出：文件名带 checked_at 时间戳，避免同一天多次导出互相覆盖
     incremental_export_timestamp: bool = True
 
-    export_csv: bool = True
+    export_csv: bool = False
     export_top_n: int = 100
     output_subdir: str = "open_monitor"
     interval_minutes: int = 5
@@ -767,7 +767,5 @@ class MA5MA20OpenMonitorRunner:
             )
 
         self.repo.persist_results(result)
-        export_df = self.repo.load_open_monitor_view_data(monitor_date, run_pk)
-        if export_df.empty:
-            export_df = result
-        self.evaluator.export_csv(export_df)
+        # 导出功能已停用，数据已保存在数据库中
+

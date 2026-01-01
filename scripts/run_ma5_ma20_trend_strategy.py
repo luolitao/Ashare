@@ -8,6 +8,12 @@
   - 需要你已先运行 python start.py，把 history_recent_{N}_days 等表准备好。
 """
 
+import sys
+import os
+
+# Add project root to sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from ashare.strategies.ma5_ma20_trend_strategy import MA5MA20StrategyRunner
 from ashare.core.schema_manager import ensure_schema
 
