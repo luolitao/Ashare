@@ -73,6 +73,11 @@ The agent is equipped with custom tools in `.ai/skills/` to handle specific task
     *   Read File: `python .ai/skills/raw_reader.py read <path>`
     *   List Dir: `python .ai/skills/raw_reader.py list <path>`
 
+#### **Database Query (`db_query`)**
+*   **Purpose**: Directly query the MySQL database to verify data or diagnose issues.
+*   **Command**: `python .ai/skills/db_query.py "<SQL_QUERY>"`
+*   **Note**: The script connects using `ashare.core.db`. `SELECT` queries limit to 20 rows by default unless specified.
+
 ### Running Scripts
 To avoid `ModuleNotFoundError`, always run scripts as modules from the project root:
 
@@ -95,7 +100,9 @@ python -c "from ashare.app import AshareApp; AshareApp().run()"
 ## 5. Data & Database
 
 ### Database Schema
-Managed by `ashare.core.schema_manager`. Key tables:
+Managed by `ashare.core.schema_manager`. Key standards:
+- **Encoding**: MUST use `utf8mb4` charset to avoid Chinese character corruption.
+- **Key Tables**:
 - **`history_daily_kline`**: Daily OHLCV data.
 - **`strategy_signal_events`**: Generated strategy signals.
 - **`strategy_open_monitor_eval`**: Real-time monitoring results.

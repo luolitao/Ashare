@@ -12,6 +12,9 @@
     - Money: `volume` (share count), `amount` (currency value).
 
 ## 2. Field Types
+- **Encoding**: 
+    - **Charset**: `utf8mb4` (Required for Chinese characters).
+    - **Collation**: `utf8mb4_unicode_ci` or `utf8mb4_general_ci`.
 - **Primary Keys**: 
     - Prefer composite keys for time-series data: `(trade_date, code)` is better than an auto-increment ID for K-lines.
     - Use `BIGINT` for surrogate keys (`run_pk`).
