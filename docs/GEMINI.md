@@ -15,6 +15,9 @@ This document provides a comprehensive overview of the AShare quantitative analy
 
 ## 2. Directory Structure
 
+- **`.gemini/`**: AI Agent context and skills.
+    - **`skills/`**: Custom scripts for AI tasks (e.g., `raw_reader.py`).
+    - **`SKILLS.md`**: Documentation for available AI skills.
 - **`ashare/`**: Main package source code.
     - **`core/`**: Application infrastructure (DB connection, Config parsing, Schema management).
     - **`data/`**: Data fetchers and storage logic.
