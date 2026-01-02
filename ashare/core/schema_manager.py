@@ -86,6 +86,7 @@ READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "industry_classification": "VARCHAR(255) NULL",
     "board_name": "VARCHAR(255) NULL",
     "board_code": "VARCHAR(64) NULL",
+    "is_liquidity": "TINYINT(1) NULL",
 }
 
 @dataclass(frozen=True)
@@ -1349,30 +1350,35 @@ class SchemaManager:
                 self.logger.info("信号事件表 %s 已回填 expires_on：%s 条。", table, updated)
 
     def _ensure_strategy_candidates_table(self) -> None:
+        """将候选池重构为基于信号表的视图，不再需要手动维护。"""
         table = TABLE_STRATEGY_CANDIDATES
-        columns = {
-            "asof_trade_date": "DATE NOT NULL",
-            "code": "VARCHAR(20) NOT NULL",
-            "is_liquidity": "TINYINT(1) NOT NULL DEFAULT 0",
-            "has_signal": "TINYINT(1) NOT NULL DEFAULT 0",
-            "latest_sig_date": "DATE NULL",
-            "latest_sig_action": "VARCHAR(16) NULL",
-            "latest_sig_strategy_code": "VARCHAR(32) NULL",
-            "created_at": "DATETIME(6) NULL",
-        }
-        if not self._table_exists(table):
-            self._create_table(
-                table,
-                columns,
-                primary_key=("asof_trade_date", "code"),
-            )
-            return
-        self._add_missing_columns(table, columns)
-        self._ensure_varchar_length(table, "latest_sig_action", 16)
-        self._ensure_varchar_length(table, "latest_sig_strategy_code", 32)
-        self._ensure_date_column(table, "asof_trade_date", not_null=True)
-        self._ensure_date_column(table, "latest_sig_date", not_null=False)
-        self._ensure_datetime_column(table, "created_at")
+        
+        # 1. 清理旧表
+        relation_type = self._relation_type(table)
+        if relation_type == "BASE TABLE":
+            self.logger.warning("正在将候选池表 %s 转换为视图...", table)
+            self._drop_relation_any(table)
+
+        # 2. 构建视图：展示最近有买入意向信号的股票
+        view_sql = f"""
+            CREATE OR REPLACE VIEW `{table}` AS
+            SELECT 
+                sig_date AS asof_trade_date,
+                code,
+                1 AS is_liquidity,
+                1 AS has_signal,
+                sig_date AS latest_sig_date,
+                final_action AS latest_sig_action,
+                strategy_code AS latest_sig_strategy_code,
+                NOW() AS created_at
+            FROM `{TABLE_STRATEGY_SIGNAL_EVENTS}`
+            WHERE final_action IN ('BUY', 'NEAR_SIGNAL', 'BUY_CONFIRM')
+        """
+        
+        with self.engine.begin() as conn:
+            conn.execute(text(view_sql))
+        
+        self.logger.info("已将 %s 重构为动态视图。", table)
 
     def build_ready_signals_select(
         self,
@@ -1405,6 +1411,17 @@ class SchemaManager:
                 LEFT JOIN `{chip_table}` cf
                   ON e.`sig_date` = cf.`sig_date`
                  AND e.`code` = cf.`code`
+                """
+            )
+
+        liquidity_join = ""
+        liquidity_table = "a_share_top_liquidity"
+        if self._table_exists(liquidity_table):
+            liquidity_join = (
+                f"""
+                LEFT JOIN `{liquidity_table}` liq
+                  ON e.`sig_date` = liq.`trade_date`
+                 AND e.`code` = liq.`code`
                 """
             )
 
@@ -1556,6 +1573,8 @@ class SchemaManager:
                 "board_code": f"bd.`{board_code_col}`" if board_code_col else "NULL",
             }
 
+        field_exprs["is_liquidity"] = "CASE WHEN liq.`code` IS NOT NULL THEN 1 ELSE 0 END"
+
         field_exprs.update(industry_fields)
         field_exprs.update(board_fields)
 
@@ -1568,6 +1587,7 @@ class SchemaManager:
             FROM `{events_table}` e
             {ind_join}
             {chip_join}
+            {liquidity_join}
             {industry_join}
             {board_join}
             WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM', 'NEAR_SIGNAL')
@@ -1581,86 +1601,29 @@ class SchemaManager:
         indicator_table: str,
         chip_table: str,
     ) -> None:
+        """重构：将准备信号从实体表改为动态视图。"""
         if not view or not events_table:
             return
 
+        # 1. 如果是旧的实体表，则安全删除
         relation_type = self._relation_type(view)
-        if relation_type == "VIEW":
-            self._drop_relation(view)
+        if relation_type == "BASE TABLE":
+            self.logger.warning("正在将实体表 %s 转换为视图...", view)
+            self._drop_relation_any(view)
 
-        if not self._table_exists(view):
-            self._create_table(
-                view,
-                READY_SIGNALS_COLUMNS,
-                primary_key=("strategy_code", "sig_date", "code"),
-            )
-        else:
-            self._add_missing_columns(view, READY_SIGNALS_COLUMNS)
-            self._ensure_primary_key(view, ("strategy_code", "sig_date", "code"))
+        # 2. 调用已有的构建逻辑生成 SQL
+        select_sql, _ = self.build_ready_signals_select(
+            events_table,
+            indicator_table,
+            chip_table,
+        )
 
-        for col, length in {
-            "code": 20,
-            "strategy_code": 32,
-            "signal": 64,
-            "final_action": 16,
-            "final_reason": 255,
-            "reason": 255,
-            "risk_tag": 255,
-            "risk_note": 255,
-            "macd_event": 32,
-            "wave_type": 64,
-            "yearline_state": 50,
-            "chip_reason": 255,
-            "chip_note": 255,
-            "industry": 255,
-            "industry_classification": 255,
-            "board_name": 255,
-            "board_code": 64,
-        }.items():
-            self._ensure_varchar_length(view, col, length)
+        # 3. 创建视图
+        create_view_sql = f"CREATE OR REPLACE VIEW `{view}` AS {select_sql}"
+        with self.engine.begin() as conn:
+            conn.execute(text(create_view_sql))
 
-        for col, definition in {
-            "final_cap": "DOUBLE NULL",
-            "stop_ref": "DOUBLE NULL",
-            "fear_score": "DOUBLE NULL",
-            "close": "DOUBLE NULL",
-            "ma5": "DOUBLE NULL",
-            "ma20": "DOUBLE NULL",
-            "ma60": "DOUBLE NULL",
-            "ma250": "DOUBLE NULL",
-            "vol_ratio": "DOUBLE NULL",
-            "macd_hist": "DOUBLE NULL",
-            "kdj_k": "DOUBLE NULL",
-            "kdj_d": "DOUBLE NULL",
-            "atr14": "DOUBLE NULL",
-            "avg_volume_20": "DOUBLE NULL",
-            "gdhs_delta_pct": "DOUBLE NULL",
-            "chip_score": "DOUBLE NULL",
-            "chip_penalty": "DOUBLE NULL",
-            "age_days": "INT NULL",
-            "deadzone_hit": "TINYINT(1) NULL",
-            "stale_hit": "TINYINT(1) NULL",
-        }.items():
-            self._ensure_numeric_column(view, col, definition)
-
-        self._ensure_date_column(view, "sig_date", not_null=True)
-        self._ensure_date_column(view, "expires_on", not_null=False)
-        self._ensure_date_column(view, "gdhs_announce_date", not_null=False)
-
-        index_map = {
-            "idx_ready_signals_strategy_date": ("strategy_code", "sig_date"),
-            "idx_ready_signals_expires_on": ("expires_on",),
-            "idx_ready_signals_sig_date": ("sig_date",),
-            "idx_ready_signals_code": ("code",),
-        }
-        for index_name, cols in index_map.items():
-            if self._index_exists(view, index_name):
-                continue
-            cols_clause = ", ".join(f"`{c}`" for c in cols)
-            with self.engine.begin() as conn:
-                conn.execute(text(f"CREATE INDEX `{index_name}` ON `{view}` ({cols_clause})"))
-
-        self.logger.info("已创建/更新表 %s（准备信号）。", view)
+        self.logger.info("已成功将 %s 重构为动态视图。", view)
 
     def _ensure_trade_metrics_table(self) -> None:
         columns = {

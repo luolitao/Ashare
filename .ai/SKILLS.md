@@ -8,11 +8,13 @@
 *   **路径**: `.ai/skills/raw_reader.py`
 *   **用途**: 读取被 git 忽略的本地数据文件（如 `tool/output/` 下的 JSON/Log）。
 *   **命令**: `python .ai/skills/raw_reader.py [read|list] <path>`
+*   **说明**: 技能脚本按文档命令直接执行，不需要 `python -m`。
 
 ### 1.2 Database Query (直接查询数据库)
 *   **路径**: `.ai/skills/db_query.py`
 *   **用途**: 直接执行 SQL 查询 MySQL 数据库。
 *   **命令**: `python .ai/skills/db_query.py "<SQL_QUERY>"`
+*   **注意**: 查询如 `strategy_board_rotation` 等时间序列数据表时，建议使用 `ORDER BY date DESC` 以获取最新的数据记录，例如：`SELECT * FROM strategy_board_rotation ORDER BY date DESC LIMIT 20;`
 
 ---
 
@@ -36,7 +38,7 @@
 *   **路径**: `.ai/skills/db_snapshot_exporter.py`
 *   **用途**: 导出数据库所有表的结构统计和样例数据（生成 Markdown/JSON），帮助理解数据全貌。
 *   **命令**: `python .ai/skills/db_snapshot_exporter.py`
-*   **输出**: `tool/output/db_snapshot_*.md`
+*   **输出**: `tool/output/db_snapshot_*.md` 和 `tool/output/db_snapshot_*.json`
 
 ### 3.2 Project Exporter (项目源码导出)
 *   **路径**: `.ai/skills/project_exporter.py`
@@ -47,7 +49,12 @@
 ### 3.3 Project Zip Exporter (项目打包)
 *   **路径**: `.ai/skills/project_zip_exporter.py`
 *   **用途**: 将项目打包为 zip（自动忽略 venv、git 等目录）。
-*   **命令**: `python .ai/skills/project_zip_exporter.py`
+*   **命令**: `python .ai/skills/project_zip_exporter.py [options]`
+
+### 3.4 Environment & Config Tester (环境自检)
+*   **路径**: `.ai/skills/env_tester.py`
+*   **用途**: 诊断项目环境，检查配置文件加载、数据库连接状态、重构视图可用性以及第三方数据源（AkShare/Baostock）的依赖情况。
+*   **命令**: `python .ai/skills/env_tester.py`
 
 ---
 

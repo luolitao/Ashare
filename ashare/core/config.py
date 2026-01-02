@@ -29,8 +29,8 @@ def load_config() -> Dict[str, Any]:
     if path_str:
         path = Path(path_str)
     else:
-        # ashare/config.py -> ashare 目录 -> 项目根目录
-        path = Path(__file__).resolve().parents[1] / DEFAULT_CONFIG_FILENAME
+        # ashare/core/config.py -> ashare/core -> ashare -> 项目根目录
+        path = Path(__file__).resolve().parents[2] / DEFAULT_CONFIG_FILENAME
 
     if not path.is_file():
         # 没有配置文件时，返回空 dict，调用方自己处理默认值

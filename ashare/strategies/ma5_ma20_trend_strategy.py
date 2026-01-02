@@ -33,7 +33,6 @@ from ashare.core.config import get_section
 from ashare.core.db import DatabaseConfig, MySQLWriter
 from ashare.indicators.indicator_utils import atr, consecutive_true, macd
 from ashare.core.schema_manager import TABLE_STRATEGY_CHIP_FILTER
-from ashare.strategies.strategy_candidates import StrategyCandidatesService
 from ashare.strategies.strategy_data_repo import StrategyDataRepository
 from ashare.strategies.strategy_store import StrategyStore
 from ashare.strategies.ma5_ma20_params import MA5MA20Params
@@ -112,7 +111,6 @@ class MA5MA20StrategyRunner:
         self.logger = setup_logger()
         self.params = MA5MA20Params.from_config()
         self.db_writer = MySQLWriter(DatabaseConfig.from_env())
-        self.candidates_service = StrategyCandidatesService(self.db_writer, self.logger)
         self.store = StrategyStore(self.db_writer, self.params, self.logger)
         self.data_repo = StrategyDataRepository(self.db_writer, self.logger)
         self.indicator_window = self._resolve_indicator_window()
@@ -1270,44 +1268,25 @@ class MA5MA20StrategyRunner:
 
         daily_tbl = self._daily_table_name()
         latest_date = self._get_latest_trade_date()
-        self.candidates_service.refresh(latest_date)
 
-        candidates_df = self.candidates_service.load_candidates(latest_date)
+        # 直接从流动性表读取候选标的
+        stmt = text("SELECT `code` FROM `a_share_top_liquidity` WHERE `trade_date` = :d")
+        with self.db_writer.engine.begin() as conn:
+            df_liq = pd.read_sql_query(stmt, conn, params={"d": latest_date})
+        
+        candidate_codes = df_liq["code"].dropna().unique().tolist() if not df_liq.empty else []
 
-        if candidates_df.empty:
+        if not candidate_codes:
             self.logger.warning(
-                "strategy_candidates=%s 为空，已跳过 MA5-MA20 策略运行。",
+                "latest_date=%s 无流动性标的，已跳过 MA5-MA20 策略运行。",
                 latest_date,
             )
             return
 
-        candidates_df["code"] = candidates_df["code"].astype(str)
-        candidate_codes = candidates_df["code"].dropna().unique().tolist()
-        liquidity_codes = (
-            candidates_df.loc[candidates_df["is_liquidity"] == 1, "code"]
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        signal_codes = (
-            candidates_df.loc[candidates_df["has_signal"] == 1, "code"]
-            .dropna()
-            .unique()
-            .tolist()
-        )
-        candidate_set = set(candidate_codes)
-        liquidity_set = set(liquidity_codes)
-        signal_set = set(signal_codes)
-        both_set = liquidity_set & signal_set
-        snapshot_only_set = candidate_set - liquidity_set
         self.logger.info(
-            "MA5-MA20 策略：日线表=%s candidates_total=%s liquidity=%s signal=%s both=%s snapshot_only=%s",
+            "MA5-MA20 策略运行：日线表=%s candidate_codes=%s",
             daily_tbl,
-            len(candidate_set),
-            len(liquidity_set),
-            len(signal_set),
-            len(both_set),
-            len(snapshot_only_set),
+            len(candidate_codes),
         )
 
         daily = self._load_daily_kline(candidate_codes, latest_date)
@@ -1337,41 +1316,16 @@ class MA5MA20StrategyRunner:
         )
         sig["code"] = sig["code"].astype(str)
         sig_for_write = sig.copy()
-        snapshot_only_codes = sorted(snapshot_only_set)
-        liquidity_codes = sorted(liquidity_set)
-        if snapshot_only_codes:
-            snapshot_mask = sig_for_write["code"].isin(snapshot_only_codes)
-            latest_mask = sig_for_write["date"].dt.date == latest_date
-            sig_for_write.loc[snapshot_mask, "signal"] = "SNAPSHOT"
-            sig_for_write.loc[snapshot_mask, "final_action"] = "SNAPSHOT"
-            sig_for_write.loc[snapshot_mask, "final_reason"] = "SNAPSHOT_ONLY"
-            sig_for_write.loc[snapshot_mask, "reason"] = "SNAPSHOT_ONLY"
-            sig_for_write = pd.concat(
-                [sig_for_write[~snapshot_mask], sig_for_write[snapshot_mask & latest_mask]],
-                ignore_index=True,
-            )
 
-        self._write_indicator_daily(latest_date, sig, liquidity_codes)
-        if snapshot_only_codes:
-            self._write_indicator_daily(
-                latest_date,
-                sig,
-                snapshot_only_codes,
-                scope_override="latest",
-            )
-
-        self._write_signal_events(latest_date, sig_for_write, liquidity_codes)
-        if snapshot_only_codes:
-            self._write_signal_events(
-                latest_date,
-                sig_for_write,
-                snapshot_only_codes,
-                scope_override="latest",
-            )
+        self._write_indicator_daily(latest_date, sig_for_write, candidate_codes)
+        self._write_signal_events(latest_date, sig_for_write, candidate_codes)
 
         self._precompute_chip_filter(sig_for_write)
-        sig_dates = sig_for_write["date"].dropna().dt.date.unique().tolist()
-        self._refresh_ready_signals_table(sig_dates)
+        # sig_dates = sig_for_write["date"].dropna().dt.date.unique().tolist()
+        # self._refresh_ready_signals_table(sig_dates)
+
+        # 重构说明：不再需要手动刷新 candidates 表，因为 strategy_ready_signals 已经改为自动 Join 的动态视图。
+        # self.candidates_service.refresh(latest_date)
 
         latest_sig = sig[sig["date"].dt.date == latest_date]
         dup_count = int(latest_sig.duplicated(subset=["code", "date"]).sum())

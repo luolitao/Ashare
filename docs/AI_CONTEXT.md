@@ -99,6 +99,10 @@ The agent is equipped with custom tools in `.ai/skills/` to handle specific task
 *   **Purpose**: Test Baostock core API availability and latency.
 *   **Command**: `python .ai/skills/network_tester_baostock.py [options]`
 
+#### **Environment & Config Tester (`env_tester`)**
+*   **Purpose**: Diagnose project environment, check config loading, database/view health, and data source dependencies.
+*   **Command**: `python .ai/skills/env_tester.py`
+
 #### **Project Exporter (`project_exporter`)**
 *   **Purpose**: Dump project files into a single text file for LLM review.
 *   **Command**: `python .ai/skills/project_exporter.py`
@@ -125,6 +129,8 @@ python -m scripts.run_open_monitor
 # Data Collection
 python -c "from ashare.app import AshareApp; AshareApp().run()"
 ```
+
+Note: AI skill scripts under `.ai/skills/` are executed directly as documented (do not use `python -m`).
 
 ---
 

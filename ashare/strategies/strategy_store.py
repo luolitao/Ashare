@@ -386,7 +386,15 @@ class StrategyStore:
         schema_manager = SchemaManager(self.db_writer.engine)
         table_names = schema_manager.get_table_names()
         ready_table = table_names.ready_signals_view
-        if not ready_table or not self.table_exists(ready_table):
+        if not ready_table:
+            return
+
+        # 重构：检查是否为视图。如果是视图，则无需手动刷新（数据通过 SQL Join 自动生成）
+        if schema_manager._relation_type(ready_table) == "VIEW":
+            self.logger.debug("ready_signals %s 是动态视图，跳过手动刷新逻辑。", ready_table)
+            return
+
+        if not self.table_exists(ready_table):
             self.logger.warning("ready_signals 表 %s 不存在，跳过刷新。", ready_table)
             return
 
