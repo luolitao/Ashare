@@ -123,6 +123,76 @@ class OpenMonitorPersister:
         except Exception as exc:  # noqa: BLE001
             self.logger.error("Failed to write open_monitor quote snapshots: %s", exc)
 
+    def persist_minute_snapshots(self, df: pd.DataFrame) -> None:
+        if df.empty or not self.params.write_to_db:
+            return
+        table = getattr(self.params, "minute_table", None)
+        if not table:
+            return
+
+        keep_cols = [
+            "monitor_date",
+            "run_pk",
+            "strategy_code",
+            "sig_date",
+            "code",
+            "minute_time",
+            "minute_date",
+            "price",
+            "volume",
+            "avg_price",
+            "source",
+        ]
+        for col in keep_cols:
+            if col not in df.columns:
+                df[col] = None
+        minute_df = df[keep_cols].copy()
+        minute_df["monitor_date"] = pd.to_datetime(minute_df["monitor_date"]).dt.date
+        minute_df["sig_date"] = pd.to_datetime(minute_df["sig_date"], errors="coerce").dt.date
+        minute_df["minute_time"] = pd.to_datetime(minute_df["minute_time"], errors="coerce")
+        minute_df["minute_date"] = pd.to_datetime(minute_df["minute_date"], errors="coerce").dt.date
+        minute_df["run_pk"] = pd.to_numeric(minute_df["run_pk"], errors="coerce")
+        minute_df["code"] = minute_df["code"].astype(str)
+        minute_df = minute_df.dropna(subset=["run_pk", "code", "minute_time"]).copy()
+        if minute_df.empty:
+            return
+
+        if self._table_exists(table):
+            minute_df["monitor_date_str"] = minute_df["monitor_date"].astype(str)
+            minute_df["code_str"] = minute_df["code"].astype(str)
+            delete_calls = 0
+            deleted_rows = 0
+            for (monitor_date_str, run_pk), group in minute_df.groupby(
+                ["monitor_date_str", "run_pk"]
+            ):
+                run_pk_codes = group["code_str"].dropna().unique().tolist()
+                if not run_pk_codes:
+                    continue
+                deleted_rows += self._delete_existing_run_rows(
+                    table,
+                    monitor_date_str,
+                    int(run_pk),
+                    run_pk_codes,
+                )
+                delete_calls += 1
+            if delete_calls:
+                self.logger.debug(
+                    "open_monitor minute snapshot delete calls=%s rows=%s",
+                    delete_calls,
+                    deleted_rows,
+                )
+            minute_df = minute_df.drop(columns=["monitor_date_str", "code_str"])
+
+        try:
+            self.db_writer.write_dataframe(minute_df, table, if_exists="append")
+            self.logger.info(
+                "open_monitor minute snapshots written to %s rows=%s",
+                table,
+                len(minute_df),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error("Failed to write open_monitor minute snapshots: %s", exc)
+
     def persist_results(self, df: pd.DataFrame) -> None:
         if df.empty:
             return

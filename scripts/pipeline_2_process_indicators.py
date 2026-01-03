@@ -56,13 +56,13 @@ mi = MarketIndicatorRunner(repo=mon.repo, builder=builder, logger=logger)
 # 推断日期
 latest_date = AshareApp()._infer_latest_trade_day_from_db('history_daily_kline')
 
-print(f">>> [Subprocess] 正在计算技术指标 (latest_date={latest_date})...")
+logger.info(f">>> [Subprocess] 正在计算技术指标 (latest_date={latest_date})...")
 mi.run_technical_indicators(latest_date=latest_date)
 
-print(f">>> [Subprocess] 正在计算周线大盘趋势...")
+logger.info(f">>> [Subprocess] 正在计算周线大盘趋势...")
 mi.run_weekly_indicator(mode='incremental')
 
-print(f">>> [Subprocess] 正在计算日线市场环境...")
+logger.info(f">>> [Subprocess] 正在计算日线市场环境...")
 mi.run_daily_indicator(mode='incremental')
 """
     if run_step("Full Processing & Indicators", cmd_calc):

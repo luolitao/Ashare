@@ -51,13 +51,26 @@ class MonitorRuleConfig:
     enable_limit_up: bool = True
     enable_runup_breach: bool = True
     enable_ma20_prewarn: bool = True
-
     enable_signal_expired: bool = True
+    
+    # 新增：低吸增强开关
+    enable_low_suck_bonus: bool = True
+    
+    # Phase 1: 纪律增强
+    enable_time_guard: bool = True
+    enable_vol_filter: bool = True
+    min_vol_ratio_risk_off: float = 1.0
+    
+    # Phase 2: 指标共振
+    enable_indicator_resonance: bool = True
 
     # --- thresholds ---
     chip_score_wait_threshold: float = -0.5
 
     chip_score_allow_small_cap: float = 0.2
+    
+    # 新增：低吸增强阈值 (60分对应 MEDIUM)
+    low_suck_bonus_min_score: float = 60.0
 
     # --- actions & reasons ---
     env_stop_action: str = "SKIP"
@@ -78,6 +91,9 @@ class MonitorRuleConfig:
     limit_up_reason: str = "涨停不可成交"
     runup_breach_action: str = "WAIT"
     runup_breach_fallback_reason: str = "拉升过快"
+    
+    # 新增：低吸理由
+    low_suck_bonus_reason: str = "低吸形态优"
 
 
     signal_expired_action: str = "SKIP"
@@ -95,6 +111,13 @@ class MonitorRuleConfig:
     sev_ma20_prewarn: int = 10
     sev_limit_up: int = 60
     sev_runup_breach: int = 55
+    
+    # 新增：低吸Severity (加分项，优先级不必太高，作为Bonus)
+    sev_low_suck_bonus: int = 40
+    
+    # Phase 1 Severity
+    sev_time_guard: int = 95
+    sev_vol_filter: int = 65
 
     @classmethod
     def from_config(
@@ -218,12 +241,21 @@ class MonitorRuleConfig:
             enable_signal_expired=_get_bool(
                 "enable_signal_expired", defaults.enable_signal_expired
             ),
+            # 新增
+            enable_low_suck_bonus=_get_bool("enable_low_suck_bonus", defaults.enable_low_suck_bonus),
+            enable_time_guard=_get_bool("enable_time_guard", defaults.enable_time_guard),
+            enable_vol_filter=_get_bool("enable_vol_filter", defaults.enable_vol_filter),
+            enable_indicator_resonance=_get_bool("enable_indicator_resonance", defaults.enable_indicator_resonance),
+            min_vol_ratio_risk_off=_get_float("min_vol_ratio_risk_off", defaults.min_vol_ratio_risk_off),
+            
             chip_score_wait_threshold=_get_float(
                 "chip_score_wait_threshold", defaults.chip_score_wait_threshold
             ),
             chip_score_allow_small_cap=_get_float(
                 "chip_score_allow_small_cap", defaults.chip_score_allow_small_cap
             ),
+            low_suck_bonus_min_score=_get_float("low_suck_bonus_min_score", defaults.low_suck_bonus_min_score),
+            
             env_stop_action=str(cfg.get("env_stop_action", defaults.env_stop_action)).strip()
             or defaults.env_stop_action,
             env_stop_reason=str(cfg.get("env_stop_reason", defaults.env_stop_reason)).strip()
@@ -274,6 +306,9 @@ class MonitorRuleConfig:
                 cfg.get("runup_breach_fallback_reason", defaults.runup_breach_fallback_reason)
             ).strip()
             or defaults.runup_breach_fallback_reason,
+            low_suck_bonus_reason=str(cfg.get("low_suck_bonus_reason", defaults.low_suck_bonus_reason)).strip()
+            or defaults.low_suck_bonus_reason,
+            
             signal_expired_action=str(
                 cfg.get("signal_expired_action", defaults.signal_expired_action)
             ).strip()
@@ -293,6 +328,9 @@ class MonitorRuleConfig:
             sev_ma20_prewarn=int(cfg.get("sev_ma20_prewarn", defaults.sev_ma20_prewarn)),
             sev_limit_up=int(cfg.get("sev_limit_up", defaults.sev_limit_up)),
             sev_runup_breach=int(cfg.get("sev_runup_breach", defaults.sev_runup_breach)),
+            sev_low_suck_bonus=int(cfg.get("sev_low_suck_bonus", defaults.sev_low_suck_bonus)),
+            sev_time_guard=int(cfg.get("sev_time_guard", defaults.sev_time_guard)),
+            sev_vol_filter=int(cfg.get("sev_vol_filter", defaults.sev_vol_filter)),
         )
 
 
@@ -327,6 +365,17 @@ def build_default_monitor_rules(
             return False
         return True
 
+    def _is_risk_off(ctx: Any) -> bool:
+        env = getattr(ctx, "env", None)
+        if not env:
+            return False
+        regime = getattr(env, "regime", "")
+        weekly_risk = getattr(env, "weekly_risk_level", "")
+        return (
+            str(regime).strip().upper() == "RISK_OFF"
+            or str(weekly_risk).strip().upper() == "HIGH"
+        )
+
     return [
         Rule(
             id="ENV_STOP",
@@ -342,6 +391,37 @@ def build_default_monitor_rules(
                 action_override=config.env_stop_action,
             ),
         ),
+        # === Phase 1: 核心纪律 ===
+        Rule(
+            id="TIME_GUARD_EARLY",
+            category="ACTION",
+            severity=config.sev_time_guard,
+            predicate=lambda ctx: bool(
+                config.enable_time_guard
+                and (getattr(ctx, "minutes_since_open") is not None)
+                and (getattr(ctx, "minutes_since_open") < 30)
+            ),
+            effect=lambda ctx: RuleResult(
+                reason="早盘30分钟观察期",
+                action_override="WAIT",
+            ),
+        ),
+        Rule(
+            id="VOL_CHECK_RISK_OFF",
+            category="ACTION",
+            severity=config.sev_vol_filter,
+            predicate=lambda ctx: bool(
+                config.enable_vol_filter
+                and _is_risk_off(ctx)
+                and (getattr(ctx, "live_intraday_vol_ratio") is not None)
+                and (getattr(ctx, "live_intraday_vol_ratio") < config.min_vol_ratio_risk_off)
+            ),
+            effect=lambda ctx: RuleResult(
+                reason=f"RISK_OFF量比不足(<{config.min_vol_ratio_risk_off})",
+                action_override="WAIT",
+            ),
+        ),
+        
         Rule(
             id="ENV_WAIT",
             category="ACTION",
@@ -473,8 +553,8 @@ def build_default_monitor_rules(
             category="ACTION",
             severity=85, # 高优先级
             predicate=lambda ctx: bool(
-                getattr(ctx, "live_gap", 0) <= -0.03 
-                and getattr(ctx, "live_pct", 0) < 0 # 未翻红
+                (getattr(ctx, "live_gap") or 0) <= -0.03 
+                and (getattr(ctx, "live_pct") or 0) < 0 # 未翻红
             ),
             effect=lambda ctx: RuleResult(
                 reason="口诀：低开3%未翻红->跑",
@@ -486,13 +566,39 @@ def build_default_monitor_rules(
             category="ACTION",
             severity=80,
             predicate=lambda ctx: bool(
-                getattr(ctx, "live_gap", 0) >= 0.05 
-                and getattr(ctx, "live_pct", 0) < 0.095 # 未封板
-                and getattr(ctx, "minutes_since_open", 0) > 60 # 开盘一小时后
+                (getattr(ctx, "live_gap") or 0) >= 0.05 
+                and (getattr(ctx, "live_pct") or 0) < 0.095 # 未封板
+                and (getattr(ctx, "minutes_since_open") or 0) > 60 # 开盘一小时后
             ),
             effect=lambda ctx: RuleResult(
                 reason="口诀：高开5%一小时不封板->清仓",
                 action_override="STOP",
+            ),
+        ),
+        # === 新增：低吸增强规则 ===
+        Rule(
+            id="LOW_SUCK_BONUS",
+            category="ACTION",
+            severity=config.sev_low_suck_bonus,
+            predicate=lambda ctx: bool(
+                config.enable_low_suck_bonus
+                and (getattr(ctx, "low_suck_score") or 0) >= config.low_suck_bonus_min_score
+                # 【新增】硬性门槛：即使形态再好，如果跌幅太深，也不要是接飞刀
+                # 在 RISK_OFF 环境下，跌幅超过 2% (live_pct < -2.0) 直接熔断
+                and (getattr(ctx, "live_pct") or 0) > (-2.0 if _is_risk_off(ctx) else -3.5)
+                # Phase 2: 指标共振 (MACD金叉 + KDJ低位)
+                and (
+                    not config.enable_indicator_resonance 
+                    or (
+                        (getattr(ctx, "sig_macd_hist") or 0) > 0
+                        and (getattr(ctx, "sig_kdj_k") or 0) > (getattr(ctx, "sig_kdj_d") or 0)
+                        and (getattr(ctx, "sig_kdj_k") or 0) < 80
+                    )
+                )
+            ),
+            effect=lambda ctx: RuleResult(
+                reason=f"{config.low_suck_bonus_reason}: {getattr(ctx, 'low_suck_reason', '')}",
+                action_override="EXECUTE", # 强力推荐
             ),
         ),
     ]

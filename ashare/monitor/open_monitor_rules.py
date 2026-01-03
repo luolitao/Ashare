@@ -191,6 +191,21 @@ class DecisionContext:
     runup_breach_reason: str | None = None
 
     signal_age: int | None = None
+    
+    # 新增：量能与时间字段 (Phase 1)
+    live_intraday_vol_ratio: float | None = None
+    minutes_since_open: int | None = None
+    
+    # Phase 2: 指标共振字段
+    sig_macd_hist: float | None = None
+    sig_kdj_k: float | None = None
+    sig_kdj_d: float | None = None
+    
+    # 新增：低吸信号相关字段
+    low_suck_score: float | None = None
+    low_suck_strength: str | None = None
+    low_suck_reason: str | None = None
+    
     rule_hits: list[RuleHit] = field(default_factory=list)
 
     def record_hit(self, rule: Rule, result: RuleResult) -> None:

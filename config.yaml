@@ -23,7 +23,7 @@ app:
   fetch_stock_meta: true
 
   # 最近 N 个交易日窗口
-  history_days: 365
+  history_days: 600
 
   # 近期自然日视图窗口（仅用于你手动查询近期数据方便）
   # - 会创建/刷新视图：history_recent_{history_view_days}_days
@@ -192,6 +192,7 @@ open_monitor:
   # indicator_table: strategy_indicator_daily
   quote_table: strategy_open_monitor_quote
   output_table: strategy_open_monitor_eval
+  minute_table: strategy_open_monitor_minute
   # 指数代码与回看窗口
   index_code: sh.000001
   index_hist_lookback_days: 250
@@ -227,6 +228,8 @@ open_monitor:
   live_breakout_latest_eps: 0.001  # 站稳上方：latest >= upper * (1 + eps)
   live_retest_pct: 0.003           # 回踩容忍：upper * pct 与 ATR 容忍二选大
   live_retest_atr_mult: 0.5        # 回踩容忍：daily_atr14 * mult
+  minute_fetch_timeout_sec: 5
+  minute_fetch_skip_non_trading_day: true
 
   # 风控：开盘以“实际入场价”为基准计算止损（stop_ref=entry-stop_atr_mult*ATR）
   stop_atr_mult: 2.0

@@ -802,8 +802,7 @@ class WeeklyEnvironmentBuilder:
 
         return env_context
 
-    @staticmethod
-    def resolve_env_weekly_gate_policy(env_context: dict[str, Any] | None) -> str | None:
+    def resolve_env_weekly_gate_policy(self, env_context: dict[str, Any] | None) -> str | None:
         if not env_context:
             return None
 
@@ -1137,7 +1136,7 @@ class WeeklyEnvironmentBuilder:
 
         if effective_weekly_gate:
             gate_candidates.append(effective_weekly_gate)
-        if index_gate_norm:
+        if index_gate_norm == "STOP":
             gate_candidates.append(index_gate_norm)
         if live_gate_hint:
             gate_candidates.append(live_gate_hint)

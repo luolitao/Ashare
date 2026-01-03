@@ -275,6 +275,7 @@ class OpenMonitorEvaluator:
         run_pk: int | None = None,
         ready_signals_used: bool = False,
         previous_strength_map: Dict[str, float] | None = None,
+        low_suck_map: Dict[str, Any] | None = None,
     ) -> pd.DataFrame:
         if signals.empty:
             return pd.DataFrame()
@@ -534,6 +535,26 @@ class OpenMonitorEvaluator:
             if chip_reason is not None and not pd.isna(chip_reason):
                 chip_reason_val = str(chip_reason).strip() or None
 
+            # 提取低吸增强数据
+            ls_score = None
+            ls_strength = None
+            ls_reason = None
+            if low_suck_map:
+                row_code = str(row.get("code") or "")
+                ls_data = low_suck_map.get(row_code)
+                if ls_data:
+                    ls_score = ls_data.get("score")
+                    ls_strength = ls_data.get("strength")
+                    ls_reason = ls_data.get("reason")
+
+            # 计算开盘时长 (Phase 1)
+            minutes_open = 0
+            if checked_at_ts:
+                # 简单处理：假设 9:30 开盘
+                market_open = checked_at_ts.replace(hour=9, minute=30, second=0, microsecond=0)
+                delta = (checked_at_ts - market_open).total_seconds() / 60
+                minutes_open = int(delta) if delta > 0 else 0
+
             ctx = DecisionContext(
                 entry_exposure_cap=env.position_cap_pct,
                 env=env,
@@ -554,6 +575,17 @@ class OpenMonitorEvaluator:
                 limit_up_trigger=limit_up_trigger,
                 runup_breach=breach,
                 runup_breach_reason=breach_reason,
+                # 注入新字段
+                live_intraday_vol_ratio=live_intraday,
+                minutes_since_open=minutes_open,
+                # Phase 2 指标
+                sig_macd_hist=_to_float(row.get("sig_macd_hist")),
+                sig_kdj_k=_to_float(row.get("sig_kdj_k")),
+                sig_kdj_d=_to_float(row.get("sig_kdj_d")),
+                # 新增字段注入
+                low_suck_score=ls_score,
+                low_suck_strength=ls_strength,
+                low_suck_reason=ls_reason,
             )
             self.rule_engine.apply(ctx, self.rules)
 

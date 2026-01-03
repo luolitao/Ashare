@@ -765,13 +765,20 @@ class AshareApp:
         return index_membership
 
     def _load_completed_codes(
-        self, table_name: str, min_rows: int, required_end_date: str | None = None
+        self,
+        table_name: str,
+        min_rows: int,
+        required_end_date: str | None = None,
+        required_start_date: str | None = None,
     ) -> set[str]:
         having_conditions = ["COUNT(*) >= :threshold"]
         params: dict[str, object] = {"threshold": min_rows}
         if required_end_date:
             having_conditions.append("MAX(`date`) >= :required_end_date")
             params["required_end_date"] = required_end_date
+        if required_start_date:
+            having_conditions.append("MIN(`date`) <= :required_start_date")
+            params["required_start_date"] = required_start_date
 
         having_clause = " AND ".join(having_conditions)
         query = text(
@@ -928,6 +935,7 @@ class AshareApp:
         resume_threshold: int | None = None,
         probe_date: str | None = None,
         latest_existing_date: str | None = None,
+        per_code_end_date: dict[str, str] | None = None,
     ) -> tuple[int, list[str], list[str], int]:
         history_frames: list[pd.DataFrame] = []
         success_count = 0
@@ -941,6 +949,8 @@ class AshareApp:
             )
 
         codes = [str(code) for code in stock_df.get("code", []) if pd.notna(code)]
+        if per_code_end_date:
+            codes = [code for code in codes if code in per_code_end_date]
         codes_to_fetch = [code for code in codes if code not in done_codes]
         total_attempted = len(codes_to_fetch)
         skipped = len(codes) - len(codes_to_fetch)
@@ -965,10 +975,17 @@ class AshareApp:
 
         ctx = mp.get_context("spawn")
         worker_processes = self._choose_worker_processes(len(codes_to_fetch))
-        worker_args = [
-            (code, start_day, end_date, "d", adjustflag, self.baostock_max_retries)
-            for code in codes_to_fetch
-        ]
+        worker_args = []
+        for code in codes_to_fetch:
+            end_date_for_code = (
+                per_code_end_date.get(code) if per_code_end_date else end_date
+            )
+            if not end_date_for_code or end_date_for_code < start_day:
+                skipped += 1
+                continue
+            worker_args.append(
+                (code, start_day, end_date_for_code, "d", adjustflag, self.baostock_max_retries)
+            )
 
         self.logger.info(
             "本次历史日线拉取将使用 %s 个并发子进程（候选 %s 支股票）。",
@@ -1416,6 +1433,13 @@ class AshareApp:
         if boards is None:
             self.logger.warning("板块快照中缺少 board_name 列，跳过历史拉取。")
             return pd.DataFrame()
+        board_code_map = {}
+        if "board_code" in spot.columns:
+            board_code_map = {
+                str(row.get("board_name") or "").strip(): str(row.get("board_code") or "").strip()
+                for _, row in spot.iterrows()
+                if str(row.get("board_name") or "").strip() and str(row.get("board_code") or "").strip()
+            }
 
         frames: list[pd.DataFrame] = []
         for name in boards.dropna().unique():
@@ -1435,8 +1459,12 @@ class AshareApp:
 
             hist = hist.copy()
             hist["board_name"] = name
+            hist["board_code"] = board_code_map.get(str(name).strip()) or None
             hist["source"] = "akshare"
             hist["created_at"] = dt.datetime.now()
+            if "board_code" not in hist.columns or hist["board_code"].isna().all():
+                self.logger.debug("板块 %s 缺少 board_code，跳过写入。", name)
+                continue
             frames.append(hist)
 
         if not frames:
@@ -1753,18 +1781,76 @@ class AshareApp:
             self._refresh_history_calendar_view(base_table, end_day, slice_window_days=window_days)
             return recent_df, recent_table
         elif fetch_enabled and last_date_value >= end_day:
-            done_codes = self._load_completed_codes(
-                base_table, resume_threshold, required_end_date=end_date
+            recent_trading_days = self._get_recent_trading_days(
+                end_day, window_days, base_table=base_table
             )
-            if len(done_codes) < len(stock_df):
+            if not recent_trading_days:
+                self.logger.warning(
+                    "无法推导历史窗口起点（%s），将跳过向前补齐。", base_table
+                )
+            else:
+                start_date = recent_trading_days[0].isoformat()
                 self.logger.info(
-                    "历史表 %s 已存在但未覆盖全部股票，继续补齐缺口。", base_table
+                    "历史日线已覆盖最新日期，将检查向前补齐窗口 [%s, %s] 的缺口。",
+                    start_date,
+                    end_date,
                 )
-                recent_df, recent_table = self._export_recent_daily_history(
-                    stock_df, end_date, days=window_days, base_table=base_table
+
+                min_date_map: dict[str, dt.date] = {}
+                stmt = text(
+                    f"""
+                    SELECT `code`, MIN(`date`) AS `min_date`
+                    FROM `{base_table}`
+                    GROUP BY `code`
+                    """
                 )
-                self._refresh_history_calendar_view(base_table, end_day, slice_window_days=window_days)
-                return recent_df, recent_table
+                with self.db_writer.engine.begin() as conn:
+                    df_min = pd.read_sql_query(stmt, conn)
+                if df_min is not None and not df_min.empty:
+                    df_min["code"] = df_min["code"].astype(str)
+                    df_min["min_date"] = pd.to_datetime(
+                        df_min["min_date"], errors="coerce"
+                    ).dt.date
+                    min_date_map = {
+                        str(row["code"]): row["min_date"]
+                        for _, row in df_min.iterrows()
+                        if pd.notna(row["min_date"])
+                    }
+
+                start_date_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+                end_date_map: dict[str, str] = {}
+                codes = [str(code) for code in stock_df.get("code", []) if pd.notna(code)]
+                for code in codes:
+                    min_dt = min_date_map.get(code)
+                    if min_dt is None:
+                        end_date_map[code] = end_date
+                        continue
+                    if min_dt > start_date_dt:
+                        end_date_map[code] = (min_dt - dt.timedelta(days=1)).isoformat()
+
+                if end_date_map:
+                    self.logger.info(
+                        "向前补齐触发：共 %s 支股票需要补齐历史缺口。",
+                        len(end_date_map),
+                    )
+                    subset = stock_df[stock_df["code"].astype(str).isin(end_date_map.keys())].copy()
+                    self._fetch_and_store_history(
+                        subset,
+                        start_day=start_date,
+                        end_date=end_date,
+                        base_table=base_table,
+                        adjustflag=ADJUSTFLAG_NONE,
+                        resume_threshold=None,
+                        per_code_end_date=end_date_map,
+                    )
+                else:
+                    self.logger.info(
+                        "历史日线表 %s 已覆盖窗口 [%s, %s]，跳过向前补齐。",
+                        base_table,
+                        start_date,
+                        end_date,
+                    )
+
             self.logger.info(
                 "历史日线表 %s 已包含截至 %s 的数据，跳过增量拉取。",
                 base_table,

@@ -424,6 +424,50 @@ class OpenMonitorSqlStore:
 
         return out
 
+    def _load_signal_day_prev_close(
+        self, signal_date: str, codes: List[str]
+    ) -> Dict[str, float]:
+        if not signal_date or not codes:
+            return {}
+
+        daily = self._daily_table()
+        if not self._table_exists(daily):
+            return {}
+
+        stmt = text(
+            f"""
+            SELECT `code`, `prev_close`
+            FROM (
+              SELECT
+                `code`, `date`,
+                LAG(`close`) OVER (PARTITION BY `code` ORDER BY `date`) AS `prev_close`
+              FROM `{daily}`
+              WHERE `code` IN :codes AND `date` <= :d
+            ) t
+            WHERE `date` = :d
+            """
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": signal_date, "codes": codes})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取 %s 信号日前收失败（将跳过）：%s", daily, exc)
+            return {}
+
+        if df is None or df.empty:
+            return {}
+
+        out: Dict[str, float] = {}
+        for _, row in df.iterrows():
+            code = str(row.get("code") or "").strip()
+            prev_close = _to_float(row.get("prev_close"))
+            if not code or prev_close is None or prev_close <= 0:
+                continue
+            out[code] = prev_close
+
+        return out
+
     def load_recent_buy_signals(self) -> Tuple[str | None, List[str], pd.DataFrame]:
         """从 ready_signals_view 读取最近 BUY 信号（严格模式，无旧逻辑回退）。"""
 
@@ -655,12 +699,17 @@ class OpenMonitorSqlStore:
                     .tolist()
                 )
                 pct_map = self._load_signal_day_pct_change(d, codes)
+                prev_close_map = self._load_signal_day_prev_close(d, codes)
                 mask = events_df["sig_date"] == d
                 events_df.loc[mask, "_signal_day_pct_change"] = events_df.loc[
                     mask, "code"
                 ].map(pct_map)
+                events_df.loc[mask, "_signal_day_prev_close"] = events_df.loc[
+                    mask, "code"
+                ].map(prev_close_map)
         except Exception:
             events_df["_signal_day_pct_change"] = None
+            events_df["_signal_day_prev_close"] = None
 
         signal_prefix_map = {
             "close": "sig_close",
@@ -2056,6 +2105,9 @@ class OpenMonitorRepository:
 
     def persist_quote_snapshots(self, df: pd.DataFrame) -> None:
         self.persister.persist_quote_snapshots(df)
+
+    def persist_minute_snapshots(self, df: pd.DataFrame) -> None:
+        self.persister.persist_minute_snapshots(df)
 
     def persist_results(self, df: pd.DataFrame) -> None:
         self.persister.persist_results(df)

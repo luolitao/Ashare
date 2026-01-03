@@ -24,8 +24,8 @@ def main():
 
     try:
         # 运行核心策略 (Trend Following Strategy)
-        # 该 runner 会自动读取指标、生成信号并预计算筹码分
-        logger.info(">>> 正在启动趋势跟随策略扫描...")
+        # 第一次运行：生成信号（筹码可能尚未就绪）
+        logger.info(">>> 正在启动趋势跟随策略扫描（第 1 轮）...")
         runner = TrendFollowingStrategyRunner()
         force_env = str(os.getenv("ASHARE_STRATEGY_FORCE", "")).strip().lower()
         force = force_env in {"1", "true", "yes", "y", "on"}
@@ -83,6 +83,10 @@ def main():
                 logger.info("筹码计算完成：写入 %s 行。", len(result))
         else:
             logger.warning("筹码计算跳过：未找到最新 sig_date。")
+
+        # 第 2 轮：在筹码数据已写入后重新生成信号，确保 chip_score 生效
+        logger.info(">>> 正在启动趋势跟随策略扫描（第 2 轮：应用筹码）...")
+        runner.run(force=force)
         
         logger.info("==============================================")
         logger.info("流水线 3: 策略执行完成！")

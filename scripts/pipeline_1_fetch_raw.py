@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ashare.utils.logger import setup_logger
 from ashare.core.app import AshareApp
+from ashare.core.schema_manager import ensure_schema
 
 def main():
     setup_logger()
@@ -18,6 +19,7 @@ def main():
     logger.info("==============================================")
 
     try:
+        ensure_schema()
         # 采集原始数据 (Baostock/Akshare/LHB/Margin/GDHS)
         logger.info(">>> 正在启动数据抓取引擎 (Baostock/AkShare)...")
         app = AshareApp()

@@ -37,6 +37,7 @@ WEEKLY_MARKET_BENCHMARK_CODE = "sh.000001"
 TABLE_STRATEGY_DAILY_MARKET_ENV = "strategy_daily_market_env"
 TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_open_monitor_quote"
 TABLE_STRATEGY_OPEN_MONITOR_RUN = "strategy_open_monitor_run"
+TABLE_STRATEGY_OPEN_MONITOR_MINUTE = "strategy_open_monitor_minute"
 VIEW_STRATEGY_OPEN_MONITOR_WIDE = "v_strategy_open_monitor_wide"
 # 开盘监测环境视图（env 快照）
 VIEW_STRATEGY_OPEN_MONITOR_ENV = "v_strategy_open_monitor_env"
@@ -97,6 +98,7 @@ class TableNames:
     open_monitor_eval_table: str
     open_monitor_env_table: str
     open_monitor_run_table: str
+    open_monitor_minute_table: str
     open_monitor_env_view: str
     open_monitor_view: str
     open_monitor_wide_view: str
@@ -156,6 +158,7 @@ class SchemaManager:
         self._ensure_open_monitor_eval_table(tables.open_monitor_eval_table)
         self._ensure_open_monitor_run_table(tables.open_monitor_run_table)
         self._ensure_open_monitor_quote_table(tables.open_monitor_quote_table)
+        self._ensure_open_monitor_minute_table(tables.open_monitor_minute_table)
         self._ensure_weekly_indicator_table(tables.weekly_indicator_table)
         self._ensure_daily_market_env_table(tables.daily_indicator_table)
         self._ensure_open_monitor_env_table(tables.open_monitor_env_table)
@@ -168,6 +171,7 @@ class SchemaManager:
             tables.open_monitor_quote_table,
         )
 
+        self._ensure_board_industry_hist_table()
         self._ensure_board_rotation_table()
 
         self._ensure_open_monitor_view(
@@ -213,6 +217,15 @@ class SchemaManager:
         open_monitor_run_table = (
                 str(open_monitor_cfg.get("run_table", TABLE_STRATEGY_OPEN_MONITOR_RUN)).strip()
                 or TABLE_STRATEGY_OPEN_MONITOR_RUN
+        )
+        open_monitor_minute_table = (
+            str(
+                open_monitor_cfg.get(
+                    "minute_table",
+                    TABLE_STRATEGY_OPEN_MONITOR_MINUTE,
+                )
+            ).strip()
+            or TABLE_STRATEGY_OPEN_MONITOR_MINUTE
         )
         open_monitor_env_table = (
             str(
@@ -287,6 +300,7 @@ class SchemaManager:
             open_monitor_eval_table=open_monitor_eval_table,
             open_monitor_env_table=open_monitor_env_table,
             open_monitor_run_table=open_monitor_run_table,
+            open_monitor_minute_table=open_monitor_minute_table,
             open_monitor_env_view=open_monitor_env_view,
             open_monitor_view=open_monitor_view,
             open_monitor_wide_view=open_monitor_wide_view,
@@ -1868,6 +1882,65 @@ class SchemaManager:
                 )
             self.logger.info("行情快照表 %s 已新增唯一索引 %s。", table, unique_name)
 
+    def _ensure_open_monitor_minute_table(self, table: str) -> None:
+        columns = {
+            "monitor_date": "DATE NOT NULL",
+            "run_pk": "BIGINT NOT NULL",
+            "strategy_code": "VARCHAR(32) NOT NULL",
+            "sig_date": "DATE NULL",
+            "code": "VARCHAR(20) NOT NULL",
+            "minute_time": "DATETIME(6) NOT NULL",
+            "minute_date": "DATE NULL",
+            "price": "DOUBLE NULL",
+            "volume": "BIGINT NULL",
+            "avg_price": "DOUBLE NULL",
+            "source": "VARCHAR(16) NULL",
+        }
+        if not self._table_exists(table):
+            self._create_table(
+                table,
+                columns,
+                primary_key=("run_pk", "code", "minute_time"),
+            )
+            return
+
+        self._add_missing_columns(table, columns)
+        self._ensure_date_column(table, "monitor_date", not_null=True)
+        self._ensure_date_column(table, "sig_date", not_null=False)
+        self._ensure_date_column(table, "minute_date", not_null=False)
+        self._ensure_datetime_column(table, "minute_time")
+        self._ensure_numeric_column(table, "run_pk", "BIGINT NOT NULL")
+        self._ensure_varchar_length(table, "strategy_code", 32)
+        self._ensure_varchar_length(table, "code", 20)
+        self._ensure_varchar_length(table, "source", 16)
+        self._ensure_primary_key(table, ("run_pk", "code", "minute_time"))
+
+        idx_run = "idx_open_monitor_minute_run"
+        if not self._index_exists(table, idx_run):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE INDEX `{idx_run}`
+                        ON `{table}` (`monitor_date`, `run_pk`, `code`)
+                        """
+                    )
+                )
+            self.logger.info("分时表 %s 已新增索引 %s。", table, idx_run)
+
+        idx_code_time = "idx_open_monitor_minute_code_time"
+        if not self._index_exists(table, idx_code_time):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"""
+                        CREATE INDEX `{idx_code_time}`
+                        ON `{table}` (`code`, `minute_time`)
+                        """
+                    )
+                )
+            self.logger.info("分时表 %s 已新增索引 %s。", table, idx_code_time)
+
     def _ensure_open_monitor_eval_table(self, table: str) -> None:
         columns = {
             "monitor_date": "DATE NOT NULL",
@@ -2663,6 +2736,48 @@ class SchemaManager:
         if not self._index_exists(table, idx):
             with self.engine.begin() as conn:
                 conn.execute(text(f"CREATE INDEX `{idx}` ON `{table}` (`date`)"))
+
+    def _ensure_board_industry_hist_table(self) -> None:
+        table = "board_industry_hist_daily"
+        columns = {
+            "date": "DATE NOT NULL",
+            "开盘": "DOUBLE NULL",
+            "收盘": "DOUBLE NULL",
+            "最高": "DOUBLE NULL",
+            "最低": "DOUBLE NULL",
+            "涨跌幅": "DOUBLE NULL",
+            "涨跌额": "DOUBLE NULL",
+            "成交量": "BIGINT NULL",
+            "成交额": "DOUBLE NULL",
+            "振幅": "DOUBLE NULL",
+            "换手率": "DOUBLE NULL",
+            "board_name": "VARCHAR(255) NOT NULL",
+            "board_code": "VARCHAR(20) NOT NULL",
+            "source": "TEXT NULL",
+            "created_at": "DATETIME NULL",
+        }
+        if not self._table_exists(table):
+            self._create_table(
+                table,
+                columns,
+                primary_key=("date", "board_name"),
+            )
+            return
+        self._add_missing_columns(table, columns)
+        self._ensure_date_column(table, "date", not_null=True)
+        self._ensure_numeric_column(table, "成交量", "BIGINT NULL")
+        self._ensure_varchar_length(table, "board_name", 255)
+        self._ensure_varchar_length(table, "board_code", 20)
+
+        idx_code = "idx_board_industry_hist_code"
+        if not self._index_exists(table, idx_code):
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        f"CREATE INDEX `{idx_code}` ON `{table}` (`board_code`, `date`)"
+                    )
+                )
+            self.logger.info("表 %s 已新增索引 %s。", table, idx_code)
 
 
 

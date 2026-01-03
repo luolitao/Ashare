@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import Any, List
+import concurrent.futures
 
 import pandas as pd
 
 from ashare.monitor.open_monitor_quotes import fetch_quotes_akshare, fetch_quotes_eastmoney
+from ashare.data.akshare_fetcher import AkshareDataFetcher
 
 
 class OpenMonitorMarketData:
@@ -15,6 +17,13 @@ class OpenMonitorMarketData:
     def __init__(self, logger, params) -> None:
         self.logger = logger
         self.params = params
+        self._ak_fetcher = None
+
+    @property
+    def ak_fetcher(self) -> AkshareDataFetcher:
+        if self._ak_fetcher is None:
+            self._ak_fetcher = AkshareDataFetcher()
+        return self._ak_fetcher
 
     def fetch_quotes(self, codes: List[str]) -> pd.DataFrame:
         """获取实时行情。
@@ -88,3 +97,27 @@ class OpenMonitorMarketData:
     def _fetch_quotes_eastmoney(self, codes: List[str]) -> pd.DataFrame:
         strict_quotes = bool(getattr(self.params, "strict_quotes", True))
         return fetch_quotes_eastmoney(codes, strict_quotes=strict_quotes, logger=self.logger)
+
+    def _fetch_minute_data_raw(self, code: str, trade_date: str | None) -> pd.DataFrame:
+        return self.ak_fetcher.fetch_minute_data(code, trade_date=trade_date)
+
+    def fetch_minute_data(
+        self,
+        code: str,
+        *,
+        trade_date: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> pd.DataFrame:
+        """获取单只股票的分时数据（用于低吸判断）。"""
+        try:
+            if timeout_sec is None or timeout_sec <= 0:
+                return self._fetch_minute_data_raw(code, trade_date)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._fetch_minute_data_raw, code, trade_date)
+                return future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            self.logger.warning("Fetch minute data timeout for %s (%.1fs)", code, timeout_sec)
+            return pd.DataFrame()
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch minute data for {code}: {e}")
+            return pd.DataFrame()

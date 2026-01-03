@@ -32,6 +32,7 @@ from ashare.core.config import get_section
 from ashare.core.db import DatabaseConfig, MySQLWriter
 from ashare.monitor.monitor_rules import MonitorRuleConfig, build_default_monitor_rules
 from ashare.monitor.open_monitor_env import OpenMonitorEnvService
+from ashare.monitor.low_suck_detector import detect_low_suck_signal
 from ashare.monitor.open_monitor_eval import (
     OpenMonitorEvaluator,
     merge_gate_actions,
@@ -45,6 +46,7 @@ from ashare.core.schema_manager import (
     TABLE_STRATEGY_DAILY_MARKET_ENV,
     TABLE_STRATEGY_OPEN_MONITOR_ENV,
     TABLE_STRATEGY_OPEN_MONITOR_EVAL,
+    TABLE_STRATEGY_OPEN_MONITOR_MINUTE,
     TABLE_STRATEGY_OPEN_MONITOR_QUOTE,
     TABLE_STRATEGY_OPEN_MONITOR_RUN,
     TABLE_STRATEGY_WEEKLY_MARKET_ENV,
@@ -79,6 +81,7 @@ class OpenMonitorParams:
     # 输出表：开盘检查结果
     output_table: str = TABLE_STRATEGY_OPEN_MONITOR_EVAL
     run_table: str = TABLE_STRATEGY_OPEN_MONITOR_RUN
+    minute_table: str = TABLE_STRATEGY_OPEN_MONITOR_MINUTE
     open_monitor_view: str = VIEW_STRATEGY_OPEN_MONITOR
     open_monitor_wide_view: str = VIEW_STRATEGY_OPEN_MONITOR_WIDE
     open_monitor_env_view: str = VIEW_STRATEGY_OPEN_MONITOR_ENV
@@ -132,6 +135,9 @@ class OpenMonitorParams:
     live_breakout_latest_eps: float = 0.001
     live_retest_pct: float = 0.003
     live_retest_atr_mult: float = 0.5
+    # 分时拉取保护
+    minute_fetch_timeout_sec: float = 5.0
+    minute_fetch_skip_non_trading_day: bool = True
 
     def validate(self, logger: logging.Logger) -> "OpenMonitorParams":
         params = self
@@ -206,6 +212,7 @@ class OpenMonitorParams:
         _ensure_float_range("live_breakout_latest_eps", 0.0, 0.1)
         _ensure_float_range("live_retest_pct", 0.0, 0.1)
         _ensure_float_range("live_retest_atr_mult", 0.0, 10.0)
+        _ensure_float_range("minute_fetch_timeout_sec", 0.0, 120.0)
 
         name_pattern = re.compile(r"^[A-Za-z0-9_]+$")
         name_fields = [
@@ -213,6 +220,7 @@ class OpenMonitorParams:
             "quote_table",
             "output_table",
             "run_table",
+            "minute_table",
             "open_monitor_view",
             "open_monitor_wide_view",
             "open_monitor_env_view",
@@ -290,6 +298,8 @@ class OpenMonitorParams:
                           or default_strategy_code,
             output_table=str(sec.get("output_table", cls.output_table)).strip() or cls.output_table,
             run_table=str(sec.get("run_table", cls.run_table)).strip() or cls.run_table,
+            minute_table=str(sec.get("minute_table", cls.minute_table)).strip()
+                         or cls.minute_table,
             open_monitor_view=str(
                 sec.get("open_monitor_view", cls.open_monitor_view)
             ).strip()
@@ -345,6 +355,13 @@ class OpenMonitorParams:
             live_retest_pct=_get_float("live_retest_pct", cls.live_retest_pct),
             live_retest_atr_mult=_get_float(
                 "live_retest_atr_mult", cls.live_retest_atr_mult
+            ),
+            minute_fetch_timeout_sec=_get_float(
+                "minute_fetch_timeout_sec", cls.minute_fetch_timeout_sec
+            ),
+            minute_fetch_skip_non_trading_day=_get_bool(
+                "minute_fetch_skip_non_trading_day",
+                cls.minute_fetch_skip_non_trading_day,
             ),
         )
         return params.validate(logger)
@@ -610,12 +627,110 @@ class MA5MA20OpenMonitorRunner:
             self.logger.warning("未获取到任何实时行情，将输出 UNKNOWN 结果。")
         else:
             self.logger.info("实时行情已获取：%s 条", len(quotes))
+        
+        # === 新增：低吸信号检测 ===
+        low_suck_map = {}
+        minute_frames = []
+        if self.params.enabled and self.rule_config.enable_low_suck_bonus:
+            self.logger.info("开始执行低吸信号扫描 (%s 只标的)...", len(codes))
+            # 为了获取昨收，先建立一个 code -> close 映射
+            ref_close_map = {}
+            sig_close_map = {}
+            sig_date_map = {}
+            strategy_code_map = {}
+            if signals is not None and not signals.empty:
+                # 优先用信号日的前一交易日收盘价
+                for _, row in signals.iterrows():
+                    c = str(row.get("code"))
+                    sig_close = _to_float(row.get("sig_close"))
+                    if sig_close:
+                        sig_close_map[c] = sig_close
+                    prev_close = _to_float(row.get("_signal_day_prev_close"))
+                    if prev_close:
+                        ref_close_map[c] = prev_close
+                    sig_date_map[c] = row.get("sig_date")
+                    if "strategy_code" in signals.columns:
+                        sc = str(row.get("strategy_code") or "").strip()
+                        if sc:
+                            strategy_code_map[c] = sc
+            
+            # 补漏：如果 signals 里没有，从 quotes 里找 prev_close
+            if not quotes.empty and "prev_close" in quotes.columns:
+                for _, row in quotes.iterrows():
+                    c = str(row.get("code"))
+                    if c in ref_close_map:
+                        continue
+                    pcl = _to_float(row.get("prev_close"))
+                    if pcl:
+                        ref_close_map[c] = pcl
+
+            # 再补漏：如果仍缺失，使用信号日收盘价兜底
+            for c, cl in sig_close_map.items():
+                if c not in ref_close_map and cl:
+                    ref_close_map[c] = cl
+
+            for code in codes:
+                try:
+                    target_date = sig_date_map.get(code) or latest_trade_date or monitor_date
+                    target_date_str = (
+                        pd.to_datetime(target_date, errors="coerce").date().isoformat()
+                        if target_date
+                        else None
+                    )
+                    if (
+                        target_date_str
+                        and self.params.minute_fetch_skip_non_trading_day
+                        and not self.repo._is_trading_day(target_date_str, latest_trade_date)
+                    ):
+                        low_suck_map[code] = {
+                            "strength": "NONE",
+                            "reason": "non_trading_day",
+                            "score": 0,
+                        }
+                        continue
+
+                    minute_df = self.market_data.fetch_minute_data(
+                        code,
+                        trade_date=target_date_str,
+                        timeout_sec=self.params.minute_fetch_timeout_sec,
+                    )
+                    ref_close = ref_close_map.get(code)
+                    ls_res = detect_low_suck_signal(minute_df, ref_close_yesterday=ref_close)
+                    if ls_res.get("strength") != "NONE":
+                        self.logger.info(f"[{code}] 低吸评估: {ls_res['strength']} (分={ls_res['score']}) - {ls_res['reason']}")
+                    low_suck_map[code] = ls_res
+
+                    if minute_df is not None and not minute_df.empty:
+                        df_min = minute_df.copy()
+                        if "time" in df_min.columns and "minute_time" not in df_min.columns:
+                            df_min = df_min.rename(columns={"time": "minute_time"})
+                        df_min["monitor_date"] = monitor_date
+                        df_min["run_pk"] = run_pk
+                        df_min["strategy_code"] = strategy_code_map.get(
+                            code
+                        ) or self.params.strategy_code
+                        df_min["sig_date"] = sig_date_map.get(code)
+                        df_min["code"] = code
+                        if "minute_time" in df_min.columns:
+                            df_min["minute_date"] = pd.to_datetime(
+                                df_min["minute_time"], errors="coerce"
+                            ).dt.date
+                        if target_date_str and target_date_str != dt.date.today().isoformat():
+                            df_min["source"] = "akshare_em_hist"
+                        else:
+                            df_min["source"] = "akshare_em"
+                        minute_frames.append(df_min)
+                except Exception as e:
+                    self.logger.warning(f"低吸检测异常 {code}: {e}")
 
         env_instruction = {
             "gate_status": env_context.get("env_final_gate_action"),
             "position_cap": env_context.get("env_final_cap_pct"),
             "reason": env_context.get("env_final_reason_json"),
         }
+        if minute_frames:
+            minute_df = pd.concat(minute_frames, ignore_index=True)
+            self.repo.persist_minute_snapshots(minute_df)
         reason_matrix = None
         if env_instruction.get("reason"):
             try:
@@ -662,6 +777,7 @@ class MA5MA20OpenMonitorRunner:
             run_pk=run_pk,
             ready_signals_used=self.repo.ready_signals_used,
             previous_strength_map=prev_strength_map,
+            low_suck_map=low_suck_map,  # Pass the map here
         )
 
         if result.empty:
