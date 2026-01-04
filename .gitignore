@@ -1,4 +1,36 @@
+```
+# Test and coverage reports
+.coverage
+htmlcov/
+.coverage.*
+.nyc_output/
+coverage/
+
+# Pytest
+.pytest_cache/
+pytest_debug.log
+
+# Python
 __pycache__/
+
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.nox/
+*.coverage
+*.log
+.pytest_cache/
+.hypothesis/
+```
+
 dbn_trading_auto
 .idea
 /project_for_llm.txt
@@ -7,3 +39,4 @@ ashare.log
 gha-creds-*.json
 diff_output.txt
 output/
+
