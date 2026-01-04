@@ -11,7 +11,7 @@ def test_resolve_daily_regime_pullback_fast_drop():
             "pullback_mode": ["FAST_DROP", None],
         }
     )
-    result = MarketIndicatorBuilder._resolve_daily_regime(df)
+    result = MarketIndicatorBuilder._resolve_daily_regime(df, cfg={})
     assert result["regime"] == "PULLBACK"
     assert abs(result["position_hint"] - 0.3) < 1e-6
 

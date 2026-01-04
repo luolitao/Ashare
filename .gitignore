@@ -1,4 +1,3 @@
-```
 # Test and coverage reports
 .coverage
 htmlcov/
@@ -29,7 +28,6 @@ pip-delete-this-directory.txt
 *.log
 .pytest_cache/
 .hypothesis/
-```
 
 dbn_trading_auto
 .idea

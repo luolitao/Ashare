@@ -12,7 +12,17 @@ def test_resolve_env_weekly_gate_policy():
         "weekly_risk_level": "MEDIUM",
         "weekly_structure_status": "FORMING",
     }
-    policy = WeeklyEnvironmentBuilder.resolve_env_weekly_gate_policy(env_context)
+    from unittest.mock import Mock
+    builder = WeeklyEnvironmentBuilder(
+        db_writer=Mock(),
+        logger=Mock(),
+        index_codes=[],
+        board_env_enabled=False,
+        board_spot_enabled=False,
+        env_index_score_threshold=0.0,
+        weekly_soft_gate_strength_threshold=0.0
+    )
+    policy = builder.resolve_env_weekly_gate_policy(env_context)
     assert policy == "ALLOW_SMALL"
 
 

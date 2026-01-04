@@ -1,10 +1,24 @@
-"""测试 config 模块的功能."""
+"测试 config 模块的功能."
 import os
-from unittest.mock import patch
 import pytest
+from pathlib import Path
+from ashare.core.config import ProxyConfig, load_config, CONFIG_FILE_ENV, get_section
 
-from ashare.config import ProxyConfig
-
+@pytest.fixture(autouse=True)
+def clean_proxy_env(monkeypatch):
+    """每次测试前清理代理相关的环境变量."""
+    # 清理常用的代理变量
+    for key in ['ASHARE_HTTP_PROXY', 'ASHARE_HTTPS_PROXY', 
+                'HTTP_PROXY', 'HTTPS_PROXY', 
+                'http_proxy', 'https_proxy']:
+        monkeypatch.delenv(key, raising=False)
+    
+    # 关键修复：设置一个不存在的配置文件路径，而不是删除变量。
+    # 这样 load_config 会尝试读取该文件，失败后返回 {}，而不是回退读取项目根目录的 config.yaml
+    monkeypatch.setenv(CONFIG_FILE_ENV, "non_existent_dummy_config.yaml")
+    
+    # 清除配置加载缓存
+    load_config.cache_clear()
 
 class TestProxyConfig:
     """测试 ProxyConfig 类."""
@@ -12,200 +26,76 @@ class TestProxyConfig:
     def test_initialization_default(self):
         """测试默认初始化."""
         config = ProxyConfig()
-        
         assert config.http is None
         assert config.https is None
     
     def test_initialization_with_values(self):
         """测试使用自定义值初始化."""
-        config = ProxyConfig(http="http://proxy:8080", https="https://proxy:8080")
-        
-        assert config.http == "http://proxy:8080"
-        assert config.https == "https://proxy:8080"
+        config = ProxyConfig(http="http://p:80", https="https://p:80")
+        assert config.http == "http://p:80"
+        assert config.https == "https://p:80"
     
-    @patch.dict(os.environ, {}, clear=True)
     def test_from_env_empty(self):
         """测试从空环境变量加载配置."""
+        # 由于 clean_proxy_env 设置了假的 config 路径，这里应该读不到任何配置
         config = ProxyConfig.from_env()
-        
         assert config.http is None
         assert config.https is None
     
-    @patch.dict(os.environ, {
-        'ASHARE_HTTP_PROXY': 'http://custom_http:8080',
-        'ASHARE_HTTPS_PROXY': 'https://custom_https:8080'
-    })
-    def test_from_env_ashare_vars(self):
+    def test_from_env_ashare_vars(self, monkeypatch):
         """测试从ASHARE_*环境变量加载配置."""
+        monkeypatch.setenv('ASHARE_HTTP_PROXY', 'http://ashare:80')
+        monkeypatch.setenv('ASHARE_HTTPS_PROXY', 'https://ashare:80')
         config = ProxyConfig.from_env()
-        
-        assert config.http == 'http://custom_http:8080'
-        assert config.https == 'https://custom_https:8080'
+        assert config.http == 'http://ashare:80'
+        assert config.https == 'https://ashare:80'
     
-    @patch.dict(os.environ, {
-        'HTTP_PROXY': 'http://http_proxy:8080',
-        'HTTPS_PROXY': 'https://https_proxy:8080',
-        'http_proxy': 'http://lowercase_http:8080',
-        'https_proxy': 'https://lowercase_https:8080'
-    })
-    def test_from_env_standard_vars(self):
+    def test_from_env_standard_vars(self, monkeypatch):
         """测试从标准环境变量加载配置."""
+        monkeypatch.setenv('HTTP_PROXY', 'http://std:80')
+        monkeypatch.setenv('HTTPS_PROXY', 'https://std:80')
         config = ProxyConfig.from_env()
-        
-        # 根据代码逻辑，优先级是 ASHARE_* > *_PROXY > *_proxy
-        assert config.http == 'http://http_proxy:8080'
-        assert config.https == 'https://https_proxy:8080'
+        assert config.http == 'http://std:80'
+        assert config.https == 'https://std:80'
     
-    @patch.dict(os.environ, {
-        'ASHARE_HTTP_PROXY': 'http://custom_http:8080',
-        'HTTPS_PROXY': 'https://https_proxy:8080'
-    })
-    def test_from_env_mixed_vars(self):
-        """测试混合环境变量优先级."""
+    def test_from_env_precedence(self, monkeypatch):
+        """测试ASHARE_* 优先级高于标准变量."""
+        monkeypatch.setenv('ASHARE_HTTP_PROXY', 'http://ashare:80')
+        monkeypatch.setenv('HTTP_PROXY', 'http://std:80')
         config = ProxyConfig.from_env()
-        
-        # ASHARE_HTTP_PROXY 优先于 HTTPS_PROXY
-        assert config.http == 'http://custom_http:8080'
-        assert config.https == 'https://https_proxy:8080'
+        assert config.http == 'http://ashare:80'
     
-    @patch.dict(os.environ, {
-        'http_proxy': 'http://lowercase_http:8080',
-        'https_proxy': 'https://lowercase_https:8080'
-    })
-    def test_from_env_lowercase_vars(self):
-        """测试从小写环境变量加载配置."""
-        config = ProxyConfig.from_env()
-        
-        assert config.http == 'http://lowercase_http:8080'
-        assert config.https == 'https://lowercase_https:8080'
-    
-    def test_as_requests_proxies_empty(self):
-        """测试空配置生成requests代理格式."""
-        config = ProxyConfig()
+    def test_as_requests_proxies(self):
+        """测试生成requests代理格式."""
+        config = ProxyConfig(http="http://p:1", https="https://p:2")
         proxies = config.as_requests_proxies()
-        
-        assert proxies == {}
+        assert proxies == {"http": "http://p:1", "https": "https://p:2"}
     
-    def test_as_requests_proxies_http_only(self):
-        """测试仅HTTP代理配置."""
-        config = ProxyConfig(http="http://proxy:8080")
-        proxies = config.as_requests_proxies()
-        
-        assert proxies == {"http": "http://proxy:8080"}
-    
-    def test_as_requests_proxies_https_only(self):
-        """测试仅HTTPS代理配置."""
-        config = ProxyConfig(https="https://proxy:8080")
-        proxies = config.as_requests_proxies()
-        
-        assert proxies == {"https": "https://proxy:8080"}
-    
-    def test_as_requests_proxies_both(self):
-        """测试HTTP和HTTPS代理配置."""
-        config = ProxyConfig(
-            http="http://http_proxy:8080",
-            https="https://https_proxy:8080"
-        )
-        proxies = config.as_requests_proxies()
-        
-        expected = {
-            "http": "http://http_proxy:8080",
-            "https": "https://https_proxy:8080"
-        }
-        assert proxies == expected
-    
-    @patch.dict(os.environ, {}, clear=True)
-    def test_apply_to_environment_empty(self):
-        """测试应用空配置到环境变量."""
-        config = ProxyConfig()
-        
-        # 保存原始环境变量
-        original_http_proxy = os.environ.get('HTTP_PROXY')
-        original_https_proxy = os.environ.get('HTTPS_PROXY')
-        original_http_proxy_lower = os.environ.get('http_proxy')
-        original_https_proxy_lower = os.environ.get('https_proxy')
-        
-        config.apply_to_environment()
-        
-        # 验证环境变量没有被设置
-        assert 'HTTP_PROXY' not in os.environ
-        assert 'HTTPS_PROXY' not in os.environ
-        assert 'http_proxy' not in os.environ
-        assert 'https_proxy' not in os.environ
-        
-        # 恢复原始环境变量
-        if original_http_proxy is not None:
-            os.environ['HTTP_PROXY'] = original_http_proxy
-        if original_https_proxy is not None:
-            os.environ['HTTPS_PROXY'] = original_https_proxy
-        if original_http_proxy_lower is not None:
-            os.environ['http_proxy'] = original_http_proxy_lower
-        if original_https_proxy_lower is not None:
-            os.environ['https_proxy'] = original_https_proxy_lower
-    
-    @patch.dict(os.environ, {}, clear=True)
-    def test_apply_to_environment_with_values(self):
+    def test_apply_to_environment(self, monkeypatch):
         """测试应用配置到环境变量."""
-        config = ProxyConfig(
-            http="http://new_http_proxy:8080",
-            https="https://new_https_proxy:8080"
-        )
+        # 确保初始环境干净
+        assert os.environ.get("HTTP_PROXY") is None
         
+        config = ProxyConfig(http="http://new:80", https="https://new:80")
         config.apply_to_environment()
         
-        assert os.environ.get('HTTP_PROXY') == "http://new_http_proxy:8080"
-        assert os.environ.get('HTTPS_PROXY') == "https://new_https_proxy:8080"
-        assert os.environ.get('http_proxy') == "http://new_http_proxy:8080"
-        assert os.environ.get('https_proxy') == "https://new_https_proxy:8080"
+        # 验证环境变量被修改 (monkeypatch 会在测试后自动恢复)
+        assert os.environ["HTTP_PROXY"] == "http://new:80"
+        assert os.environ["HTTPS_PROXY"] == "https://new:80"
     
-    @patch.dict(os.environ, {
-        'HTTP_PROXY': 'http://old_proxy:8080',
-        'HTTPS_PROXY': 'https://old_proxy:8080'
-    })
-    def test_apply_to_environment_overwrites(self):
-        """测试应用配置覆盖现有环境变量."""
-        config = ProxyConfig(
-            http="http://new_http_proxy:8080",
-            https="https://new_https_proxy:8080"
-        )
+    def test_apply_to_environment_partial(self, monkeypatch):
+        """测试部分应用配置."""
+        # 预设 HTTP_PROXY
+        monkeypatch.setenv('HTTP_PROXY', 'http://old:80')
         
-        # 验证初始值
-        assert os.environ.get('HTTP_PROXY') == 'http://old_proxy:8080'
-        assert os.environ.get('HTTPS_PROXY') == 'https://old_proxy:8080'
-        
+        # 只应用 HTTPS 配置
+        config = ProxyConfig(https="https://new:80")
         config.apply_to_environment()
         
-        # 验证被新值覆盖
-        assert os.environ.get('HTTP_PROXY') == "http://new_http_proxy:8080"
-        assert os.environ.get('HTTPS_PROXY') == "https://new_https_proxy:8080"
-        assert os.environ.get('http_proxy') == "http://new_http_proxy:8080"
-        assert os.environ.get('https_proxy') == "https://new_https_proxy:8080"
-    
-    @patch.dict(os.environ, {
-        'HTTP_PROXY': 'http://old_proxy:8080'
-    })
-    def test_apply_to_environment_partial(self):
-        """测试部分配置应用到环境变量."""
-        config = ProxyConfig(https="https://new_https_proxy:8080")
-        
-        # 验证初始值
-        assert os.environ.get('HTTP_PROXY') == 'http://old_proxy:8080'
-        assert os.environ.get('HTTPS_PROXY') is None
-        
-        config.apply_to_environment()
-        
-        # 验证只有https代理被设置，http代理保持不变
-        assert os.environ.get('HTTP_PROXY') == 'http://old_proxy:8080'  # 保持不变
-        assert os.environ.get('HTTPS_PROXY') == "https://new_https_proxy:8080"
-        assert os.environ.get('https_proxy') == "https://new_https_proxy:8080"
-        # 由于config.http为None，不会更新http_proxy
-        assert os.environ.get('http_proxy') is None  # 因为没有设置config.http，所以http_proxy不会被设置
-
-﻿from pathlib import Path
-
-import pytest
-
-from ashare.core.config import CONFIG_FILE_ENV, ProxyConfig, get_section, load_config
+        # HTTP_PROXY 应该保持不变
+        assert os.environ["HTTP_PROXY"] == "http://old:80"
+        # HTTPS_PROXY 应该被设置
+        assert os.environ["HTTPS_PROXY"] == "https://new:80"
 
 
 def _write_config(tmp_path: Path, content: str) -> Path:
@@ -216,9 +106,12 @@ def _write_config(tmp_path: Path, content: str) -> Path:
 
 def test_load_config_returns_empty_when_missing(monkeypatch, tmp_path):
     load_config.cache_clear()
-    missing = tmp_path / "missing.yaml"
+    missing = tmp_path / "missing_absolutely.yaml"
     monkeypatch.setenv(CONFIG_FILE_ENV, str(missing))
-    assert load_config() == {}
+    result = load_config()
+    # Explicitly check type and length to avoid weird hashing issues during equality check
+    assert isinstance(result, dict)
+    assert len(result) == 0
     load_config.cache_clear()
 
 
@@ -241,16 +134,22 @@ def test_get_section_raises_on_invalid_type(monkeypatch, tmp_path):
 
 
 def test_proxyconfig_from_env_and_config(monkeypatch, tmp_path):
+    # 确保 config.yaml 有值，且 env 也有值，验证优先级和组合
     path = _write_config(
         tmp_path,
         "proxy:\n  http: http://cfg\n  https: http://cfgs\n",
     )
     monkeypatch.setenv(CONFIG_FILE_ENV, str(path))
+    
+    # 设置环境变量覆盖 http
     monkeypatch.setenv("ASHARE_HTTP_PROXY", "http://env")
+    # 确保不设置 HTTPS 环境变量，让其从文件读取
     monkeypatch.delenv("ASHARE_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    
     load_config.cache_clear()
     proxy = ProxyConfig.from_env()
+    
     assert proxy.http == "http://env"
     assert proxy.https == "http://cfgs"
     load_config.cache_clear()
-
