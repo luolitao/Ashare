@@ -191,6 +191,7 @@ class DecisionContext:
     runup_breach_reason: str | None = None
 
     signal_age: int | None = None
+    sig_signal: str | None = None
     
     # 新增：量能与时间字段 (Phase 1)
     live_intraday_vol_ratio: float | None = None

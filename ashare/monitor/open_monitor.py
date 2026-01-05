@@ -645,10 +645,25 @@ class MA5MA20OpenMonitorRunner:
                     sig_close = _to_float(row.get("sig_close"))
                     if sig_close:
                         sig_close_map[c] = sig_close
-                    prev_close = _to_float(row.get("_signal_day_prev_close"))
-                    if prev_close:
-                        ref_close_map[c] = prev_close
-                    sig_date_map[c] = row.get("sig_date")
+                    
+                    # 关键修复：确定参考昨收
+                    # 如果 monitor_date > sig_date，说明是隔夜后的监测，参考昨收应为 sig_close
+                    # 如果 monitor_date == sig_date，说明是信号日当天监测，参考昨收应为 _signal_day_prev_close
+                    sig_date_val = row.get("sig_date")
+                    sig_date_str = str(sig_date_val)[:10] if sig_date_val else ""
+                    monitor_date_str = str(monitor_date)[:10] if monitor_date else ""
+                    
+                    chosen_ref = None
+                    if monitor_date_str and sig_date_str and monitor_date_str > sig_date_str:
+                        chosen_ref = sig_close
+                    
+                    if chosen_ref is None:
+                        chosen_ref = _to_float(row.get("_signal_day_prev_close"))
+                    
+                    if chosen_ref:
+                        ref_close_map[c] = chosen_ref
+
+                    sig_date_map[c] = sig_date_val
                     if "strategy_code" in signals.columns:
                         sc = str(row.get("strategy_code") or "").strip()
                         if sc:

@@ -675,6 +675,7 @@ class OpenMonitorEvaluator:
                 ma20_prewarn=ma20_prewarn,
                 ma20_prewarn_reason=ma20_prewarn_reason,
                 signal_age=signal_age,
+                sig_signal=str(row.get("sig_signal") or "").strip().upper() or None,
                 limit_up_trigger=limit_up_trigger,
                 runup_breach=breach,
                 runup_breach_reason=breach_reason,

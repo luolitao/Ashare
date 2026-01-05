@@ -378,6 +378,16 @@ def build_default_monitor_rules(
 
     return [
         Rule(
+            id="SIGNAL_DIRECTION_SELL",
+            category="ACTION",
+            severity=100, # 最高优先级，防止误导
+            predicate=lambda ctx: bool(getattr(ctx, "sig_signal") == "SELL"),
+            effect=lambda ctx: RuleResult(
+                reason="卖出信号(忽略买入监测)",
+                action_override="SKIP",
+            ),
+        ),
+        Rule(
             id="ENV_STOP",
             category="ACTION",
             severity=config.sev_env_stop,
@@ -417,7 +427,7 @@ def build_default_monitor_rules(
                 and (getattr(ctx, "live_intraday_vol_ratio") < config.min_vol_ratio_risk_off)
             ),
             effect=lambda ctx: RuleResult(
-                reason=f"RISK_OFF量比不足(<{config.min_vol_ratio_risk_off})",
+                reason=f"RISK_OFF量比不足({getattr(ctx, 'live_intraday_vol_ratio'):.2f}<{config.min_vol_ratio_risk_off})",
                 action_override="WAIT",
             ),
         ),
@@ -582,6 +592,7 @@ def build_default_monitor_rules(
             severity=config.sev_low_suck_bonus,
             predicate=lambda ctx: bool(
                 config.enable_low_suck_bonus
+                and (getattr(ctx, "sig_signal") == "BUY")
                 and (getattr(ctx, "low_suck_score") or 0) >= config.low_suck_bonus_min_score
                 # 【新增】硬性门槛：即使形态再好，如果跌幅太深，也不要是接飞刀
                 # 在 RISK_OFF 环境下，跌幅超过 2% (live_pct < -2.0) 直接熔断
