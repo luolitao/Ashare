@@ -33,7 +33,20 @@ def run_indicators_task(logger: logging.Logger):
         mi.run_weekly_indicator(mode='incremental')
 
         logger.info(f">>> 正在计算日线市场环境...")
-        mi.run_daily_indicator(mode='incremental')
+        daily_mode = os.getenv("ASHARE_DAILY_INDICATOR_MODE", "incremental").strip().lower() or "incremental"
+        daily_start = os.getenv("ASHARE_DAILY_INDICATOR_START", "").strip() or None
+        daily_end = os.getenv("ASHARE_DAILY_INDICATOR_END", "").strip() or None
+        logger.info(
+            "日线指标参数：mode=%s start=%s end=%s",
+            daily_mode,
+            daily_start or "-",
+            daily_end or "-",
+        )
+        mi.run_daily_indicator(
+            mode=daily_mode,
+            start_date=daily_start,
+            end_date=daily_end,
+        )
         
         return True
     except Exception as e:

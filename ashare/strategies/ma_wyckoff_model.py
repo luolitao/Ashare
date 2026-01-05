@@ -32,17 +32,41 @@ class MAWyckoffStrategy:
     3. 4档信号系统优化仓位管理
     """
     
-    def __init__(self, 
-                 ma_short=5, 
-                 ma_long=20, 
-                 efi_window=60, 
-                 divergence_lookback=30,
-                 confirmation_window=10):
+    def __init__(
+        self,
+        ma_short=5,
+        ma_long=20,
+        efi_window=60,
+        divergence_lookback=30,
+        confirmation_window=10,
+        long_ma_window=200,
+        long_slope_window=20,
+        structure_window=160,
+        box_len_min=80,
+        box_volatility_cap=0.25,
+        vol_confirm_window=60,
+        vol_contract_ratio=0.85,
+        vol_imbalance_threshold=1.2,
+        breakout_pct=0.01,
+        reclaim_tol=0.003,
+        vol_spike_mult=1.3,
+    ):
         self.ma_short = ma_short
         self.ma_long = ma_long
         self.efi_window = efi_window
         self.divergence_lookback = divergence_lookback
         self.confirmation_window = confirmation_window # 金叉前 N 天寻找背离确认
+        self.long_ma_window = long_ma_window
+        self.long_slope_window = long_slope_window
+        self.structure_window = structure_window
+        self.box_len_min = box_len_min
+        self.box_volatility_cap = box_volatility_cap
+        self.vol_confirm_window = vol_confirm_window
+        self.vol_contract_ratio = vol_contract_ratio
+        self.vol_imbalance_threshold = vol_imbalance_threshold
+        self.breakout_pct = breakout_pct
+        self.reclaim_tol = reclaim_tol
+        self.vol_spike_mult = vol_spike_mult
 
     def run(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -51,7 +75,7 @@ class MAWyckoffStrategy:
         if df.empty:
             return df
 
-        df = df.copy()
+        df = df.copy().sort_values("date")
 
         # ----------------------------------------
         # 1. 基础指标计算
@@ -78,7 +102,51 @@ class MAWyckoffStrategy:
         )
 
         # ----------------------------------------
-        # 2. 逻辑状态判定
+        # 2. 长周期结构识别
+        # ----------------------------------------
+        df["ma_longterm"] = calculate_ma(df["close"], self.long_ma_window)
+        long_ma_shift = df["ma_longterm"].shift(self.long_slope_window)
+        df["long_ma_slope"] = (df["ma_longterm"] - long_ma_shift) / long_ma_shift.replace(0, np.nan)
+        df["long_trend_up"] = df["long_ma_slope"] > 0
+        df["long_trend_down"] = df["long_ma_slope"] < 0
+
+        roll_high = df["high"].rolling(self.structure_window, min_periods=self.box_len_min).max()
+        roll_low = df["low"].rolling(self.structure_window, min_periods=self.box_len_min).min()
+        df["box_high"] = roll_high
+        df["box_low"] = roll_low
+        df["box_range_pct"] = (roll_high - roll_low) / roll_low.replace(0, np.nan)
+        df["box_ok"] = df["box_range_pct"] <= self.box_volatility_cap
+
+        vol_up = df["volume"].where(df["close"] >= df["open"], 0.0)
+        vol_down = df["volume"].where(df["close"] < df["open"], 0.0)
+        up_sum = vol_up.rolling(self.vol_confirm_window, min_periods=10).sum()
+        down_sum = vol_down.rolling(self.vol_confirm_window, min_periods=10).sum()
+        df["down_up_vol_ratio"] = down_sum / up_sum.replace(0, np.nan)
+
+        vol_short = df["volume"].rolling(20, min_periods=10).mean()
+        vol_long = df["volume"].rolling(self.vol_confirm_window, min_periods=20).mean()
+        df["vol_contract"] = vol_short <= (vol_long * self.vol_contract_ratio)
+
+        acc_base = (
+            df["box_ok"]
+            & (df["long_trend_down"] | (df["close"] < df["ma_longterm"]))
+            & (df["down_up_vol_ratio"] <= self.vol_imbalance_threshold)
+            & df["vol_contract"]
+        )
+        dis_base = (
+            df["box_ok"]
+            & (df["long_trend_up"] | (df["close"] > df["ma_longterm"]))
+            & (df["down_up_vol_ratio"] >= self.vol_imbalance_threshold)
+        )
+
+        df["wyckoff_phase"] = "NONE"
+        df.loc[acc_base, "wyckoff_phase"] = "ACCUMULATION"
+        df.loc[dis_base, "wyckoff_phase"] = "DISTRIBUTION"
+        df.loc[df["long_trend_up"] & (~df["box_ok"]), "wyckoff_phase"] = "TREND_UP"
+        df.loc[df["long_trend_down"] & (~df["box_ok"]), "wyckoff_phase"] = "TREND_DOWN"
+
+        # ----------------------------------------
+        # 3. 逻辑状态判定
         # ----------------------------------------
         
         # A. 趋势状态
@@ -104,7 +172,27 @@ class MAWyckoffStrategy:
         df['is_confirmed_bottom'] = df['has_recent_bull_div'] | df['has_recent_efi_strength']
 
         # ----------------------------------------
-        # 3. 动作分级 (Action Generation)
+        # 4. 触发事件 (Spring / Upthrust / SOS / SOW)
+        # ----------------------------------------
+        vol_spike = df["volume"] >= (vol_long * self.vol_spike_mult)
+        break_up = df["high"] > df["box_high"] * (1.0 + self.breakout_pct)
+        break_down = df["low"] < df["box_low"] * (1.0 - self.breakout_pct)
+        reclaim_up = df["close"] <= df["box_high"] * (1.0 + self.reclaim_tol)
+        reclaim_down = df["close"] >= df["box_low"] * (1.0 - self.reclaim_tol)
+
+        df["event_spring"] = break_down & reclaim_down & vol_spike
+        df["event_upthrust"] = break_up & reclaim_up & vol_spike
+        df["event_sos"] = break_up & (~reclaim_up) & vol_spike
+        df["event_sow"] = break_down & (~reclaim_down) & vol_spike
+
+        df["wyckoff_event"] = ""
+        df.loc[df["event_spring"], "wyckoff_event"] = "SPRING"
+        df.loc[df["event_upthrust"], "wyckoff_event"] = "UPTHRUST"
+        df.loc[df["event_sos"], "wyckoff_event"] = "SOS"
+        df.loc[df["event_sow"], "wyckoff_event"] = "SOW"
+
+        # ----------------------------------------
+        # 5. 动作分级 (Action Generation)
         # ----------------------------------------
         df['action'] = ACTION_HOLD # 默认
         
@@ -145,13 +233,21 @@ class MAWyckoffStrategy:
         
         df['action'] = np.select(
             [
-                df['death_cross'],                                      # 1. 必须跑
+                df['death_cross'],  # 1. 必须跑
+                (df["wyckoff_phase"] == "DISTRIBUTION") & df["event_sow"],
+                (df["wyckoff_phase"] == "DISTRIBUTION") & df["event_upthrust"],
+                (df["wyckoff_phase"] == "ACCUMULATION") & df["event_spring"],
+                (df["wyckoff_phase"] == "ACCUMULATION") & df["event_sos"],
                 (df['golden_cross']) & (df['is_confirmed_bottom']),     # 2. 完美买点
                 (df['golden_cross']),                                   # 3. 普通买点 (fallback)
                 (df['trend_bullish']) & (df['signal_reduce'])           # 4. 持仓中预警
             ],
             [
                 ACTION_SELL,
+                ACTION_SELL,
+                ACTION_REDUCE,
+                ACTION_BUY_STRONG,
+                ACTION_BUY_LIGHT,
                 ACTION_BUY_STRONG,
                 ACTION_BUY_LIGHT,
                 ACTION_REDUCE

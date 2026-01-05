@@ -20,6 +20,7 @@ class MonitorRuleConfig:
     max_gap_up_pct: float = 0.05
     max_gap_up_atr_mult: float = 1.5
     max_gap_down_pct: float = -0.03
+    max_gap_down_atr_mult: float = 1.0
     min_open_vs_ma20_pct: float = 0.0
     pullback_min_open_vs_ma20_pct: float = -0.01
     below_ma20_tol_pct: float = 0.002
@@ -173,6 +174,7 @@ class MonitorRuleConfig:
                 _get_float("max_gap_down_pct", defaults.max_gap_down_pct),
                 "max_gap_down_pct",
             ),
+            max_gap_down_atr_mult=_get_float("max_gap_down_atr_mult", defaults.max_gap_down_atr_mult),
             min_open_vs_ma20_pct=_normalize_ratio_pct(
                 _get_float("min_open_vs_ma20_pct", defaults.min_open_vs_ma20_pct),
                 "min_open_vs_ma20_pct",
@@ -378,12 +380,32 @@ def build_default_monitor_rules(
 
     return [
         Rule(
+            id="SIGNAL_STOP_VETO",
+            category="ACTION",
+            severity=110,  # 极高优先级，策略明确否决
+            predicate=lambda ctx: bool(getattr(ctx, "sig_signal") == "STOP"),
+            effect=lambda ctx: RuleResult(
+                reason="策略明确否决(STOP/VETO)",
+                action_override="STOP",
+            ),
+        ),
+        Rule(
             id="SIGNAL_DIRECTION_SELL",
             category="ACTION",
-            severity=100, # 最高优先级，防止误导
+            severity=100,
             predicate=lambda ctx: bool(getattr(ctx, "sig_signal") == "SELL"),
             effect=lambda ctx: RuleResult(
                 reason="卖出信号(忽略买入监测)",
+                action_override="SKIP",
+            ),
+        ),
+        Rule(
+            id="SIGNAL_NOT_BUY_IGNORE",
+            category="ACTION",
+            severity=95,
+            predicate=lambda ctx: bool(getattr(ctx, "sig_signal") not in ["BUY", "STOP", "SELL"]),
+            effect=lambda ctx: RuleResult(
+                reason=f"非买入信号({getattr(ctx, 'sig_signal')})，忽略",
                 action_override="SKIP",
             ),
         ),
@@ -585,6 +607,34 @@ def build_default_monitor_rules(
                 action_override="STOP",
             ),
         ),
+        # === 新增：VWAP 日内强弱规则 ===
+        Rule(
+            id="VWAP_BREAKDOWN_STOP",
+            category="ACTION",
+            severity=88, # 高优先级拦截
+            predicate=lambda ctx: bool(
+                (getattr(ctx, "dist_to_vwap") is not None)
+                and (getattr(ctx, "dist_to_vwap") < -0.015) # 跌破均价线超过 1.5%
+            ),
+            effect=lambda ctx: RuleResult(
+                reason=f"日内走势转弱: 跌破均价线({getattr(ctx, 'dist_to_vwap'):.2%})",
+                action_override="STOP",
+            ),
+        ),
+        Rule(
+            id="VWAP_SUPPORT_BONUS",
+            category="ACTION",
+            severity=35, # 辅助加分
+            predicate=lambda ctx: bool(
+                (getattr(ctx, "dist_to_vwap") is not None)
+                and (getattr(ctx, "dist_to_vwap") >= 0) # 处于均价线上方
+                and (getattr(ctx, "sig_signal") == "BUY")
+            ),
+            effect=lambda ctx: RuleResult(
+                reason="日内承接强: 站稳均价线",
+                # 不强制覆盖 EXECUTE，仅作理由补充和确认
+            ),
+        ),
         # === 新增：低吸增强规则 ===
         Rule(
             id="LOW_SUCK_BONUS",
@@ -594,6 +644,8 @@ def build_default_monitor_rules(
                 config.enable_low_suck_bonus
                 and (getattr(ctx, "sig_signal") == "BUY")
                 and (getattr(ctx, "low_suck_score") or 0) >= config.low_suck_bonus_min_score
+                # 【重要】如果存在明显的派发风险标签，禁止低吸加分
+                and "WYCKOFF_SOW" not in str(getattr(ctx, "risk_tag", "") or "")
                 # 【新增】硬性门槛：即使形态再好，如果跌幅太深，也不要是接飞刀
                 # 在 RISK_OFF 环境下，跌幅超过 2% (live_pct < -2.0) 直接熔断
                 and (getattr(ctx, "live_pct") or 0) > (-2.0 if _is_risk_off(ctx) else -3.5)

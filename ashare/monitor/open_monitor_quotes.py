@@ -376,10 +376,14 @@ def fetch_minute_eastmoney(
                 continue
             time_str = parts[0]
             price = _to_float(parts[1])
-            vol = _to_float(parts[2])
+            # 修正：东财分时接口返回量通常为“手”，需转换为“股”
+            vol_raw = _to_float(parts[2])
+            vol = vol_raw * 100 if vol_raw is not None else None
+            
             amount = _to_float(parts[3]) if len(parts) > 3 else None
             avg_price = _to_float(parts[4]) if len(parts) > 4 else None
             if avg_price is None and vol is not None:
+                # 注意：计算均价时使用股口径，amount 已经是元口径
                 cum_vol += vol
                 if amount is not None:
                     cum_amt += amount

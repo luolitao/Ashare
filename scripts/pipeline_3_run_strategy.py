@@ -62,9 +62,42 @@ def run_chip_filter_for_all(runner_template: StrategyRunner, strategies: List[st
         logger.warning("筹码计算跳过：未找到任何信号日期。")
         return
         
-    logger.info(f"正在为日期 {latest_date} 计算筹码因子...")
+    # 解析回填区间
+    env_days = os.getenv("ASHARE_CHIP_BACKFILL_DAYS", "").strip()
+    env_start = os.getenv("ASHARE_CHIP_BACKFILL_START", "").strip() or None
+    env_end = os.getenv("ASHARE_CHIP_BACKFILL_END", "").strip() or None
 
-    # 读取所有策略当天的信号
+    if env_start or env_end:
+        start_date = env_start or str(latest_date)
+        end_date = env_end or str(latest_date)
+    else:
+        if env_days.isdigit():
+            backfill_days = max(int(env_days), 1)
+        else:
+            if str(params.get("signals_write_scope", "")).strip().lower() == "window":
+                backfill_days = max(int(params.get("signals_write_window_days", 1) or 1), 1)
+            else:
+                backfill_days = 1
+        end_date = str(latest_date)
+        start_date = str(pd.to_datetime(latest_date) - pd.Timedelta(days=backfill_days - 1))
+
+    stmt_dates = text(
+        f"""
+        SELECT DISTINCT `sig_date`
+        FROM `{signal_table}`
+        WHERE `sig_date` BETWEEN :start_date AND :end_date
+        ORDER BY `sig_date` ASC
+        """
+    )
+    with repo.engine.begin() as conn:
+        dates_df = pd.read_sql(stmt_dates, conn, params={"start_date": start_date, "end_date": end_date})
+    sig_dates = dates_df["sig_date"].dropna().astype(str).tolist() if not dates_df.empty else []
+    if not sig_dates:
+        logger.warning("筹码计算跳过：区间内无信号日期。")
+        return
+
+    logger.info("正在回填筹码因子：dates=%s (from %s to %s)", len(sig_dates), sig_dates[0], sig_dates[-1])
+
     stmt = text(
         f"""
         SELECT
@@ -72,7 +105,6 @@ def run_chip_filter_for_all(runner_template: StrategyRunner, strategies: List[st
           e.`code`,
           e.`strategy_code`,
           e.`signal`,
-          e.`final_action`,
           e.`risk_tag`,
           ind.`close`,
           ind.`ma20`,
@@ -89,23 +121,20 @@ def run_chip_filter_for_all(runner_template: StrategyRunner, strategies: List[st
         WHERE e.`sig_date` = :d
         """
     )
-    with repo.engine.begin() as conn:
-        sig_df = pd.read_sql(stmt, conn, params={"d": latest_date})
-    
-    if sig_df.empty:
-        logger.warning("筹码计算跳过：无信号数据。")
-        return
 
-    # 去重：不同策略可能选中同一只股票，筹码分只需计算一次
-    sig_df_unique = sig_df.drop_duplicates(subset=["code"]).copy()
-
-    # 计算并写入
     chip = ChipFilter()
-    # ChipFilter 会自动更新 strategy_chip_filter 表
-    # 注意：ChipFilter 内部逻辑是按 (date, code) 唯一键更新的，不区分 strategy_code
-    # 这意味着同一个标的如果被多个策略选中，其筹码分是一样的，这是合理的。
-    result = chip.apply(sig_df_unique)
-    logger.info("筹码计算完成：已更新 %s 条记录。", len(result))
+    total_rows = 0
+    for d in sig_dates:
+        with repo.engine.begin() as conn:
+            sig_df = pd.read_sql(stmt, conn, params={"d": d})
+        if sig_df.empty:
+            continue
+        sig_df_unique = sig_df.drop_duplicates(subset=["code"]).copy()
+        result = chip.apply(sig_df_unique)
+        total_rows += len(result)
+        logger.info("筹码回填完成：date=%s rows=%s", d, len(result))
+
+    logger.info("筹码回填结束：dates=%s total_rows=%s", len(sig_dates), total_rows)
 
 
 def main():

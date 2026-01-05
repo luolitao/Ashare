@@ -272,6 +272,58 @@ class OpenMonitorEvaluator:
         if "code" not in df.columns or "strategy_code" not in df.columns:
             return df
 
+        def _normalize_list(raw: Any) -> list[str]:
+            if isinstance(raw, str):
+                items = [s.strip() for s in raw.split(",")]
+                return [s for s in items if s]
+            if isinstance(raw, (list, tuple)):
+                return [str(v).strip() for v in raw if str(v).strip()]
+            return []
+
+        def _normalize_veto_map(raw: Any) -> dict[str, set[str]]:
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, set[str]] = {}
+            for k, v in raw.items():
+                key_norm = str(k).strip()
+                if not key_norm:
+                    continue
+                if isinstance(v, str):
+                    vals = [s.strip().upper() for s in v.split(",") if s.strip()]
+                elif isinstance(v, (list, tuple)):
+                    vals = [str(s).strip().upper() for s in v if str(s).strip()]
+                else:
+                    vals = []
+                if vals:
+                    out[key_norm] = set(vals)
+            return out
+
+        def _normalize_pairs(raw: Any) -> list[tuple[str, str]]:
+            if not isinstance(raw, (list, tuple)):
+                return []
+            pairs: list[tuple[str, str]] = []
+            for item in raw:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                left = str(item[0]).strip()
+                right = str(item[1]).strip()
+                if left and right:
+                    pairs.append((left, right))
+            return pairs
+
+        priority = _normalize_list(getattr(self.params, "strategy_priority", None))
+        if not priority:
+            priority = ["ma5_ma20_trend", "low_suck_reversal", "wyckoff_distribution"]
+        veto_map = _normalize_veto_map(getattr(self.params, "strategy_veto_signals", None))
+        if not veto_map:
+            veto_map = {"wyckoff_distribution": {"SELL", "RISK"}}
+        promote_buy = set(_normalize_list(getattr(self.params, "strategy_promote_buy", None)))
+        if not promote_buy:
+            promote_buy = {"low_suck_reversal"}
+        resonance_pairs = _normalize_pairs(getattr(self.params, "strategy_resonance_pairs", None))
+        if not resonance_pairs:
+            resonance_pairs = [("ma5_ma20_trend", "low_suck_reversal")]
+
         # 按 (sig_date, code) 分组
         # 注意：这里假设 sig_date 已经是 datetime 或统一格式
         grouped = df.groupby(["sig_date", "code"])
@@ -282,22 +334,20 @@ class OpenMonitorEvaluator:
             # 1. 提取各策略信号
             strategies = set(group["strategy_code"].astype(str))
             
-            # 获取主策略行 (优先 ma5_ma20_trend)
+            # 获取主策略行 (按 priority)
             primary_row = None
-            if "ma5_ma20_trend" in strategies:
-                primary_row = group[group["strategy_code"] == "ma5_ma20_trend"].iloc[0]
-            elif "low_suck_reversal" in strategies:
-                primary_row = group[group["strategy_code"] == "low_suck_reversal"].iloc[0]
-            else:
+            for strategy in priority:
+                if strategy in strategies:
+                    primary_row = group[group["strategy_code"] == strategy].iloc[0]
+                    break
+            if primary_row is None:
                 primary_row = group.iloc[0]
             
             # 复制主行作为基础
             row = primary_row.copy()
             
             # 2. 收集各方意见
-            wyckoff_signal = None
-            low_suck_signal = None
-            trend_signal = None
+            sig_map: dict[str, str] = {}
             
             # 遍历 group 收集信息
             reasons = []
@@ -318,39 +368,42 @@ class OpenMonitorEvaluator:
                 if reason: reasons.append(f"[{s_code}]{reason}")
                 if risk and risk != "None": risks.append(risk)
                 
-                if s_code == "wyckoff_distribution":
-                    wyckoff_signal = sig
-                elif s_code == "low_suck_reversal":
-                    low_suck_signal = sig
-                elif s_code == "ma5_ma20_trend":
-                    trend_signal = sig
+                if s_code:
+                    sig_map[s_code] = sig
             
             # 3. 仲裁逻辑 (Arbitration Logic)
             final_signal = row.get("sig_signal")
-            final_action = row.get("sig_final_action")
-            
-            # 规则 A: 威科夫一票否决 (Veto)
-            if wyckoff_signal in ["SELL", "RISK"]:
+
+            veto_hit = None
+            for s_code, veto_signals in veto_map.items():
+                if sig_map.get(s_code) in veto_signals:
+                    veto_hit = s_code
+                    break
+
+            # 规则 A: 策略否决 (Veto)
+            if veto_hit:
                 final_signal = "STOP"
-                final_action = "STOP"
-                reasons.append("【风控】威科夫派发阻断")
-                risks.append("WYCKOFF_VETO")
-            
-            # 规则 B: 低吸共振 (Resonance)
-            elif low_suck_signal == "BUY":
-                if trend_signal == "BUY":
-                    reasons.append("【共振】趋势+低吸双重确认")
-                    # 可以考虑提升 priority 或放宽 gap
-                elif trend_signal != "BUY":
-                    # 仅低吸策略喊买
-                    final_signal = "BUY"
-                    reasons.append("【机会】低吸策略触发")
+                reasons.append(f"【风控】{veto_hit} veto")
+                risks.append(f"{veto_hit.upper()}_VETO")
+            else:
+                # 规则 B: 共振提示
+                for left, right in resonance_pairs:
+                    if sig_map.get(left) == "BUY" and sig_map.get(right) == "BUY":
+                        reasons.append(f"【共振】{left}+{right}")
+                        break
+
+                # 规则 C: 促进买入 (Promote)
+                if final_signal != "BUY":
+                    for s_code in promote_buy:
+                        if sig_map.get(s_code) == "BUY":
+                            final_signal = "BUY"
+                            reasons.append(f"【机会】{s_code} 提升为 BUY")
+                            break
             
             # 更新合并后的行
             row["sig_signal"] = final_signal
-            if final_action is not None:
-                row["sig_final_action"] = final_action
-            row["sig_reason"] = "; ".join(reasons)[:255]
+            if reasons:
+                row["sig_reason"] = "; ".join(reasons)[:255]
             if risks:
                 row["risk_tag"] = ",".join(set(risks))
             
@@ -469,8 +522,11 @@ class OpenMonitorEvaluator:
         max_up = self.rule_config.max_gap_up_pct
         max_up_atr_mult = self.rule_config.max_gap_up_atr_mult
         max_down = self.rule_config.max_gap_down_pct
-        min_vs_ma20 = self.rule_config.min_open_vs_ma20_pct
-        pullback_min_vs_ma20 = self.rule_config.pullback_min_open_vs_ma20_pct
+        max_down_atr_mult = self.rule_config.max_gap_down_atr_mult
+        
+        # 重新定义：基于 ATR 的 MA20 容差
+        ma20_atr_dist_min = -0.2 # 默认允许跌破 0.2 ATR
+        
         limit_up_trigger = self.rule_config.limit_up_trigger_pct
         stop_atr_mult = self.rule_config.stop_atr_mult
         runup_atr_max = self.rule_config.runup_atr_max
@@ -561,34 +617,37 @@ class OpenMonitorEvaluator:
             runup_ref_price_list.append(runup_metrics.runup_ref_price)
             runup_ref_source_list.append(runup_metrics.runup_ref_source)
 
+            # 动态计算高低开阈值 (ATR 自适应)
             threshold_gap_up = max_up
+            threshold_gap_down = max_down
             if sig_atr14 and sig_atr14 > 0 and ref_close:
-                atr_gap = max_up_atr_mult * sig_atr14 / ref_close
-                threshold_gap_up = min(max_up, atr_gap)
+                # 高开上限：min(5%, 1.5*ATR)
+                atr_gap_up = max_up_atr_mult * sig_atr14 / ref_close
+                threshold_gap_up = min(max_up, atr_gap_up)
+                
+                # 低开下限：max(-3%, -1.0*ATR)
+                atr_gap_down = -max_down_atr_mult * sig_atr14 / ref_close
+                threshold_gap_down = max(max_down, atr_gap_down)
 
-            ma20_thresh = pullback_min_vs_ma20 if is_pullback else min_vs_ma20
-            if atr_pct is not None and ma20_atr_tol_mult is not None:
-                dyn_thresh = -ma20_atr_tol_mult * atr_pct
-                ma20_thresh = min(ma20_thresh, dyn_thresh)
-                if ma20_dyn_min_pct is not None:
-                    ma20_thresh = max(ma20_thresh, ma20_dyn_min_pct)
+            # MA20 阈值重构：使用 ATR 偏离度
+            # 如果是回踩信号，允许跌破 0.2 ATR；普通金叉要求必须在 -0.1 ATR 以上
+            ma20_atr_thresh = ma20_atr_dist_min if is_pullback else -0.1
+            ma20_thresh = (ma20_atr_thresh * sig_atr14 / sig_ma20) if (sig_ma20 and sig_atr14) else 0.0
 
             ma20_prewarn = False
             ma20_prewarn_reason = None
             if (
                 price_now is not None
                 and sig_ma20 is not None
-                and ma20_thresh is not None
-                and below_ma20_tol_pct is not None
+                and sig_atr14 is not None
             ):
-                invalid_cut = sig_ma20 * (1 + ma20_thresh - below_ma20_tol_pct)
-                prewarn_cut = sig_ma20 * (
-                    1 + ma20_thresh - below_ma20_tol_pct + ma20_prewarn_buffer_pct
-                )
+                # 预警线：在阈值基础上再向上浮动 0.1 ATR
+                invalid_cut = sig_ma20 + ma20_atr_thresh * sig_atr14
+                prewarn_cut = invalid_cut + 0.1 * sig_atr14
                 if price_now < prewarn_cut and price_now >= invalid_cut:
                     ma20_prewarn = True
                     ma20_prewarn_reason = (
-                        f"near_ma20_cut price={price_now:.2f} prewarn={prewarn_cut:.2f}"
+                        f"near_ma20_cut price={price_now:.2f} prewarn={prewarn_cut:.2f} (ATR-based)"
                     )
 
             chip_score = _to_float(row.get("sig_chip_score"))
@@ -658,6 +717,15 @@ class OpenMonitorEvaluator:
                 delta = (checked_at_ts - market_open).total_seconds() / 60
                 minutes_open = int(delta) if delta > 0 else 0
 
+            # 计算 VWAP (日内均价)
+            live_amount = _to_float(row.get("live_amount"))
+            vwap = None
+            dist_to_vwap = None
+            if live_vol is not None and live_vol > 0 and live_amount is not None:
+                vwap = live_amount / live_vol
+                if price_now is not None:
+                    dist_to_vwap = (price_now - vwap) / vwap
+
             ctx = DecisionContext(
                 entry_exposure_cap=env.position_cap_pct,
                 env=env,
@@ -690,6 +758,10 @@ class OpenMonitorEvaluator:
                 low_suck_score=ls_score,
                 low_suck_strength=ls_strength,
                 low_suck_reason=ls_reason,
+                # VWAP 注入
+                vwap=vwap,
+                dist_to_vwap=dist_to_vwap,
+                risk_tag=str(row.get("risk_tag") or "").strip() or None,
             )
             self.rule_engine.apply(ctx, self.rules)
 

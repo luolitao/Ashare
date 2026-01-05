@@ -118,6 +118,13 @@ class StrategyRunner:
             # 这里为了通用性，我们尝试加载，如果策略不需要也没关系
             df_ind = self._attach_board_info(df_ind, candidate_codes, latest_date)
 
+            # --- 新增：注入指数收益率 ---
+            index_code = self.params.get("benchmark_index", "sh.000001")
+            df_index = self.data_repo.load_index_kline(index_code, latest_date, lookback=lookback)
+            if not df_index.empty:
+                df_ind = df_ind.merge(df_index[["date", "index_ret"]], on="date", how="left")
+            # --------------------------
+
             # 3. 调用策略计算信号
             self.logger.info("开始计算策略信号...")
             df_result = self.strategy.generate_signals(df_ind)
@@ -179,11 +186,9 @@ class StrategyRunner:
         """将非标准列打包进 extra_json。"""
         # 标准列，除此之外的都算 extra
         std_cols = {
-            "code", "date", "signal", "reason", "risk_tag", "stop_ref", 
-            "final_action", "final_reason", "final_cap", "strategy_code",
-            "risk_note", "macd_event", "chip_score", "gdhs_delta_pct",
-            "gdhs_announce_date", "chip_reason", "chip_penalty", "chip_note",
-            "age_days", "deadzone_hit", "stale_hit", "fear_score", "wave_type"
+            "code", "date", "signal", "reason", "risk_tag",
+            "final_cap", "strategy_code",
+            "chip_score", "chip_reason",
         }
         
         # 不需要打包进 JSON 的冗余指标（因为 indicator 表里有）
@@ -193,7 +198,7 @@ class StrategyRunner:
             "vol_ratio", "avg_volume_20",
             "macd_dif", "macd_dea", "macd_hist", "prev_macd_hist",
             "kdj_k", "kdj_d", "kdj_j",
-            "atr14", "rsi14",
+            "atr14",
             "ret_10", "ret_20", "limit_up_cnt_20",
             "ma20_bias", "yearline_state",
             "bull_engulf", "bear_engulf", "engulf_body_atr", "engulf_score", "engulf_stop_ref",

@@ -37,17 +37,22 @@ class TrendStrategy(BaseStrategy):
         # 1. 预处理
         df = self._prepare_data(df)
         
-        # 2. 计算各层级信号
+        # 2. 计算威科夫底层状态 (全局状态机)
+        from ashare.strategies.ma_wyckoff_model import MAWyckoffStrategy
+        wyck_model = MAWyckoffStrategy()
+        df = wyck_model.run(df) # 注入 wyckoff_phase, wyckoff_event 等
+        
+        # 3. 计算各层级信号
         hard_gate = self._calc_hard_gate(df)
         base_signals = self._calc_base_signals(df)
         soft_factors = self._calc_soft_factors(df)
         
-        # 3. 关联筹码数据 (IO 操作)
+        # 4. 关联筹码数据 (IO 操作)
         chip_df = self._fetch_chip_data(df)
         if not chip_df.empty:
             df = df.merge(chip_df, on=["date", "code"], how="left")
         
-        # 4. 综合决策
+        # 5. 综合决策
         result = self._combine_signals(df, hard_gate, base_signals, soft_factors)
         
         return result
@@ -55,7 +60,7 @@ class TrendStrategy(BaseStrategy):
     def _prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values(["code", "date"]).copy()
         # 确保列存在
-        cols = ["close", "ma5", "ma20", "ma60", "ma20_bias", "vol_ratio", "atr14", "volume"]
+        cols = ["close", "ma5", "ma20", "ma60", "ma20_bias", "vol_ratio", "atr14", "volume", "rsi14"]
         for c in cols:
             if c not in df.columns:
                 df[c] = np.nan
@@ -91,27 +96,44 @@ class TrendStrategy(BaseStrategy):
 
         trend_ok = (c > ma60) & (ma20 > ma60)
         
-        # 金叉
+        # 1. 准备量能参考：5日均量
+        df["vol_ma5"] = df.groupby("code")["volume"].transform(lambda x: x.rolling(5).mean())
+        
+        # 2. 金叉买入
         cross_up = (ma5 > ma20) & (prev_ma5 <= prev_ma20)
         buy_cross = trend_ok & cross_up
         
-        # 回踩
-        pullback_band = float(p.get("pullback_band", 0.02))
-        buy_pullback = trend_ok & (df["ma20_bias"].abs() < pullback_band) & (ma5 > prev_ma5)
+        # 3. 回踩买入重构 (引入 VSA)：必须是缩量回踩或平量回踩，不能是放量大跌
+        pullback_atr_mult = float(p.get("pullback_atr_mult", 0.6))
+        dist_to_ma20 = (c - ma20).abs()
+        # VSA 条件：当前量 < 5日均量的 1.1 倍 (防止放量砸盘)
+        vol_vsa_ok = df["volume"] < df["vol_ma5"] * 1.1
+        
+        buy_pullback = trend_ok & (dist_to_ma20 <= pullback_atr_mult * df["atr14"]) & (ma5 > prev_ma5) & vol_vsa_ok
         
         base_buy = buy_cross | buy_pullback
         
-        # 卖出
+        # 4. 止损逻辑重构 (增加 ATR 缓冲区)：防止假破位洗盘
+        # 原逻辑：c < ma20
+        # 新逻辑：c < ma20 - 0.3 * ATR
+        stop_buffer_atr = float(p.get("stop_buffer_atr", 0.3))
+        hard_stop = c < (ma20 - stop_buffer_atr * df["atr14"])
+        
         dead_cross = (ma5 < ma20) & (prev_ma5 >= prev_ma20)
         
-        # 滞涨
+        # 滞涨判定
         stag_vol = float(p.get("stagnation_vol_ratio_threshold", 2.0))
-        stag_pct = float(p.get("stagnation_pct_abs_threshold", 0.01))
-        stag_bias = float(p.get("stagnation_ma20_bias_threshold", 0.1))
-        stagnation = (df["vol_ratio"] >= stag_vol) & (df["pct_chg"].abs() < stag_pct) & (df["ma20_bias"] > stag_bias)
+        stag_atr_mult = float(p.get("stagnation_atr_mult", 0.2)) 
+        stag_bias_atr_mult = float(p.get("stagnation_bias_atr_mult", 2.5)) 
         
-        base_sell = dead_cross | stagnation | (c < ma20)
-        base_reduce = (ma5 < ma20) & (c < ma20) & (~dead_cross)
+        stagnation = (
+            (df["vol_ratio"] >= stag_vol) & 
+            (df["pct_chg"].abs() * c < stag_atr_mult * df["atr14"]) & 
+            (dist_to_ma20 > stag_bias_atr_mult * df["atr14"])
+        )
+        
+        base_sell = dead_cross | stagnation | hard_stop
+        base_reduce = (ma5 < ma20) & (c < ma20) & (~dead_cross) & (~hard_stop)
         
         return {
             "buy": base_buy,
@@ -177,9 +199,27 @@ class TrendStrategy(BaseStrategy):
         out.loc[base["buy"] & base["cross_up"], "reason"] = "趋势金叉"
         
         # 2. 质量分 (Quality Score)
-        # 包含：威科夫、吞没、板块(rotation_phase)、筹码(chip_score)
+        # 包含：威科夫、吞没、板块(rotation_phase)、筹码(chip_score)、RS(相对强度)
         
+        # 计算 RS (相对强度)
+        # 简单定义：个股涨跌幅 - 指数涨跌幅
+        if "index_ret" in out.columns:
+            out["rs_daily"] = out["pct_chg"] - out["index_ret"]
+            # 计算 5 日滚动 RS 以识别持续走强品种
+            out["rs_5d"] = out.groupby("code")["rs_daily"].transform(lambda x: x.rolling(5).sum())
+        else:
+            out["rs_daily"] = 0.0
+            out["rs_5d"] = 0.0
+
         # 归一化各因子
+        wyckoff_phase = out.get("wyckoff_phase", pd.Series("NONE", index=out.index))
+        # 派发阶段因子：强力扣分
+        dist_factor = np.where(wyckoff_phase == "DISTRIBUTION", -3.0, 0.0)
+        # 吸筹阶段因子：中力加分 (等待突破)
+        acc_factor = np.where(wyckoff_phase == "ACCUMULATION", 1.0, 0.0)
+        # 趋势向上阶段：小力加分
+        trend_up_factor = np.where(wyckoff_phase == "TREND_UP", 0.5, 0.0)
+
         if "wyckoff" in soft and hasattr(soft["wyckoff"], "fillna"):
              wyckoff_s = pd.to_numeric(soft["wyckoff"], errors="coerce").fillna(0)
         else:
@@ -215,10 +255,32 @@ class TrendStrategy(BaseStrategy):
         w_wyckoff = float(self.params.get("wyckoff_score_weight", 0.5))
         w_engulf = float(self.params.get("engulf_score_weight", 0.3))
         
-        quality = (board_factor * 1.5) + chip_factor + (wyckoff_s * w_wyckoff) + (engulf_s * w_engulf)
+        # RS 核心逻辑加分：
+        # A. 5日 RS 持续走强
+        rs_factor = np.where(out["rs_5d"] > 0.05, 1.5, np.where(out["rs_5d"] > 0, 0.5, -0.5))
+        # B. 逆市表现加分 (大盘跌 > 0.5%, 个股红盘)
+        out["is_resilient"] = (out.get("index_ret", 0) < -0.005) & (out["pct_chg"] > 0)
+        resilient_bonus = np.where(out["is_resilient"], 1.0, 0.0)
+        
+        # --- 新增：RSI 动能因子 ---
+        rsi = out.get("rsi14", pd.Series(50, index=out.index))
+        # 动能适中区 (40-65) 加分，过热区 (>75) 强力扣分
+        rsi_factor = np.select(
+            [rsi > 75, (rsi >= 40) & (rsi <= 65)],
+            [-2.0, 0.5], default=0.0
+        )
+
+        quality = (board_factor * 1.5) + chip_factor + (wyckoff_s * w_wyckoff) + (engulf_s * w_engulf) + rs_factor + resilient_bonus + dist_factor + acc_factor + trend_up_factor + rsi_factor
         out["quality_score"] = quality
         
         # 3. 动态调整 (根据质量分拦截或升级)
+        # --- 新增：Wyckoff 强制硬拦截 ---
+        # 如果是派发阶段 且 出现了 SOW(供应出现) 事件，强制 SELL
+        wyckoff_event = out.get("wyckoff_event", pd.Series("", index=out.index))
+        is_sow = (wyckoff_phase == "DISTRIBUTION") & (wyckoff_event == "SOW")
+        out.loc[is_sow, "signal"] = "SELL"
+        out.loc[is_sow, "reason"] = "Wyckoff派发确认: SOW破位"
+
         is_buy = out["signal"] == "BUY"
         stop_thresh = float(self.params.get("quality_stop_threshold", -3.0))
         

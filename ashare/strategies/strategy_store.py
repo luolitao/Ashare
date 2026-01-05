@@ -34,6 +34,24 @@ class StrategyStore:
             return self.params.get(key, default)
         return getattr(self.params, key, default)
 
+    def _get_table_columns(self, table: str) -> list[str]:
+        if not table:
+            return []
+        try:
+            stmt = text(
+                """
+                SELECT COLUMN_NAME
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table
+                """
+            )
+            with self.db_writer.engine.begin() as conn:
+                rows = conn.execute(stmt, {"table": table}).fetchall()
+            return [str(row[0]) for row in rows]
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("读取表 %s 列信息失败：%s", table, exc)
+            return []
+
     def table_exists(self, table: str) -> bool:
         if not table:
             return False
@@ -216,25 +234,13 @@ class StrategyStore:
             "date",
             "code",
             "signal",
-            "final_action",
-            "final_reason",
             "final_cap",
             "reason",
             "risk_tag",
-            "risk_note",
-            "stop_ref",
-            "macd_event",
             "chip_score",
-            "gdhs_delta_pct",
-            "gdhs_announce_date",
             "chip_reason",
-            "chip_penalty",
-            "chip_note",
-            "age_days",
-            "deadzone_hit",
-            "stale_hit",
-            "fear_score",
-            "wave_type",
+            "valid_days",
+            "expires_on",
             "extra_json",
         ]
         # 已移除: close, ma*, vol_ratio, macd_hist, kdj*, atr14
@@ -315,77 +321,19 @@ class StrategyStore:
         events_df = events_df.drop_duplicates(
             subset=["strategy_code", "sig_date", "code"], keep="last"
         ).copy()
-        for col in ["risk_tag", "risk_note", "reason", "chip_reason"]:
+        for col in ["risk_tag", "reason", "chip_reason"]:
             if col in events_df.columns:
                 events_df[col] = (
                     events_df[col].fillna("").astype(str).str.slice(0, 250)
                 )
-        for col in ["final_reason", "macd_event", "wave_type"]:
-            if col in events_df.columns:
-                events_df[col] = (
-                    events_df[col].fillna("").astype(str).str.slice(0, 255)
-                )
-        if "chip_note" in events_df.columns:
-            events_df["chip_note"] = (
-                events_df["chip_note"]
-                .fillna("")
-                .astype(str)
-                .str.slice(0, 255)
-                .replace("", pd.NA)
-            )
-        
-        if "gdhs_announce_date" in events_df.columns:
-            events_df["gdhs_announce_date"] = pd.to_datetime(
-                events_df["gdhs_announce_date"], errors="coerce"
-            ).dt.date
-            
-        events_df["extra_json"] = None
-        if "extra_json" in base.columns:
-            events_df["extra_json"] = base["extra_json"].fillna("").astype(str)
         if "chip_score" in events_df.columns:
             events_df["chip_score"] = pd.to_numeric(
                 events_df["chip_score"], errors="coerce"
             )
-        if "chip_penalty" in events_df.columns:
-            events_df["chip_penalty"] = pd.to_numeric(
-                events_df["chip_penalty"], errors="coerce"
-            )
-        if "age_days" in events_df.columns:
-            events_df["age_days"] = (
-                pd.to_numeric(events_df["age_days"], errors="coerce").astype("Int64")
-            )
-        for flag_col in ["deadzone_hit", "stale_hit"]:
-            if flag_col in events_df.columns:
-                events_df[flag_col] = events_df[flag_col].astype(bool)
 
-        # 兜底补齐
-        if "age_days" not in events_df.columns:
-            events_df["age_days"] = pd.NA
-        if events_df["age_days"].isna().any():
-            try:
-                sig_ts = pd.to_datetime(events_df["sig_date"], errors="coerce")
-                events_df["age_days"] = (pd.Timestamp(latest_date) - sig_ts).dt.days
-            except Exception:
-                pass
-
-        if "deadzone_hit" not in events_df.columns:
-            events_df["deadzone_hit"] = False
-        if events_df["deadzone_hit"].isna().any() or "chip_note" in events_df.columns:
-            note = events_df.get("chip_note", pd.Series("", index=events_df.index)).fillna("").astype(str)
-            reason = events_df.get("chip_reason", pd.Series("", index=events_df.index)).fillna("").astype(str)
-            deadzone_mask = note.str.contains("DEADZONE", case=False, regex=False) | reason.str.contains(
-                "DEADZONE", case=False, regex=False
-            )
-            events_df.loc[deadzone_mask, "deadzone_hit"] = True
-
-        if "stale_hit" not in events_df.columns:
-            events_df["stale_hit"] = False
-        if events_df["stale_hit"].isna().any() and "expires_on" in events_df.columns:
-            try:
-                stale_mask = pd.to_datetime(events_df["expires_on"], errors="coerce").dt.date < latest_date
-                events_df.loc[stale_mask, "stale_hit"] = True
-            except Exception:
-                pass
+        table_cols = set(self._get_table_columns(table))
+        if table_cols:
+            events_df = events_df[[c for c in events_df.columns if c in table_cols]].copy()
 
         # === 写入逻辑 ===
         target_strategies = events_df["strategy_code"].unique().tolist()

@@ -27,7 +27,7 @@ class StrategyDataRepository:
         *,
         lookback: int,
     ) -> pd.DataFrame:
-        select_cols = "`date`,`code`,`high`,`low`,`close`,`preclose`,`volume`,`amount`"
+        select_cols = "`date`,`code`,`open`,`high`,`low`,`close`,`preclose`,`volume`,`amount`"
         codes = [str(c) for c in (codes or []) if str(c).strip()]
         use_in = bool(codes) and len(codes) <= 2000
 
@@ -94,7 +94,7 @@ class StrategyDataRepository:
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["code"] = df["code"].astype(str)
-        for col in ["high", "low", "close", "preclose", "volume", "amount"]:
+        for col in ["open", "high", "low", "close", "preclose", "volume", "amount"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["date", "code", "close", "high", "low", "preclose"]).copy()
@@ -225,8 +225,66 @@ class StrategyDataRepository:
             # 统一字段名，确保兼容旧代码中的 'date' 引用
             df = df.rename(columns={"trade_date": "date"})
             df["date"] = pd.to_datetime(df["date"])
+            missing_cols = [c for c in ["open", "high", "low", "volume"] if c not in df.columns]
+            if missing_cols:
+                daily_df = self.load_daily_kline(
+                    "history_daily_kline",
+                    codes,
+                    start_date.isoformat(),
+                    latest_date.isoformat(),
+                    lookback=lookback * 2,
+                )
+                if not daily_df.empty:
+                    daily_df = daily_df.rename(columns={"date": "date"})
+                    daily_df["date"] = pd.to_datetime(daily_df["date"])
+                    keep_cols = ["date", "code"] + [c for c in missing_cols if c in daily_df.columns]
+                    df = df.merge(
+                        daily_df[keep_cols],
+                        on=["code", "date"],
+                        how="left",
+                        suffixes=("", "_k"),
+                    )
+                    for col in missing_cols:
+                        if col in df.columns and f"{col}_k" in df.columns:
+                            df[col] = df[col].combine_first(df[f"{col}_k"])
+                            df = df.drop(columns=[f"{col}_k"])
             return df
             
         except Exception as exc:
             self.logger.error("加载预计算指标表 %s 失败: %s", table, exc)
+            return pd.DataFrame()
+
+    def load_index_kline(
+        self,
+        index_code: str,
+        latest_date: dt.date,
+        lookback: int = 100,
+    ) -> pd.DataFrame:
+        """加载指数行情以计算相对强度。"""
+        start_date = latest_date - dt.timedelta(days=lookback * 2)
+        stmt = text(
+            """
+            SELECT `date`, `close` as `index_close`
+            FROM `history_daily_kline`
+            WHERE `code` = :code AND `date` BETWEEN :start_date AND :latest_date
+            ORDER BY `date`
+            """
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql(
+                    stmt,
+                    conn,
+                    params={
+                        "code": index_code,
+                        "start_date": start_date.isoformat(),
+                        "latest_date": latest_date.isoformat(),
+                    },
+                )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+                df["index_ret"] = df["index_close"].pct_change()
+            return df
+        except Exception as exc:
+            self.logger.warning("加载指数数据 %s 失败: %s", index_code, exc)
             return pd.DataFrame()

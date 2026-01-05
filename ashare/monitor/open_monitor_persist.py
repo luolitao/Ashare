@@ -196,15 +196,27 @@ class OpenMonitorPersister:
                     on=["monitor_date_str", "code_str"],
                     how="left",
                 )
+                
+                # 优化：如果是 POSTCLOSE 模式或显式重新运行，放宽增量限制以允许纠偏
+                # 判定条件：如果 max_minute_time 已经达到了 15:00，但我们依然有新数据进来，说明是重跑纠偏
                 before_rows = len(minute_df)
+                
+                # 正常的增量逻辑
                 minute_df = minute_df[
                     minute_df["max_minute_time"].isna()
                     | (minute_df["minute_time"] > minute_df["max_minute_time"])
+                    | (minute_df["minute_time"].dt.time >= dt.time(15, 0)) # 允许覆盖收盘快照
                 ].copy()
+                
                 if before_rows and minute_df.empty:
-                    self.logger.info("open_monitor minute snapshots: no new rows to write.")
-                    return
-                minute_df = minute_df.drop(columns=["max_minute_time"])
+                    # 如果还是为空，但我们知道成交量单位可能不对，强制保留一行进行 delete-insert 循环
+                    # 或者更直接点：如果检测到是重跑，不返回
+                    pass 
+                
+                if "max_minute_time" in minute_df.columns:
+                    minute_df = minute_df.drop(columns=["max_minute_time"])
+            
+            # 强制覆盖逻辑：按 run_pk 和 code 清理旧分时
             delete_calls = 0
             deleted_rows = 0
             for (monitor_date_str, run_pk), group in minute_df.groupby(

@@ -25,9 +25,6 @@ TABLE_STRATEGY_CANDIDATES = "strategy_sig_candidates"
 # 策略准备就绪信号（含筹码）
 TABLE_STRATEGY_READY_SIGNALS = "v_strategy_sig_ready"
 TABLE_STRATEGY_CHIP_FILTER = "strategy_sig_chips"
-TABLE_STRATEGY_TRADE_METRICS = "strategy_sig_metrics"
-VIEW_STRATEGY_BACKTEST = "v_strategy_backtest"
-VIEW_STRATEGY_PNL = "v_strategy_pnl"
 
 # 开盘监测输出
 TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_mon_eval"
@@ -49,19 +46,11 @@ READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "code": "VARCHAR(20) NOT NULL",
     "strategy_code": "VARCHAR(32) NOT NULL",
     "signal": "VARCHAR(64) NULL",
-    "final_action": "VARCHAR(16) NULL",
-    "final_reason": "VARCHAR(255) NULL",
     "final_cap": "DOUBLE NULL",
     "reason": "VARCHAR(255) NULL",
     "risk_tag": "VARCHAR(255) NULL",
-    "risk_note": "VARCHAR(255) NULL",
-    "extra_json": "TEXT NULL",
     "valid_days": "INT NULL",
     "expires_on": "DATE NULL",
-    "stop_ref": "DOUBLE NULL",
-    "macd_event": "VARCHAR(32) NULL",
-    "fear_score": "DOUBLE NULL",
-    "wave_type": "VARCHAR(64) NULL",
     "yearline_state": "VARCHAR(50) NULL",
     "close": "DOUBLE NULL",
     "ma5": "DOUBLE NULL",
@@ -74,14 +63,9 @@ READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "kdj_d": "DOUBLE NULL",
     "atr14": "DOUBLE NULL",
     "avg_volume_20": "DOUBLE NULL",
-    "gdhs_delta_pct": "DOUBLE NULL",
-    "gdhs_announce_date": "DATE NULL",
     "chip_score": "DOUBLE NULL",
     "chip_reason": "VARCHAR(255) NULL",
-    "chip_penalty": "DOUBLE NULL",
-    "chip_note": "VARCHAR(255) NULL",
     "age_days": "INT NULL",
-    "deadzone_hit": "TINYINT(1) NULL",
     "stale_hit": "TINYINT(1) NULL",
     "industry": "VARCHAR(255) NULL",
     "industry_classification": "VARCHAR(255) NULL",
@@ -144,8 +128,6 @@ class SchemaManager:
         self._ensure_indicator_table(tables.indicator_table)
         self._ensure_signal_events_table(tables.signal_events_table)
         self._ensure_strategy_candidates_table()
-        self._ensure_trade_metrics_table()
-        self._ensure_backtest_view()
         self._ensure_chip_filter_table()
         self._ensure_ready_signals_view(
             tables.ready_signals_view,
@@ -153,7 +135,6 @@ class SchemaManager:
             tables.indicator_table,
             TABLE_STRATEGY_CHIP_FILTER,
         )
-        self._ensure_v_pnl_view()
 
         self._ensure_open_monitor_eval_table(tables.open_monitor_eval_table)
         self._ensure_open_monitor_run_table(tables.open_monitor_run_table)
@@ -1296,28 +1277,13 @@ class SchemaManager:
             "code": "VARCHAR(20) NOT NULL",
             "strategy_code": "VARCHAR(32) NOT NULL",
             "signal": "VARCHAR(64) NULL",
-            "final_action": "VARCHAR(16) NULL",
-            "final_reason": "VARCHAR(255) NULL",
             "final_cap": "DOUBLE NULL",
             "reason": "VARCHAR(255) NULL",
             "risk_tag": "VARCHAR(255) NULL",
-            "risk_note": "VARCHAR(255) NULL",
-            "stop_ref": "DOUBLE NULL",
-            "macd_event": "VARCHAR(32) NULL",
             "chip_score": "DOUBLE NULL",
-            "gdhs_delta_pct": "DOUBLE NULL",
-            "gdhs_announce_date": "DATE NULL",
             "chip_reason": "VARCHAR(255) NULL",
-            "chip_penalty": "DOUBLE NULL",
-            "chip_note": "VARCHAR(255) NULL",
-            "age_days": "INT NULL",
             "valid_days": "INT NULL",
             "expires_on": "DATE NULL",
-            "deadzone_hit": "TINYINT(1) NULL",
-            "stale_hit": "TINYINT(1) NULL",
-            "fear_score": "DOUBLE NULL",
-            "wave_type": "VARCHAR(64) NULL",
-            "extra_json": "TEXT NULL",
         }
         if not self._table_exists(table):
             self._create_table(
@@ -1328,24 +1294,37 @@ class SchemaManager:
             return
         self._add_missing_columns(table, columns)
         self._ensure_varchar_length(table, "risk_tag", 255)
-        self._ensure_varchar_length(table, "risk_note", 255)
         self._ensure_varchar_length(table, "reason", 255)
-        self._ensure_varchar_length(table, "final_reason", 255)
-        self._ensure_varchar_length(table, "macd_event", 32)
-        self._ensure_varchar_length(table, "wave_type", 64)
         self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
         self._ensure_numeric_column(table, "chip_score", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "gdhs_delta_pct", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "chip_penalty", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "fear_score", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "age_days", "INT NULL")
         self._ensure_numeric_column(table, "valid_days", "INT NULL")
-        self._ensure_numeric_column(table, "deadzone_hit", "TINYINT(1) NULL")
-        self._ensure_numeric_column(table, "stale_hit", "TINYINT(1) NULL")
-        self._ensure_date_column(table, "gdhs_announce_date", not_null=False)
         self._ensure_date_column(table, "expires_on", not_null=False)
         self._ensure_varchar_length(table, "chip_reason", 255)
-        self._ensure_varchar_length(table, "chip_note", 255)
+        self._drop_columns(
+            table,
+            (
+                "final_action",
+                "final_reason",
+                "signal_score",
+                "signal_strength",
+                "signal_phase",
+                "signal_event",
+                "signal_pattern",
+                "risk_note",
+                "stop_ref",
+                "macd_event",
+                "gdhs_delta_pct",
+                "gdhs_announce_date",
+                "chip_penalty",
+                "chip_note",
+                "age_days",
+                "deadzone_hit",
+                "stale_hit",
+                "fear_score",
+                "wave_type",
+                "extra_json",
+            ),
+        )
         unique_name = "ux_signal_events_strategy_date_code"
         if not self._index_exists(table, unique_name):
             with self.engine.begin() as conn:
@@ -1385,6 +1364,7 @@ class SchemaManager:
             self._drop_relation_any(table)
 
         # 2. 构建视图：展示最近有买入意向信号的股票
+        action_expr = "signal"
         view_sql = f"""
             CREATE OR REPLACE VIEW `{table}` AS
             SELECT 
@@ -1393,11 +1373,11 @@ class SchemaManager:
                 1 AS is_liquidity,
                 1 AS has_signal,
                 sig_date AS latest_sig_date,
-                final_action AS latest_sig_action,
+                {action_expr} AS latest_sig_action,
                 strategy_code AS latest_sig_strategy_code,
                 NOW() AS created_at
             FROM `{TABLE_STRATEGY_SIGNAL_EVENTS}`
-            WHERE final_action IN ('BUY', 'NEAR_SIGNAL', 'BUY_CONFIRM')
+            WHERE {action_expr} IN ('BUY', 'NEAR_SIGNAL', 'BUY_CONFIRM')
         """
         
         with self.engine.begin() as conn:
@@ -1467,20 +1447,12 @@ class SchemaManager:
             "sig_date": "e.`sig_date`",
             "code": "e.`code`",
             "strategy_code": "e.`strategy_code`",
-            "signal": "COALESCE(e.`final_action`, e.`signal`)",
-            "final_action": "COALESCE(e.`final_action`, e.`signal`)",
-            "final_reason": "COALESCE(e.`final_reason`, e.`reason`)",
-            "final_cap": "e.`final_cap`",
-            "reason": "COALESCE(e.`final_reason`, e.`reason`)",
+            "signal": _event_expr("signal"),
+            "final_cap": _event_expr("final_cap"),
+            "reason": _event_expr("reason"),
             "risk_tag": "e.`risk_tag`",
-            "risk_note": "e.`risk_note`",
-            "extra_json": "e.`extra_json`",
             "valid_days": "e.`valid_days`",
             "expires_on": "e.`expires_on`",
-            "stop_ref": _event_expr("stop_ref"),
-            "macd_event": _event_expr("macd_event"),
-            "fear_score": _event_expr("fear_score"),
-            "wave_type": _event_expr("wave_type"),
             "yearline_state": _ind_expr("yearline_state"),
             "close": _ind_expr("close"),
             "ma5": _ind_expr("ma5"),
@@ -1495,55 +1467,21 @@ class SchemaManager:
             "avg_volume_20": _ind_expr("avg_volume_20"),
         }
 
-        gdhs_delta_sources = []
-        announce_sources = []
         chip_score_sources = []
         chip_reason_sources = []
-        chip_penalty_sources = []
-        chip_note_sources = []
-        chip_age_sources = []
-        chip_deadzone_sources = []
-        chip_stale_sources = []
-
-        if "gdhs_delta_pct" in meta:
-            gdhs_delta_sources.append("e.`gdhs_delta_pct`")
-        if "gdhs_announce_date" in meta:
-            announce_sources.append("e.`gdhs_announce_date`")
         if "chip_score" in meta:
             chip_score_sources.append("e.`chip_score`")
         if "chip_reason" in meta:
             chip_reason_sources.append("e.`chip_reason`")
-        if "chip_penalty" in meta:
-            chip_penalty_sources.append("e.`chip_penalty`")
-        if "chip_note" in meta:
-            chip_note_sources.append("e.`chip_note`")
-        if "age_days" in meta:
-            chip_age_sources.append("e.`age_days`")
-        if "deadzone_hit" in meta:
-            chip_deadzone_sources.append("e.`deadzone_hit`")
-        if "stale_hit" in meta:
-            chip_stale_sources.append("e.`stale_hit`")
 
         if chip_enabled:
-            gdhs_delta_sources.append("cf.`gdhs_delta_pct`")
-            announce_sources.append("cf.`announce_date`")
             chip_score_sources.append("cf.`chip_score`")
             chip_reason_sources.append("cf.`chip_reason`")
-            chip_penalty_sources.append("cf.`chip_penalty`")
-            chip_note_sources.append("cf.`chip_note`")
-            chip_age_sources.append("cf.`age_days`")
-            chip_deadzone_sources.append("cf.`deadzone_hit`")
-            chip_stale_sources.append("cf.`stale_hit`")
 
-        field_exprs["gdhs_delta_pct"] = _coalesce_expr(gdhs_delta_sources)
-        field_exprs["gdhs_announce_date"] = _coalesce_expr(announce_sources)
         field_exprs["chip_score"] = _coalesce_expr(chip_score_sources)
         field_exprs["chip_reason"] = _coalesce_expr(chip_reason_sources)
-        field_exprs["chip_penalty"] = _coalesce_expr(chip_penalty_sources)
-        field_exprs["chip_note"] = _coalesce_expr(chip_note_sources)
-        field_exprs["age_days"] = _coalesce_expr(chip_age_sources)
-        field_exprs["deadzone_hit"] = _coalesce_expr(chip_deadzone_sources)
-        field_exprs["stale_hit"] = _coalesce_expr(chip_stale_sources)
+        field_exprs["age_days"] = "cf.`age_days`" if chip_enabled else "NULL"
+        field_exprs["stale_hit"] = "cf.`stale_hit`" if chip_enabled else "NULL"
 
         industry_join = ""
         industry_fields: Dict[str, str] = {
@@ -1606,6 +1544,7 @@ class SchemaManager:
         select_clause = ",\n              ".join(
             f"{field_exprs[col]} AS `{col}`" for col in READY_SIGNALS_COLUMNS.keys()
         )
+        action_expr = _event_expr("signal")
         select_sql = f"""
             SELECT
               {select_clause}
@@ -1615,7 +1554,7 @@ class SchemaManager:
             {liquidity_join}
             {industry_join}
             {board_join}
-            WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM', 'NEAR_SIGNAL', 'SELL', 'RISK', 'STOP')
+            WHERE {action_expr} IN ('BUY','BUY_CONFIRM', 'NEAR_SIGNAL', 'SELL', 'RISK', 'STOP')
             """
         return select_sql, list(READY_SIGNALS_COLUMNS.keys())
 
@@ -1650,29 +1589,6 @@ class SchemaManager:
 
         self.logger.info("已成功将 %s 重构为动态视图。", view)
 
-    def _ensure_trade_metrics_table(self) -> None:
-        columns = {
-            "strategy_code": "VARCHAR(32) NOT NULL",
-            "code": "VARCHAR(20) NOT NULL",
-            "entry_date": "DATE NOT NULL",
-            "entry_price": "DOUBLE NULL",
-            "exit_date": "DATE NULL",
-            "exit_price": "DOUBLE NULL",
-            "atr_at_entry": "DOUBLE NULL",
-            "pnl_pct": "DOUBLE NULL",
-            "pnl_atr_ratio": "DOUBLE NULL",
-            "holding_days": "INT NULL",
-            "exit_reason": "VARCHAR(255) NULL",
-        }
-        table = TABLE_STRATEGY_TRADE_METRICS
-        if not self._table_exists(table):
-            self._create_table(table, columns, primary_key=("strategy_code", "code", "entry_date"))
-            return
-        self._add_missing_columns(table, columns)
-        self._ensure_numeric_column(table, "pnl_pct", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "pnl_atr_ratio", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "holding_days", "INT NULL")
-        self._ensure_varchar_length(table, "exit_reason", 255)
 
     def _ensure_chip_filter_table(self) -> None:
         columns = {
@@ -1708,69 +1624,6 @@ class SchemaManager:
         self._ensure_varchar_length(table, "chip_note", 255)
         self._ensure_datetime_column(table, "updated_at")
 
-    def _ensure_backtest_view(self) -> None:
-        table = TABLE_STRATEGY_TRADE_METRICS
-        view = VIEW_STRATEGY_BACKTEST
-        if not self._table_exists(table):
-            self._drop_relation(view)
-            return
-        stmt = text(
-            f"""
-            CREATE OR REPLACE VIEW `{view}` AS
-            SELECT
-              `strategy_code`,
-              'WEEK' AS `period_type`,
-              CAST(YEARWEEK(`exit_date`, 3) AS CHAR) AS `period_key`,
-              COUNT(*) AS `trade_cnt`,
-              1.0 * SUM(CASE WHEN `pnl_pct` > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `win_rate`,
-              AVG(`pnl_atr_ratio`) AS `avg_pnl_atr_ratio`,
-              SUM(CASE WHEN `pnl_atr_ratio` > 1.5 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `gt_1_5_ratio`
-            FROM `{table}`
-            WHERE `exit_date` IS NOT NULL
-            GROUP BY `strategy_code`, YEARWEEK(`exit_date`, 3)
-            UNION ALL
-            SELECT
-              `strategy_code`,
-              'MONTH' AS `period_type`,
-              CAST(DATE_FORMAT(`exit_date`, '%Y-%m') AS CHAR) AS `period_key`,
-              COUNT(*) AS `trade_cnt`,
-              1.0 * SUM(CASE WHEN `pnl_pct` > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `win_rate`,
-              AVG(`pnl_atr_ratio`) AS `avg_pnl_atr_ratio`,
-              SUM(CASE WHEN `pnl_atr_ratio` > 1.5 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `gt_1_5_ratio`
-            FROM `{table}`
-            WHERE `exit_date` IS NOT NULL
-            GROUP BY `strategy_code`, DATE_FORMAT(`exit_date`, '%Y-%m')
-            """
-        )
-        with self.engine.begin() as conn:
-            conn.execute(stmt)
-        self.logger.info("已创建/更新回测视图 %s。", view)
-
-    def _ensure_v_pnl_view(self) -> None:
-        table = TABLE_STRATEGY_TRADE_METRICS
-        view = VIEW_STRATEGY_PNL
-        if not self._table_exists(table):
-            self._drop_relation(view)
-            return
-        stmt = text(
-            f"""
-            CREATE OR REPLACE VIEW `{view}` AS
-            SELECT
-              `strategy_code`,
-              `code`,
-              COUNT(*) AS `trade_cnt`,
-              SUM(CASE WHEN `pnl_pct` > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) AS `win_rate`,
-              AVG(`pnl_atr_ratio`) AS `avg_pnl_atr_ratio`,
-              AVG(`pnl_pct`) AS `avg_pnl_pct`
-            FROM `{table}`
-            WHERE `exit_date` IS NOT NULL
-            GROUP BY `strategy_code`, `code`
-            HAVING `avg_pnl_atr_ratio` > 1.5
-            """
-        )
-        with self.engine.begin() as conn:
-            conn.execute(stmt)
-        self.logger.info("已创建/更新视图 %s。", view)
 
     # ---------- Open monitor ----------
     def _ensure_open_monitor_run_table(self, table: str) -> None:

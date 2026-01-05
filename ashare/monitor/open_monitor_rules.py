@@ -207,6 +207,12 @@ class DecisionContext:
     low_suck_strength: str | None = None
     low_suck_reason: str | None = None
     
+    # 新增：VWAP 相关字段
+    vwap: float | None = None
+    dist_to_vwap: float | None = None
+    
+    risk_tag: str | None = None
+    
     rule_hits: list[RuleHit] = field(default_factory=list)
 
     def record_hit(self, rule: Rule, result: RuleResult) -> None:

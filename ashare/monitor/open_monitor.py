@@ -23,7 +23,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, List
 
 import pandas as pd
@@ -77,6 +77,11 @@ class OpenMonitorParams:
     strict_quotes: bool = True
     quote_table: str = TABLE_STRATEGY_OPEN_MONITOR_QUOTE
     strategy_code: str = STRATEGY_CODE_MA5_MA20_TREND
+    # 多策略仲裁配置
+    strategy_priority: list[str] = field(default_factory=list)
+    strategy_veto_signals: dict[str, list[str]] = field(default_factory=dict)
+    strategy_promote_buy: list[str] = field(default_factory=list)
+    strategy_resonance_pairs: list[list[str]] = field(default_factory=list)
 
     # 输出表：开盘检查结果
     output_table: str = TABLE_STRATEGY_OPEN_MONITOR_EVAL
@@ -272,6 +277,48 @@ class OpenMonitorParams:
             except Exception:
                 return default
 
+        def _get_list(key: str, default: list[str] | None = None) -> list[str]:
+            raw = sec.get(key, default or [])
+            if isinstance(raw, str):
+                items = [s.strip() for s in raw.split(",")]
+                return [s for s in items if s]
+            if isinstance(raw, (list, tuple)):
+                return [str(v).strip() for v in raw if str(v).strip()]
+            return default or []
+
+        def _get_map_list(key: str) -> dict[str, list[str]]:
+            raw = sec.get(key, None)
+            if not isinstance(raw, dict):
+                return {}
+            out: dict[str, list[str]] = {}
+            for k, v in raw.items():
+                key_norm = str(k).strip()
+                if not key_norm:
+                    continue
+                if isinstance(v, str):
+                    vals = [s.strip().upper() for s in v.split(",") if s.strip()]
+                elif isinstance(v, (list, tuple)):
+                    vals = [str(s).strip().upper() for s in v if str(s).strip()]
+                else:
+                    vals = []
+                if vals:
+                    out[key_norm] = vals
+            return out
+
+        def _get_pairs(key: str) -> list[list[str]]:
+            raw = sec.get(key, None)
+            if not isinstance(raw, (list, tuple)):
+                return []
+            pairs: list[list[str]] = []
+            for item in raw:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                left = str(item[0]).strip()
+                right = str(item[1]).strip()
+                if left and right:
+                    pairs.append([left, right])
+            return pairs
+
         quote_source = str(sec.get("quote_source", cls.quote_source)).strip().lower() or "auto"
 
         interval_minutes = _get_int("interval_minutes", cls.interval_minutes)
@@ -296,6 +343,10 @@ class OpenMonitorParams:
             quote_table=str(sec.get("quote_table", cls.quote_table)).strip() or cls.quote_table,
             strategy_code=str(sec.get("strategy_code", default_strategy_code)).strip()
                           or default_strategy_code,
+            strategy_priority=_get_list("strategy_priority", []),
+            strategy_veto_signals=_get_map_list("strategy_veto_signals"),
+            strategy_promote_buy=_get_list("strategy_promote_buy", []),
+            strategy_resonance_pairs=_get_pairs("strategy_resonance_pairs"),
             output_table=str(sec.get("output_table", cls.output_table)).strip() or cls.output_table,
             run_table=str(sec.get("run_table", cls.run_table)).strip() or cls.run_table,
             minute_table=str(sec.get("minute_table", cls.minute_table)).strip()
@@ -437,6 +488,10 @@ class MA5MA20OpenMonitorRunner:
             "run_id_use_seconds": self.params.run_id_use_seconds,
             "strategy_code": self.params.strategy_code,
             "ready_signals_view": self.params.ready_signals_view,
+            "strategy_priority": self.params.strategy_priority,
+            "strategy_veto_signals": self.params.strategy_veto_signals,
+            "strategy_promote_buy": self.params.strategy_promote_buy,
+            "strategy_resonance_pairs": self.params.strategy_resonance_pairs,
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
