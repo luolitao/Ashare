@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import time
 import pandas as pd
 from sqlalchemy import text
 
@@ -9,41 +10,78 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from ashare.core.db import DatabaseConfig, MySQLWriter
 
-def query_db(sql_query: str, limit: int = 20):
+def execute_sql(sql_raw: str, limit: int = 50):
+    """
+    智能 SQL 执行器：
+    1. 支持 'desc <table>' 快捷指令
+    2. 支持 ';' 分隔的多语句执行
+    3. 自动为 SELECT 注入 LIMIT
+    4. 返回详细的元数据 (Total Rows, Time, Truncated)
+    """
+    t0 = time.perf_counter()
     try:
-        # 复用项目现有的连接配置
         db = MySQLWriter(DatabaseConfig.from_env())
         
-        # 简单的安全检查：如果是 SELECT 且没有 LIMIT，自动加上 LIMIT
-        sql_lower = sql_query.lower().strip()
-        read_prefixes = ("select", "show", "describe", "explain")
-        is_read_query = sql_lower.startswith(read_prefixes)
-        if sql_lower.startswith("select") and "limit" not in sql_lower and "count" not in sql_lower:
-            sql_query += f" LIMIT {limit}"
+        # 处理 desc 快捷指令
+        if sql_raw.lower().startswith("desc "):
+            table_name = sql_raw.split()[1].strip(";")
+            sql_raw = f"SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = DATABASE();"
 
-        if is_read_query:
-            with db.engine.connect() as conn:
-                df = pd.read_sql(text(sql_query), conn)
+        # 分离多条 SQL
+        statements = [s.strip() for s in sql_raw.split(";") if s.strip()]
+        if not statements:
+            return {"status": "error", "message": "Empty SQL statement"}
 
-            # 日期格式化为 ISO 字符串，处理 NaN
-            result = df.to_json(orient="records", date_format="iso", force_ascii=False)
-            print(result)
-        else:
-            with db.engine.begin() as conn:
-                result = conn.execute(text(sql_query))
-            print(json.dumps({"status": "ok", "rows_affected": result.rowcount}, ensure_ascii=False))
+        final_results = []
+        
+        with db.engine.begin() as conn:
+            for sql in statements:
+                sql_lower = sql.lower()
+                is_read = sql_lower.startswith(("select", "show", "describe", "explain"))
+                
+                # 自动注入 LIMIT
+                if sql_lower.startswith("select") and "limit" not in sql_lower and "count" not in sql_lower:
+                    sql += f" LIMIT {limit}"
+                
+                if is_read:
+                    df = pd.read_sql(text(sql), conn)
+                    # 转换结果
+                    rows = df.to_dict(orient="records")
+                    # 日期序列化
+                    for row in rows:
+                        for k, v in row.items():
+                            if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
+                                row[k] = v.isoformat()
+                    
+                    final_results.append({
+                        "statement": sql[:100] + "..." if len(sql) > 100 else sql,
+                        "type": "read",
+                        "count": len(df),
+                        "data": rows
+                    })
+                else:
+                    res = conn.execute(text(sql))
+                    final_results.append({
+                        "statement": sql[:100] + "..." if len(sql) > 100 else sql,
+                        "type": "write",
+                        "rows_affected": res.rowcount
+                    })
+
+        duration = round(time.perf_counter() - t0, 3)
+        return {
+            "status": "ok",
+            "execution_time_sec": duration,
+            "results": final_results
+        }
         
     except Exception as e:
-        # 输出标准 JSON 错误格式，方便 AI 解析
-        error_msg = json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
-        print(error_msg)
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(json.dumps({"status": "error", "message": "Usage: python db_query.py <sql_query>"}))
+        print(json.dumps({"status": "error", "message": "Usage: python db_query.py \"SQL\" or \"desc table\""}))
         sys.exit(1)
         
-    # 获取命令行传入的 SQL
-    # 注意：如果 SQL 包含空格，调用时需要用引号包裹
     query = sys.argv[1]
-    query_db(query)
+    result = execute_sql(query)
+    print(json.dumps(result, ensure_ascii=False, indent=2))

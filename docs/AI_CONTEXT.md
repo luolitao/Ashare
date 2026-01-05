@@ -1,160 +1,59 @@
-# AShare Project Context for AI Agents
+# AShare AI Agent Master Context (v2.0)
 
-> **Core Instruction**: Please respond to the user in **Chinese (Simplified)** unless explicitly requested otherwise. Keep code comments and commit messages in English or Chinese as per existing file conventions.
-
-This document serves as the **Single Source of Truth** for all AI Agents interacting with the AShare quantitative analysis system.
+> **核心原则**：一切逻辑以 **ATR 波动率自适应** 为基础，风险决策遵循 **Wyckoff 状态机一票否决**。
 
 ---
 
-## 1. Project Overview & Architecture
+## 1. AI 核心技能 (Skills) - 重构版
 
-**AShare** is a Python-based quantitative trading system for the Chinese A-Share market, integrating data collection, strategy execution, and real-time monitoring.
+Agent 必须优先使用 `.ai/skills/` 下的工具进行数据操作，严禁自行编写数据库连接代码。
 
-### Directory Structure
-- **`.ai/`**: AI Agent resources.
-    - **`skills/`**: Custom executable scripts (e.g., `raw_reader.py`).
-    - **`standards/`**: Project coding standards.
-    - **`SKILLS.md`**: Documentation for AI skills.
-- **`ashare/`**: Core source code.
-    - **`core/`**: Infra (DB, Config, Schema).
-    - **`data/`**: Data fetching (Baostock/AkShare).
-    - **`strategies/`**: Trading strategies (MA5/MA20, Chip Filter).
-    - **`monitor/`**: Real-time monitoring (Open Monitor).
-    - **`indicators/`**: Market environment & technical indicators.
-- **`scripts/`**: Executable workflows (`run_*.py`).
-- **`tool/`**: Utilities & Ad-hoc scripts.
-- **`config.yaml`**: Main configuration.
+### 📊 智能数据库查询 (`db_query.py`)
+*   **用途**：执行 SQL 语句、查看表结构、批量数据运维。
+*   **新特性**：支持多语句 `;` 执行；支持 `desc <table>` 快捷指令；返回执行时间与行数元数据。
+*   **用法**：
+    *   `python .ai/skills/db_query.py "desc strategy_mon_eval"` (查看表结构)
+    *   `python .ai/skills/db_query.py "TRUNCATE TABLE x; SELECT * FROM y"` (多语句)
 
----
+### 🔍 采样数据透视 (`raw_reader.py`)
+*   **用途**：读取本地 JSON/CSV/TXT 数据，特别针对 `output/` 下的大文件。
+*   **特性**：自动对大文件进行 Head/Tail 采样，防止 Token 溢出；自动识别格式并转为结构化 JSON。
+*   **用法**：`python .ai/skills/raw_reader.py read <path>`
 
-## 2. Business Logic & Strategies (策略逻辑)
+### 🩺 数据质量审计 (`env_tester.py`)
+*   **用途**：深度扫描系统数据健康状况。
+*   **特性**：自动比对 K 线与指标同步性；抽查成交量单位（手 vs 股）；验证 MA250 计算窗口深度。
+*   **用法**：`python .ai/skills/env_tester.py`
 
-### MA5-MA20 Trend Strategy (`ma5_ma20_trend_strategy`)
-A trend-following strategy based on moving average crossovers.
-1.  **Trend Filter**: Long-term bullish arrangement (`close > MA60 > MA250` & `MA20 > MA60`).
-2.  **Entry Signals**:
-    - **Golden Cross**: MA5 crosses above MA20 + Volume surge + MACD confirmation.
-    - **Pullback**: Price pulls back to MA20 + MA5 trending up.
-    - **W-Bottom**: W-pattern breakout confirmation.
-3.  **Exit Signals**:
-    - **Dead Cross**: MA5 crosses below MA20.
-    - **Trend Break**: Price drops below MA20 with high volume.
+### 🌍 市场环境解析 (`market_env_analyzer.py`)
+*   **用途**：获取包含 ASCII 风险进度条的市场环境报告。
+*   **特性**：直接引用核心库，确保周线风险评级与策略一致。
+*   **用法**：`python .ai/skills/market_env_analyzer.py [YYYY-MM-DD]`
 
-### Open Monitor System (`open_monitor`)
-Real-time execution checks for signals generated on the previous trading day.
-1.  **Input**: Load `BUY` signals from `strategy_signal_events` (previous day).
-2.  **Live Filter**: Fetch real-time quotes (Snapshot).
-3.  **Risk Evaluation**:
-    - **Environment Gate**: Checks market regime (Risk On/Off) & weekly channel status.
-    - **Gap Risk**: excessive gap up (>5%) or gap down (<-3%).
-    - **Limit Up**: Rejects if the stock is already at the limit up price.
-4.  **Output**: Action decision (`EXECUTE`, `WAIT`, `STOP`).
+### 🗺️ 项目地图导出 (`project_exporter.py`)
+*   **用途**：为 AI 生成全项目的上下文地图。
+*   **特性**：自动生成文件树；智能采样非核心代码；支持 `.gitignore` 过滤。
+*   **用法**：`python .ai/skills/project_exporter.py`
 
 ---
 
-## 3. Development Standards (开发规范)
+## 2. 策略逻辑闭环
 
-- **Coding Style**: PEP 8. 4-space indentation.
-- **Naming**: `snake_case` for functions/variables, `CamelCase` for classes.
-- **Imports**: Use absolute imports (e.g., `from ashare.core.db import ...`).
-- **Configuration**: Never hardcode credentials. Use `config.yaml`.
-- **Testing**: Run `pytest` for unit tests. DB-related tests require a local MySQL instance.
+### MA5-MA20 趋势策略 (`ma5_ma20_trend`)
+1.  **进场**：处于 MA250（年线）上方且 MA5 金叉/回踩 MA20（容差 0.6*ATR）。
+2.  **量能**：必须符合 VSA 供应枯竭逻辑（回踩量 < 5日均量 * 1.1）。
+3.  **RS 过滤**：RS 相对强度（5日持续走强）作为核心加分项。
 
----
+### Wyckoff 状态机风控
+1.  **全局状态**：ACCUMULATION (加分) / DISTRIBUTION (强力拦截)。
+2.  **风险事件**：一旦出现 SOW (供应出现)，强制输出 `STOP` 或 `SELL`。
 
-## 4. Operations & Tools (操作指南)
-
-### AI Agent Skills (Custom Tools)
-The agent is equipped with custom tools in `.ai/skills/` to handle specific tasks.
-
-#### **Raw Data Reader (`raw_reader`)**
-*   **Purpose**: Read local data files (JSON, CSV, DB exports) located in `.gitignore` paths like `output/`.
-*   **Commands**:
-    *   Read File: `python .ai/skills/raw_reader.py read <path>`
-    *   List Dir: `python .ai/skills/raw_reader.py list <path>`
-
-#### **Database Query (`db_query`)**
-*   **Purpose**: Directly query the MySQL database to verify data or diagnose issues.
-*   **Command**: `python .ai/skills/db_query.py "<SQL_QUERY>"`
-*   **Note**: The script connects using `ashare.core.db`. `SELECT` queries limit to 20 rows by default unless specified.
-
-#### **Database Snapshot Exporter (`db_snapshot_exporter`)**
-*   **Purpose**: Export database schema/row counts/sample data into Markdown/JSON for analysis.
-*   **Command**: `python .ai/skills/db_snapshot_exporter.py`
-*   **Output**: `output/db_snapshot_YYYYMMDD_HHMMSS.md` and `.json`
-
-#### **Market Environment Analyzer (`market_env_analyzer`)**
-*   **Purpose**: Build and print a weekly market environment report for a target date.
-*   **Command**: `python .ai/skills/market_env_analyzer.py [YYYY-MM-DD]`
-
-#### **Sector Rotation Analyzer (`sector_rotation_analyzer`)**
-*   **Purpose**: Analyze sector rotation based on recent board industry history.
-*   **Command**: `python .ai/skills/sector_rotation_analyzer.py [YYYY-MM-DD]`
-
-#### **Network Tester - AkShare (`network_tester_akshare`)**
-*   **Purpose**: Test AkShare and Eastmoney push2 connectivity and latency.
-*   **Command**: `python .ai/skills/network_tester_akshare.py [options]`
-
-#### **Network Tester - Baostock (`network_tester_baostock`)**
-*   **Purpose**: Test Baostock core API availability and latency.
-*   **Command**: `python .ai/skills/network_tester_baostock.py [options]`
-
-#### **Environment & Config Tester (`env_tester`)**
-*   **Purpose**: Diagnose project environment, check config loading, database/view health, and data source dependencies.
-*   **Command**: `python .ai/skills/env_tester.py`
-
-#### **Project Exporter (`project_exporter`)**
-*   **Purpose**: Dump project files into a single text file for LLM review.
-*   **Command**: `python .ai/skills/project_exporter.py`
-*   **Output**: `output/project_for_llm_YYYYMMDD_HHMMSS.txt`
-
-#### **Project Zip Exporter (`project_zip_exporter`)**
-*   **Purpose**: Package project files into a zip with file manifest.
-*   **Command**: `python .ai/skills/project_zip_exporter.py [options]`
-*   **Output**: zip and manifest under `output/` (see script help)
-
-### Running Scripts
-To avoid `ModuleNotFoundError`, always run scripts as modules from the project root:
-
-```bash
-# Full Pipeline
-python start.py
-
-# Single Strategy
-python -m scripts.run_ma5_ma20_trend_strategy
-
-# Open Monitor
-python -m scripts.run_open_monitor
-
-# Data Collection
-python -c "from ashare.app import AshareApp; AshareApp().run()"
-```
-
-Note: AI skill scripts under `.ai/skills/` are executed directly as documented (do not use `python -m`).
+### Open Monitor 日内决策
+1.  **VWAP 均价线**：日内跌破均价线 1.5% 强制 `STOP`。
+2.  **ATR 自适应**：高低开拦截线动态计算，不设固定百分比。
 
 ---
 
-## 5. Data & Database
-
-### Database Schema
-Managed by `ashare.core.schema_manager`. Key standards:
-- **Encoding**: MUST use `utf8mb4` charset to avoid Chinese character corruption.
-- **Key Tables**:
-- **`history_daily_kline`**: Daily OHLCV data.
-- **`strategy_signal_events`**: Generated strategy signals.
-- **`strategy_open_monitor_eval`**: Real-time monitoring results.
-- **`strategy_open_monitor_env`**: Market environment snapshots.
-
-### Local Data Handling
-- Large datasets and output files in `output/` are **ignored by git**.
-- **Do NOT** upload these files to remote repositories.
-- Use the **Raw Data Reader** skill to inspect them if needed.
-
----
-
-## 6. Troubleshooting
-
-- **`ModuleNotFoundError: No module named 'ashare'`**:
-    - Fix: Run scripts using `python -m scripts.xxx` from the root directory.
-- **`IntegrityError` (Duplicate Entry)**:
-    - Context: Often happens when re-running strategies for the same date. This is expected behavior for idempotent runs.
+## 3. 运维规范 (Critical)
+*   **脚本运行**：除 Skills 外，业务脚本必须以模块方式运行：`python -m scripts.xxx`。
+*   **字符集**：必须保持 `utf8mb4`，防止中文乱码。

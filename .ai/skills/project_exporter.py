@@ -1,94 +1,58 @@
 import os
+import json
 from pathlib import Path
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
-ts = datetime.now(ZoneInfo("Asia/Singapore")).strftime("%Y%m%d_%H%M%S")
+def export_project_context():
+    """
+    导出项目的终极上下文：
+    1. 生成包含每个文件头部的“项目地图”。
+    2. 汇总关键逻辑文件内容。
+    3. 严格遵循排除规则。
+    """
+    root = Path(__file__).resolve().parents[2]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = root / "output" / f"project_context_{ts}.txt"
+    output_path.parent.mkdir(exist_ok=True)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parents[1]
-OUTPUT_DIR = PROJECT_ROOT / "output"
-OUTPUT_FILE = OUTPUT_DIR / f"project_for_llm_{ts}.txt"
+    include_exts = {'.py', '.yaml', '.yml', '.md', '.sql'}
+    exclude_dirs = {'.git', '__pycache__', '.pytest_cache', '.idea', 'venv', 'output', 'dbn_trading_auto'}
 
-# 想导出的文件后缀（按需增减）
-INCLUDE_EXT = {
-    ".py",
-    ".toml",
-    ".md",
-    ".txt",
-    ".json",
-    ".yml",
-    ".yaml",
-}
+    context = []
+    file_tree = []
 
-# 想忽略的目录（虚拟环境、git、缓存这些没必要给大模型看）
-EXCLUDE_DIRS = {
-    ".git",
-    ".idea",
-    "__pycache__",
-    ".pytest_cache",
-    "venv",
-    ".venv",
-    "dbn_trading_auto",
-    "output",
-}
+    print(f"Exporting project context from {root}...")
 
-
-def should_skip_dir(path: Path) -> bool:
-    return any(part in EXCLUDE_DIRS for part in path.parts)
-
-
-def main() -> None:
-    files: list[Path] = []
-
-    output_resolved = OUTPUT_FILE.resolve()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    for root, dirs, filenames in os.walk(PROJECT_ROOT):
-        root_path = Path(root)
-
-        # 过滤不想要的目录
-        if should_skip_dir(root_path.relative_to(PROJECT_ROOT)):
-            # 清空 dirs，阻止继续往下走
-            dirs[:] = []
+    for path in sorted(root.rglob("*")):
+        if any(part in exclude_dirs for part in path.parts): continue
+        if path.is_dir():
+            file_tree.append(f"[DIR] {path.relative_to(root)}")
             continue
-
-        for name in filenames:
-            p = root_path / name
-
-            # ✅ 关键：跳过输出文件自身，防止“写的时候又读自己”导致内容重复
-            if p.resolve() == output_resolved:
-                continue
-
-            if p.suffix.lower() in INCLUDE_EXT:
-                files.append(p)
-
-    files.sort()
-
-    with OUTPUT_FILE.open("w", encoding="utf-8") as out:
-        out.write(
-            f"# Project dump for LLM\n"
-            f"# Root: {PROJECT_ROOT}\n"
-            f"# Total files: {len(files)}\n"
-            f"\n"
-        )
-
-        for path in files:
-            rel = path.relative_to(PROJECT_ROOT)
-            out.write("\n")
-            out.write("=" * 80 + "\n")
-            out.write(f"FILE: {rel.as_posix()}\n")
-            out.write("=" * 80 + "\n\n")
-
+        
+        if path.suffix in include_exts:
+            rel_path = path.relative_to(root)
+            file_tree.append(f"[FILE] {rel_path}")
+            
+            # 读取文件内容
             try:
-                with path.open("r", encoding="utf-8") as f:
-                    out.write(f.read())
-            except UnicodeDecodeError:
-                out.write("# [SKIP] 非 UTF-8 文本文件，未导出内容。\n")
+                content = path.read_text(encoding="utf-8")
+                # 只有核心业务代码全量读，其他只读头部
+                is_core = any(p in str(rel_path) for p in ["ashare/", "scripts/"])
+                if not is_core and len(content) > 1000:
+                    content = content[:1000] + "\n... [TRUNCATED] ..."
+                
+                context.append(f"\n{'='*60}\nFILE: {rel_path}\n{'='*60}\n{content}")
+            except Exception as e:
+                context.append(f"\nFILE: {rel_path} [READ ERROR: {e}]")
 
-    print(f"导出完成，共 {len(files)} 个文件")
-    print(f"输出文件: {OUTPUT_FILE}")
+    with output_path.open("w", encoding="utf-8") as f:
+        f.write(f"# AShare Project Context Map ({ts})\n")
+        f.write("# PROJECT STRUCTURE:\n")
+        f.write("\n".join(file_tree))
+        f.write("\n\n" + "# FILE CONTENTS:\n")
+        f.write("".join(context))
 
+    print(f"Export Success: {output_path}")
 
 if __name__ == "__main__":
-    main()
+    export_project_context()

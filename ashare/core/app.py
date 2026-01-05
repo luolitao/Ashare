@@ -143,14 +143,18 @@ class AshareApp:
 
     def __init__(
         self,
-        output_dir: str | Path = "output",
+        output_dir: str | Path | None = None,
         top_liquidity_count: int | None = None,
         history_days: int | None = None,
         min_listing_days: int | None = None,
         init_db: bool = False,
     ) -> None:
-        # 保持入口参数兼容性
-        self.output_dir = Path(output_dir)
+        # 统一输出到项目根目录的 output
+        if output_dir is None:
+            self.output_dir = Path(__file__).resolve().parents[2] / "output"
+        else:
+            self.output_dir = Path(output_dir)
+            
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.init_db = init_db
 

@@ -1,65 +1,57 @@
 import sys
 import os
-import logging
-import datetime as dt
-
-# 添加项目根目录到 sys.path，确保能找到 ashare 包
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from ashare.core.config import load_config, get_section
-from ashare.data.akshare_fetcher import AkshareDataFetcher
-from ashare.core.db import DatabaseConfig, MySQLWriter
+import pandas as pd
 from sqlalchemy import text
 
-def debug():
-    print("=== AShare 环境与配置自检工具 ===")
-    
-    # 1. 配置加载测试
+# 添加项目根目录到 sys.path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from ashare.core.config import load_config
+from ashare.core.db import DatabaseConfig, MySQLWriter
+
+def audit_data_quality():
+    print("=== AShare 数据质量深度审计 ===")
     try:
-        config = load_config()
-        print(f"[OK] 配置文件加载成功。项数: {len(config)}, 顶级节点: {list(config.keys())}")
+        db = MySQLWriter(DatabaseConfig.from_env())
+        with db.engine.connect() as conn:
+            # 1. 检查 K 线与指标的同步性
+            k_cnt = conn.execute(text("SELECT COUNT(*) FROM history_daily_kline")).scalar()
+            i_cnt = conn.execute(text("SELECT COUNT(*) FROM strategy_ind_daily")).scalar()
+            print(f"[KV] 记录分布: DailyK={k_cnt}, Indicators={i_cnt}")
+            if abs(k_cnt - i_cnt) / max(1, k_cnt) > 0.1:
+                print("[WARN] K线与指标数量差异较大，可能存在计算遗漏！")
+
+            # 2. 检查成交量量纲异常 (纠正后的逻辑)
+            # 抽样对比日线成交量与 5 分钟成交量
+            print("\n--- 成交量量纲审计 ---")
+            vol_check_sql = """
+                SELECT k.code, k.date, k.volume as daily_vol, m.volume as min_vol 
+                FROM history_daily_kline k
+                JOIN strategy_mon_minute m ON k.code = m.code AND k.date = m.monitor_date
+                WHERE k.date = (SELECT MAX(date) FROM history_daily_kline)
+                LIMIT 5
+            """
+            vols = pd.read_sql(text(vol_check_sql), conn)
+            if not vols.empty:
+                for _, row in vols.iterrows():
+                    ratio = row['daily_vol'] / max(1, row['min_vol'])
+                    # 对于 5 分钟数据，日线量通常应大于分时量 10-50 倍左右。
+                    # 如果比例接近 1 或 0.01，说明单位有问题
+                    status = "[OK]" if ratio > 1 else "[ERROR: Unit Mismatch? у]"
+                    print(f"[{row['code']}] Daily: {row['daily_vol']}, Minute: {row['min_vol']}, Ratio: {ratio:.2f} {status}")
+            else:
+                print("[SKIP] 缺少分时数据，无法比对量纲。")
+
+            # 3. 检查计算窗口预热
+            print("\n--- 计算窗口审计 ---")
+            window_sql = "SELECT code, COUNT(*) as cnt FROM history_daily_kline GROUP BY code LIMIT 5"
+            windows = pd.read_sql(text(window_sql), conn)
+            for _, row in windows.iterrows():
+                status = "[OK]" if row['cnt'] >= 250 else "[WARN: Window too short for MA250]"
+                print(f"[{row['code']}] History Depth: {row['cnt']} days {status}")
+
     except Exception as e:
-        print(f"[ERROR] 配置文件加载失败: {e}")
-        return
-
-    # 2. 关键节点检查
-    app_cfg = get_section("app")
-    print("\n--- [app] 配置检查 ---")
-    for k in ['index_codes', 'fetch_index_kline']:
-        print(f"{k}: {app_cfg.get(k)}")
-
-    # 3. 数据库连接与视图重构检查
-    print("\n--- 数据库与视图状态检查 ---")
-    try:
-        db_writer = MySQLWriter(DatabaseConfig.from_env())
-        with db_writer.engine.connect() as conn:
-            # 检查我们重构的 ready_signals 视图
-            res = conn.execute(text("SELECT COUNT(*) FROM strategy_ready_signals")).scalar()
-            print(f"[OK] 数据库连接成功。")
-            print(f"[OK] strategy_ready_signals 视图可用，当前就绪信号数: {res}")
-            
-            # 检查 candidates 视图
-            res_cand = conn.execute(text("SELECT COUNT(*) FROM strategy_candidates")).scalar()
-            print(f"[OK] strategy_candidates 视图可用，当前候选总数: {res_cand}")
-    except Exception as e:
-        print(f"[ERROR] 数据库或视图检查失败: {e}")
-
-    # 4. 数据源库加载测试
-    print("\n--- 数据源依赖检查 ---")
-    try:
-        from ashare.data.baostock_session import BaostockSession
-        bs = BaostockSession()
-        print("[OK] Baostock 依赖库加载成功。")
-    except Exception as e:
-        print(f"[ERROR] Baostock 加载失败: {e}")
-
-    try:
-        fetcher = AkshareDataFetcher()
-        print("[OK] AkshareDataFetcher 加载成功。")
-    except Exception as e:
-        print(f"[ERROR] AkshareDataFetcher 加载失败: {e}")
-
-    print("\n=== 自检完成 ===")
+        print(f"[CRITICAL] 审计中断: {e}")
 
 if __name__ == "__main__":
-    debug()
+    audit_data_quality()
