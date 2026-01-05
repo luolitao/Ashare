@@ -7,6 +7,7 @@ from __future__ import annotations
 - 统一输出列名（live_open/live_high/live_low/live_latest/live_volume/live_amount...）。
 """
 
+import datetime as dt
 import json
 import time
 import urllib.parse
@@ -325,3 +326,144 @@ def fetch_quotes_eastmoney(
         for c in missing:
             out[c] = None
     return out.reset_index(drop=True)
+
+
+def fetch_minute_eastmoney(
+    code: str,
+    trade_date: str | None = None,
+    *,
+    logger: Any = None,  # noqa: ANN401
+) -> pd.DataFrame:
+    secid = to_eastmoney_secid(code)
+    target_date = None
+    if trade_date:
+        try:
+            target_date = pd.to_datetime(trade_date, errors="coerce").date()
+        except Exception:
+            target_date = None
+    today = dt.date.today()
+
+    if target_date is None or target_date == today:
+        base_url = "https://push2.eastmoney.com/api/qt/stock/trends2/get"
+        fields1 = "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11"
+        fields2 = "f51,f52,f53,f54,f55"
+        query = {
+            "secid": secid,
+            "fields1": fields1,
+            "fields2": fields2,
+            "ndays": 1,
+            "iscr": 0,
+            "iscca": 0,
+        }
+        url = f"{base_url}?{urllib.parse.urlencode(query)}"
+        try:
+            payload = urlopen_json_no_proxy(url, timeout=10, retries=2)
+        except Exception as exc:  # noqa: BLE001
+            if logger is not None:
+                logger.debug("Eastmoney 分时请求失败(%s): %s", code, exc)
+            return pd.DataFrame()
+
+        data = (payload or {}).get("data") or {}
+        trends = data.get("trends") or []
+        rows: List[Dict[str, Any]] = []
+        cum_vol = 0.0
+        cum_amt = 0.0
+        for item in trends:
+            if not isinstance(item, str):
+                continue
+            parts = item.split(",")
+            if len(parts) < 3:
+                continue
+            time_str = parts[0]
+            price = _to_float(parts[1])
+            vol = _to_float(parts[2])
+            amount = _to_float(parts[3]) if len(parts) > 3 else None
+            avg_price = _to_float(parts[4]) if len(parts) > 4 else None
+            if avg_price is None and vol is not None:
+                cum_vol += vol
+                if amount is not None:
+                    cum_amt += amount
+                elif price is not None:
+                    cum_amt += price * vol
+                if cum_vol > 0:
+                    avg_price = cum_amt / cum_vol
+            rows.append(
+                {
+                    "time": time_str,
+                    "price": price,
+                    "volume": vol,
+                    "avg_price": avg_price,
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        df["time"] = pd.to_datetime(df["time"], errors="coerce")
+        df = df.dropna(subset=["time"])
+        return df
+
+    date_str = target_date.strftime("%Y%m%d")
+    base_url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    fields1 = "f1,f2,f3,f4,f5,f6"
+    fields2 = "f51,f52,f53,f54,f55,f56,f57"
+    query = {
+        "secid": secid,
+        "fields1": fields1,
+        "fields2": fields2,
+        "klt": 1,
+        "fqt": 0,
+        "end": date_str,
+        "lmt": 1000,
+    }
+    url = f"{base_url}?{urllib.parse.urlencode(query)}"
+    try:
+        payload = urlopen_json_no_proxy(url, timeout=10, retries=2)
+    except Exception as exc:  # noqa: BLE001
+        if logger is not None:
+            logger.debug("Eastmoney 历史分时请求失败(%s): %s", code, exc)
+        return pd.DataFrame()
+
+    data = (payload or {}).get("data") or {}
+    klines = data.get("klines") or []
+    rows = []
+    cum_vol = 0.0
+    cum_amt = 0.0
+    for item in klines:
+        if not isinstance(item, str):
+            continue
+        parts = item.split(",")
+        if len(parts) < 7:
+            continue
+        time_str = parts[0]
+        ts = pd.to_datetime(time_str, errors="coerce")
+        if pd.isna(ts) or ts.date() != target_date:
+            continue
+        price = _to_float(parts[2])
+        vol = _to_float(parts[5])
+        amount = _to_float(parts[6])
+        avg_price = None
+        if vol is not None:
+            cum_vol += vol
+            if amount is not None:
+                cum_amt += amount
+            elif price is not None:
+                cum_amt += price * vol
+            if cum_vol > 0:
+                avg_price = cum_amt / cum_vol
+        rows.append(
+            {
+                "time": ts,
+                "price": price,
+                "volume": vol,
+                "avg_price": avg_price,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df.dropna(subset=["time"])
+    return df

@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 import os
 import time
-from typing import List
+from typing import List, Any
 
 import pandas as pd
 from sqlalchemy import bindparam, text
@@ -23,10 +23,16 @@ from ashare.core.db import MySQLWriter
 class StrategyStore:
     """策略指标/信号/ready_signals 的持久化入口。"""
 
-    def __init__(self, db_writer: MySQLWriter, params, logger: logging.Logger) -> None:
+    def __init__(self, db_writer: MySQLWriter, params: Any, logger: logging.Logger) -> None:
         self.db_writer = db_writer
         self.params = params
         self.logger = logger
+        
+    def _get_param(self, key: str, default: Any = None) -> Any:
+        """兼容 dataclass 和 dict 的参数获取。"""
+        if isinstance(self.params, dict):
+            return self.params.get(key, default)
+        return getattr(self.params, key, default)
 
     def table_exists(self, table: str) -> bool:
         if not table:
@@ -47,9 +53,13 @@ class StrategyStore:
         *,
         scope_override: str | None = None,
     ) -> None:
-        table = self.params.indicator_table
+        table = self._get_param("indicator_table")
+        if not table:
+            self.logger.warning("indicator_table 未配置，跳过指标写入。")
+            return
+            
         scope = (
-            (scope_override or getattr(self.params, "signals_write_scope", "latest"))
+            (scope_override or self._get_param("signals_write_scope", "latest"))
             or "latest"
         ).strip().lower()
         if scope not in {"latest", "window"}:
@@ -175,9 +185,13 @@ class StrategyStore:
         scope_override: str | None = None,
     ) -> None:
         t0 = time.perf_counter()
-        table = self.params.signal_events_table
+        table = self._get_param("signal_events_table")
+        if not table:
+             self.logger.warning("signal_events_table 未配置，跳过信号写入。")
+             return
+
         scope = (
-            (scope_override or getattr(self.params, "signals_write_scope", "latest"))
+            (scope_override or self._get_param("signals_write_scope", "latest"))
             or "latest"
         ).strip().lower()
         if scope not in {"latest", "window"}:
@@ -223,12 +237,19 @@ class StrategyStore:
             "wave_type",
             "extra_json",
         ]
+        # 已移除: close, ma*, vol_ratio, macd_hist, kdj*, atr14
+        # 已移除: close, ma*, vol_ratio, macd_hist, kdj*, atr14
         # 容错处理：只保留实际存在的列
         events_df = base[[c for c in keep_cols if c in base.columns]].copy()
         events_df = events_df.rename(columns={"date": "sig_date"})
         events_df["sig_date"] = pd.to_datetime(events_df["sig_date"]).dt.date
         events_df["code"] = events_df["code"].astype(str)
-        events_df["strategy_code"] = STRATEGY_CODE_MA5_MA20_TREND
+        # 优先使用 dataframe 里的 strategy_code，如果没有则使用配置，最后兜底
+        if "strategy_code" in base.columns:
+            events_df["strategy_code"] = base["strategy_code"]
+        else:
+            events_df["strategy_code"] = self._get_param("strategy_code", STRATEGY_CODE_MA5_MA20_TREND)
+
         self.logger.info(
             "write_signal_events: scope=%s rows=%s codes=%s",
             scope,
@@ -237,12 +258,12 @@ class StrategyStore:
         )
         valid_days = None
         try:
-            valid_days = int(getattr(self.params, "valid_days", 3))
+            valid_days = int(self._get_param("valid_days", 3))
             events_df["valid_days"] = valid_days
         except Exception:
             self.logger.warning(
                 "valid_days=%s 解析失败，将跳过有效期字段写入。",
-                getattr(self.params, "valid_days", None),
+                self._get_param("valid_days", None),
             )
             events_df["valid_days"] = pd.NA
             valid_days = None
@@ -337,7 +358,7 @@ class StrategyStore:
             if flag_col in events_df.columns:
                 events_df[flag_col] = events_df[flag_col].astype(bool)
 
-        # 兜底补齐：age_days / deadzone_hit / stale_hit
+        # 兜底补齐
         if "age_days" not in events_df.columns:
             events_df["age_days"] = pd.NA
         if events_df["age_days"].isna().any():
@@ -366,6 +387,9 @@ class StrategyStore:
             except Exception:
                 pass
 
+        # === 写入逻辑 ===
+        target_strategies = events_df["strategy_code"].unique().tolist()
+        
         if scope == "latest":
             delete_stmt = (
                 text(
@@ -378,21 +402,27 @@ class StrategyStore:
             del_codes = events_df["code"].tolist()
             chunk_size = 1000
             with self.db_writer.engine.begin() as conn:
-                for i in range(0, len(del_codes), chunk_size):
-                    part_codes = del_codes[i : i + chunk_size]
-                    conn.execute(
-                        delete_stmt,
-                        {
-                            "d": latest_date,
-                            "codes": part_codes,
-                            "strategy": STRATEGY_CODE_MA5_MA20_TREND,
-                        },
-                    )
+                for strat in target_strategies:
+                    strat_codes = events_df.loc[events_df["strategy_code"] == strat, "code"].tolist()
+                    if not strat_codes: continue
+                    
+                    for i in range(0, len(strat_codes), chunk_size):
+                        part_codes = strat_codes[i : i + chunk_size]
+                        conn.execute(
+                            delete_stmt,
+                            {
+                                "d": latest_date,
+                                "codes": part_codes,
+                                "strategy": strat,
+                            },
+                        )
         else:
+            # scope = window
             start_d = min(events_df["sig_date"])
             end_d = max(events_df["sig_date"])
             delete_by_date_only = (not codes_clean) or (len(codes_clean) > 2000)
-            batch_days = max(int(getattr(self.params, "signals_write_batch_days", 0) or 0), 0)
+            batch_days = max(int(self._get_param("signals_write_batch_days", 0) or 0), 0)
+            
             if batch_days > 0:
                 unique_dates = sorted(events_df["sig_date"].dropna().unique().tolist())
                 if unique_dates:
@@ -405,108 +435,79 @@ class StrategyStore:
                         chunk_df = events_df[events_df["sig_date"].isin(chunk_dates)].copy()
                         chunk_start = min(chunk_dates)
                         chunk_end = max(chunk_dates)
+                        
                         with self.db_writer.engine.begin() as conn:
-                            if delete_by_date_only:
-                                delete_stmt = text(
-                                    f"""
-                                    DELETE FROM `{table}`
-                                    WHERE `sig_date` BETWEEN :start_date AND :end_date
-                                      AND `strategy_code` = :strategy
-                                    """
-                                )
-                                conn.execute(
-                                    delete_stmt,
-                                    {
-                                        "start_date": chunk_start,
-                                        "end_date": chunk_end,
-                                        "strategy": STRATEGY_CODE_MA5_MA20_TREND,
-                                    },
-                                )
-                            else:
-                                delete_stmt = (
-                                    text(
+                            for strat in target_strategies:
+                                if delete_by_date_only:
+                                    delete_stmt = text(
                                         f"""
                                         DELETE FROM `{table}`
                                         WHERE `sig_date` BETWEEN :start_date AND :end_date
                                           AND `strategy_code` = :strategy
-                                          AND `code` IN :codes
                                         """
-                                    ).bindparams(bindparam("codes", expanding=True))
-                                )
-                                chunk_size = 800
-                                for j in range(0, len(codes_clean), chunk_size):
-                                    part_codes = codes_clean[j : j + chunk_size]
-                                    conn.execute(
-                                        delete_stmt,
-                                        {
-                                            "start_date": chunk_start,
-                                            "end_date": chunk_end,
-                                            "codes": part_codes,
-                                            "strategy": STRATEGY_CODE_MA5_MA20_TREND,
-                                        },
                                     )
+                                    conn.execute(delete_stmt, {
+                                        "start_date": chunk_start, "end_date": chunk_end, "strategy": strat
+                                    })
+                                else:
+                                    delete_stmt = (
+                                        text(
+                                            f"""
+                                            DELETE FROM `{table}`
+                                            WHERE `sig_date` BETWEEN :start_date AND :end_date
+                                              AND `strategy_code` = :strategy
+                                              AND `code` IN :codes
+                                            """
+                                        ).bindparams(bindparam("codes", expanding=True))
+                                    )
+                                    strat_codes = chunk_df.loc[chunk_df["strategy_code"] == strat, "code"].tolist()
+                                    chunk_size = 800
+                                    for j in range(0, len(strat_codes), chunk_size):
+                                        part_codes = strat_codes[j : j + chunk_size]
+                                        conn.execute(delete_stmt, {
+                                            "start_date": chunk_start, "end_date": chunk_end, 
+                                            "codes": part_codes, "strategy": strat
+                                        })
+
                         self.db_writer.write_dataframe(chunk_df, table, if_exists="append")
-                        self.logger.info(
-                            "write_signal_events: batch %s~%s rows=%s",
-                            chunk_start,
-                            chunk_end,
-                            len(chunk_df),
-                        )
-                    self.logger.info(
-                        "signals_write_scope=window：事件已分批写入 %s~%s（%s batches, %s）。",
-                        start_d,
-                        end_d,
-                        total_batches,
-                        "all-codes" if delete_by_date_only else f"{len(codes_clean)} codes",
-                    )
-                    self.logger.info("write_signal_events: done in %.2fs", time.perf_counter() - t0)
                     return
+            
+            # 非分批，直接按 window 删
             with self.db_writer.engine.begin() as conn:
-                if delete_by_date_only:
-                    delete_stmt = text(
-                        f"""
-                        DELETE FROM `{table}`
-                        WHERE `sig_date` BETWEEN :start_date AND :end_date
-                          AND `strategy_code` = :strategy
-                        """
-                    )
-                    conn.execute(
-                        delete_stmt,
-                        {
-                            "start_date": start_d,
-                            "end_date": end_d,
-                            "strategy": STRATEGY_CODE_MA5_MA20_TREND,
-                        },
-                    )
-                else:
-                    delete_stmt = (
-                        text(
+                for strat in target_strategies:
+                    if delete_by_date_only:
+                        delete_stmt = text(
                             f"""
                             DELETE FROM `{table}`
                             WHERE `sig_date` BETWEEN :start_date AND :end_date
                               AND `strategy_code` = :strategy
-                              AND `code` IN :codes
                             """
-                        ).bindparams(bindparam("codes", expanding=True))
-                    )
-                    chunk_size = 800
-                    for i in range(0, len(codes_clean), chunk_size):
-                        part_codes = codes_clean[i : i + chunk_size]
-                        conn.execute(
-                            delete_stmt,
-                            {
-                                "start_date": start_d,
-                                "end_date": end_d,
-                                "codes": part_codes,
-                                "strategy": STRATEGY_CODE_MA5_MA20_TREND,
-                            },
                         )
-            self.logger.info(
-                "signals_write_scope=window：事件已覆盖写入 %s~%s（%s）。",
-                start_d,
-                end_d,
-                "all-codes" if delete_by_date_only else f"{len(codes_clean)} codes",
-            )
+                        conn.execute(delete_stmt, {"start_date": start_d, "end_date": end_d, "strategy": strat})
+                    else:
+                        delete_stmt = (
+                            text(
+                                f"""
+                                DELETE FROM `{table}`
+                                WHERE `sig_date` BETWEEN :start_date AND :end_date
+                                  AND `strategy_code` = :strategy
+                                  AND `code` IN :codes
+                                """
+                            ).bindparams(bindparam("codes", expanding=True))
+                        )
+                        chunk_size = 800
+                        strat_codes = events_df.loc[events_df["strategy_code"] == strat, "code"].tolist()
+                        for i in range(0, len(strat_codes), chunk_size):
+                            part_codes = strat_codes[i : i + chunk_size]
+                            conn.execute(
+                                delete_stmt,
+                                {
+                                    "start_date": start_d,
+                                    "end_date": end_d,
+                                    "codes": part_codes,
+                                    "strategy": strat,
+                                },
+                            )
 
         self.db_writer.write_dataframe(events_df, table, if_exists="append")
         self.logger.info("write_signal_events: done in %.2fs", time.perf_counter() - t0)
@@ -521,22 +522,18 @@ class StrategyStore:
         if not ready_table:
             return
 
-        # 重构：检查是否为视图。如果是视图，则无需手动刷新（数据通过 SQL Join 自动生成）
         if schema_manager._relation_type(ready_table) == "VIEW":
-            self.logger.debug("ready_signals %s 是动态视图，跳过手动刷新逻辑。", ready_table)
             return
 
         if not self.table_exists(ready_table):
-            self.logger.warning("ready_signals 表 %s 不存在，跳过刷新。", ready_table)
             return
 
         select_sql, column_order = schema_manager.build_ready_signals_select(
-            self.params.signal_events_table,
-            self.params.indicator_table,
+            self._get_param("signal_events_table"),
+            self._get_param("indicator_table"),
             TABLE_STRATEGY_CHIP_FILTER,
         )
         if not select_sql or not column_order:
-            self.logger.warning("ready_signals 物化 SQL 未生成，跳过刷新。")
             return
 
         sig_dates_clean = sorted({d for d in sig_dates if isinstance(d, dt.date)})
@@ -564,7 +561,7 @@ class StrategyStore:
         ).bindparams(bindparam("sig_dates", expanding=True))
 
         payload = {
-            "strategy_code": STRATEGY_CODE_MA5_MA20_TREND,
+            "strategy_code": self._get_param("strategy_code", STRATEGY_CODE_MA5_MA20_TREND),
             "sig_dates": sig_dates_clean,
         }
         with self.db_writer.engine.begin() as conn:

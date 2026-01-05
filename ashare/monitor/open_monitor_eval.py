@@ -263,6 +263,105 @@ class OpenMonitorEvaluator:
 
         return merged
 
+    def _arbitrate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        """多策略信号仲裁：将同一标的的多条策略信号合并为单一决策。"""
+        if df.empty:
+            return df
+            
+        # 必须包含的列
+        if "code" not in df.columns or "strategy_code" not in df.columns:
+            return df
+
+        # 按 (sig_date, code) 分组
+        # 注意：这里假设 sig_date 已经是 datetime 或统一格式
+        grouped = df.groupby(["sig_date", "code"])
+        
+        consolidated_rows = []
+        
+        for (d, c), group in grouped:
+            # 1. 提取各策略信号
+            strategies = set(group["strategy_code"].astype(str))
+            
+            # 获取主策略行 (优先 ma5_ma20_trend)
+            primary_row = None
+            if "ma5_ma20_trend" in strategies:
+                primary_row = group[group["strategy_code"] == "ma5_ma20_trend"].iloc[0]
+            elif "low_suck_reversal" in strategies:
+                primary_row = group[group["strategy_code"] == "low_suck_reversal"].iloc[0]
+            else:
+                primary_row = group.iloc[0]
+            
+            # 复制主行作为基础
+            row = primary_row.copy()
+            
+            # 2. 收集各方意见
+            wyckoff_signal = None
+            low_suck_signal = None
+            trend_signal = None
+            
+            # 遍历 group 收集信息
+            reasons = []
+            risks = []
+            
+            for _, r in group.iterrows():
+                s_code = str(r.get("strategy_code") or "")
+                # 注意：OpenMonitorRepo 已将 signal 重命名为 sig_signal
+                sig = str(r.get("sig_signal") or "").upper()
+                reason = str(r.get("sig_reason") or "").strip()
+                risk = str(r.get("risk_tag") or "").strip() # risk_tag 在 Repo 中可能未被重命名，或者已被重命名为 risk_tag
+                # 检查 Repo 逻辑：risk_tag -> risk_tag (未重命名) 还是 -> sig_risk_tag?
+                # 查看 Repo 代码：'risk_tag': 'risk_tag' (保留原名) 或 'risk_tag': 'sig_risk_tag'
+                # 让我们通过 .get 尝试两者
+                if not risk or risk == "None":
+                    risk = str(r.get("sig_risk_tag") or "").strip()
+                
+                if reason: reasons.append(f"[{s_code}]{reason}")
+                if risk and risk != "None": risks.append(risk)
+                
+                if s_code == "wyckoff_distribution":
+                    wyckoff_signal = sig
+                elif s_code == "low_suck_reversal":
+                    low_suck_signal = sig
+                elif s_code == "ma5_ma20_trend":
+                    trend_signal = sig
+            
+            # 3. 仲裁逻辑 (Arbitration Logic)
+            final_signal = row.get("sig_signal")
+            final_action = row.get("sig_final_action")
+            
+            # 规则 A: 威科夫一票否决 (Veto)
+            if wyckoff_signal in ["SELL", "RISK"]:
+                final_signal = "STOP"
+                final_action = "STOP"
+                reasons.append("【风控】威科夫派发阻断")
+                risks.append("WYCKOFF_VETO")
+            
+            # 规则 B: 低吸共振 (Resonance)
+            elif low_suck_signal == "BUY":
+                if trend_signal == "BUY":
+                    reasons.append("【共振】趋势+低吸双重确认")
+                    # 可以考虑提升 priority 或放宽 gap
+                elif trend_signal != "BUY":
+                    # 仅低吸策略喊买
+                    final_signal = "BUY"
+                    reasons.append("【机会】低吸策略触发")
+            
+            # 更新合并后的行
+            row["sig_signal"] = final_signal
+            if final_action is not None:
+                row["sig_final_action"] = final_action
+            row["sig_reason"] = "; ".join(reasons)[:255]
+            if risks:
+                row["risk_tag"] = ",".join(set(risks))
+            
+            # 标记为合成策略
+            if len(strategies) > 1:
+                row["strategy_code"] = "composite"
+                
+            consolidated_rows.append(row)
+            
+        return pd.DataFrame(consolidated_rows)
+
     def evaluate(
         self,
         signals: pd.DataFrame,
@@ -279,6 +378,10 @@ class OpenMonitorEvaluator:
     ) -> pd.DataFrame:
         if signals.empty:
             return pd.DataFrame()
+
+        # === 新增：多策略仲裁 ===
+        signals = self._arbitrate_signals(signals)
+        # =======================
 
         checked_at_ts = checked_at or dt.datetime.now()
         run_id_val = run_id or calc_run_id(checked_at_ts, self.params.run_id_minutes)

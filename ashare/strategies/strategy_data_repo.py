@@ -142,7 +142,7 @@ class StrategyDataRepository:
         codes: List[str],
         latest_date: dt.date,
         lookback: int = 100,
-        table: str = "strategy_indicator_daily",
+        table: str = "strategy_ind_daily",
     ) -> pd.DataFrame:
         """从数据库加载预计算好的技术指标。"""
         if not codes:

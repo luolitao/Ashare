@@ -669,14 +669,30 @@ class MA5MA20OpenMonitorRunner:
                 if c not in ref_close_map and cl:
                     ref_close_map[c] = cl
 
+            target_date_map: dict[str, str | None] = {}
+            for code in codes:
+                target_date = monitor_date or latest_trade_date
+                target_date_str = (
+                    pd.to_datetime(target_date, errors="coerce").date().isoformat()
+                    if target_date
+                    else None
+                )
+                target_date_map[code] = target_date_str
+
+            max_minute_map: dict[str, dt.datetime] = {}
+            date_groups: dict[str, list[str]] = {}
+            for code, date_str in target_date_map.items():
+                if not date_str:
+                    continue
+                date_groups.setdefault(date_str, []).append(code)
+            for date_str, date_codes in date_groups.items():
+                max_minute_map.update(
+                    self.repo.load_max_minute_times(date_str, date_codes)
+                )
+
             for code in codes:
                 try:
-                    target_date = sig_date_map.get(code) or latest_trade_date or monitor_date
-                    target_date_str = (
-                        pd.to_datetime(target_date, errors="coerce").date().isoformat()
-                        if target_date
-                        else None
-                    )
+                    target_date_str = target_date_map.get(code)
                     if (
                         target_date_str
                         and self.params.minute_fetch_skip_non_trading_day
@@ -689,18 +705,53 @@ class MA5MA20OpenMonitorRunner:
                         }
                         continue
 
-                    minute_df = self.market_data.fetch_minute_data(
-                        code,
-                        trade_date=target_date_str,
-                        timeout_sec=self.params.minute_fetch_timeout_sec,
+                    last_minute_time = max_minute_map.get(code)
+                    today_str = (
+                        checked_at.date().isoformat()
+                        if checked_at is not None
+                        else dt.date.today().isoformat()
                     )
+                    expected_time = None
+                    if target_date_str:
+                        if target_date_str == today_str:
+                            expected_time = (
+                                checked_at.replace(second=0, microsecond=0)
+                                if checked_at is not None
+                                else dt.datetime.now().replace(second=0, microsecond=0)
+                            )
+                        else:
+                            expected_time = dt.datetime.combine(
+                                pd.to_datetime(target_date_str).date(), dt.time(15, 0)
+                            )
+                    skip_fetch = (
+                        last_minute_time is not None
+                        and expected_time is not None
+                        and last_minute_time >= expected_time
+                    )
+
+                    fetched_from_api = False
+                    if skip_fetch:
+                        minute_df = self.repo.load_minute_snapshot(
+                            target_date_str, code
+                        )
+                        if minute_df is None or minute_df.empty:
+                            skip_fetch = False
+
+                    if not skip_fetch:
+                        minute_df = self.market_data.fetch_minute_data(
+                            code,
+                            trade_date=target_date_str,
+                            timeout_sec=self.params.minute_fetch_timeout_sec,
+                        )
+                        fetched_from_api = True
+
                     ref_close = ref_close_map.get(code)
                     ls_res = detect_low_suck_signal(minute_df, ref_close_yesterday=ref_close)
                     if ls_res.get("strength") != "NONE":
                         self.logger.info(f"[{code}] 低吸评估: {ls_res['strength']} (分={ls_res['score']}) - {ls_res['reason']}")
                     low_suck_map[code] = ls_res
 
-                    if minute_df is not None and not minute_df.empty:
+                    if fetched_from_api and minute_df is not None and not minute_df.empty:
                         df_min = minute_df.copy()
                         if "time" in df_min.columns and "minute_time" not in df_min.columns:
                             df_min = df_min.rename(columns={"time": "minute_time"})
@@ -715,10 +766,15 @@ class MA5MA20OpenMonitorRunner:
                             df_min["minute_date"] = pd.to_datetime(
                                 df_min["minute_time"], errors="coerce"
                             ).dt.date
+                        source_tag = (
+                            "eastmoney"
+                            if (self.params.quote_source or "").strip().lower() == "eastmoney"
+                            else "akshare"
+                        )
                         if target_date_str and target_date_str != dt.date.today().isoformat():
-                            df_min["source"] = "akshare_em_hist"
+                            df_min["source"] = f"{source_tag}_hist"
                         else:
-                            df_min["source"] = "akshare_em"
+                            df_min["source"] = source_tag
                         minute_frames.append(df_min)
                 except Exception as e:
                     self.logger.warning(f"低吸检测异常 {code}: {e}")
@@ -815,6 +871,7 @@ class MA5MA20OpenMonitorRunner:
                 "live_open",
                 "live_latest",
                 gap_col,
+                "live_pct_change",
                 "board_status",
                 "signal_strength",
                 "final_rank_score",
@@ -823,18 +880,23 @@ class MA5MA20OpenMonitorRunner:
             preview_cols = [c for c in preview_cols if c in exec_df.columns]
             preview = exec_df[preview_cols].head(top_n)
             preview_disp = preview.copy()
-            if gap_col.endswith("_pct") and gap_col in preview_disp.columns:
+            
+            def _fmt_pct_val(col_name, v):
+                try:
+                    fv = float(v)
+                except Exception:
+                    return ""
+                if math.isnan(fv):
+                    return ""
+                # live_pct_change is already scale 100 in evaluator, gap is scale 1
+                if col_name == "live_pct_change":
+                    return f"{fv:.3f}%"
+                return f"{fv * 100:.3f}%"
 
-                def _fmt_pct(v):
-                    try:
-                        fv = float(v)
-                    except Exception:
-                        return ""
-                    if math.isnan(fv):
-                        return ""
-                    return f"{fv * 100:.3f}%"
-
-                preview_disp[gap_col] = preview_disp[gap_col].apply(_fmt_pct)
+            for col in [gap_col, "live_pct_change"]:
+                if col in preview_disp.columns:
+                    preview_disp[col] = preview_disp[col].apply(lambda x, c=col: _fmt_pct_val(c, x))
+            
             self.logger.info(
                 "可执行清单 Top%s（按 final_rank_score 优先，其次 gap）：\n%s",
                 top_n,
@@ -860,6 +922,7 @@ class MA5MA20OpenMonitorRunner:
                 "live_open",
                 "live_latest",
                 gap_col,
+                "live_pct_change",
                 "board_status",
                 "signal_strength",
                 "final_rank_score",
@@ -868,18 +931,23 @@ class MA5MA20OpenMonitorRunner:
             wait_cols = [c for c in wait_cols if c in wait_df.columns]
             wait_preview = wait_df[wait_cols].head(wait_top)
             wait_preview_disp = wait_preview.copy()
-            if gap_col.endswith("_pct") and gap_col in wait_preview_disp.columns:
 
-                def _fmt_pct(v):
-                    try:
-                        fv = float(v)
-                    except Exception:
-                        return ""
-                    if math.isnan(fv):
-                        return ""
-                    return f"{fv * 100:.3f}%"
+            def _fmt_pct_wait(col_name, v):
+                try:
+                    fv = float(v)
+                except Exception:
+                    return ""
+                if math.isnan(fv):
+                    return ""
+                # live_pct_change is already scale 100 in evaluator, gap is scale 1
+                if col_name == "live_pct_change":
+                    return f"{fv:.3f}%"
+                return f"{fv * 100:.3f}%"
 
-                wait_preview_disp[gap_col] = wait_preview_disp[gap_col].apply(_fmt_pct)
+            for col in [gap_col, "live_pct_change"]:
+                if col in wait_preview_disp.columns:
+                    wait_preview_disp[col] = wait_preview_disp[col].apply(lambda x, c=col: _fmt_pct_wait(c, x))
+
             self.logger.info(
                 "WAIT 观察清单 Top%s（按 final_rank_score 优先，其次 gap）：\n%s",
                 wait_top,

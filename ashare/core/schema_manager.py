@@ -19,30 +19,30 @@ VIEW_DIM_INDEX_MEMBERSHIP_SNAPSHOT = "dim_index_membership_snapshot"
 TABLE_A_SHARE_UNIVERSE = "a_share_universe"
 
 # 统一策略信号体系表命名：按单一职责拆分
-TABLE_STRATEGY_INDICATOR_DAILY = "strategy_indicator_daily"
-TABLE_STRATEGY_SIGNAL_EVENTS = "strategy_signal_events"
-TABLE_STRATEGY_CANDIDATES = "strategy_candidates"
+TABLE_STRATEGY_INDICATOR_DAILY = "strategy_ind_daily"
+TABLE_STRATEGY_SIGNAL_EVENTS = "strategy_sig_events"
+TABLE_STRATEGY_CANDIDATES = "strategy_sig_candidates"
 # 策略准备就绪信号（含筹码）
-TABLE_STRATEGY_READY_SIGNALS = "strategy_ready_signals"
-TABLE_STRATEGY_CHIP_FILTER = "strategy_chip_filter"
-TABLE_STRATEGY_TRADE_METRICS = "strategy_trade_metrics"
-VIEW_STRATEGY_BACKTEST = "v_backtest"
-VIEW_STRATEGY_PNL = "v_pnl"
+TABLE_STRATEGY_READY_SIGNALS = "v_strategy_sig_ready"
+TABLE_STRATEGY_CHIP_FILTER = "strategy_sig_chips"
+TABLE_STRATEGY_TRADE_METRICS = "strategy_sig_metrics"
+VIEW_STRATEGY_BACKTEST = "v_strategy_backtest"
+VIEW_STRATEGY_PNL = "v_strategy_pnl"
 
 # 开盘监测输出
-TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_open_monitor_eval"
-TABLE_STRATEGY_OPEN_MONITOR_ENV = "strategy_open_monitor_env"
-TABLE_STRATEGY_WEEKLY_MARKET_ENV = "strategy_weekly_market_env"
+TABLE_STRATEGY_OPEN_MONITOR_EVAL = "strategy_mon_eval"
+TABLE_STRATEGY_OPEN_MONITOR_ENV = "strategy_mon_env"
+TABLE_STRATEGY_WEEKLY_MARKET_ENV = "strategy_ind_weekly"
 WEEKLY_MARKET_BENCHMARK_CODE = "sh.000001"
-TABLE_STRATEGY_DAILY_MARKET_ENV = "strategy_daily_market_env"
-TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_open_monitor_quote"
-TABLE_STRATEGY_OPEN_MONITOR_RUN = "strategy_open_monitor_run"
-TABLE_STRATEGY_OPEN_MONITOR_MINUTE = "strategy_open_monitor_minute"
-VIEW_STRATEGY_OPEN_MONITOR_WIDE = "v_strategy_open_monitor_wide"
+TABLE_STRATEGY_DAILY_MARKET_ENV = "strategy_ind_daily_env"
+TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_mon_quotes"
+TABLE_STRATEGY_OPEN_MONITOR_RUN = "strategy_mon_log"
+TABLE_STRATEGY_OPEN_MONITOR_MINUTE = "strategy_mon_minute"
+VIEW_STRATEGY_OPEN_MONITOR_WIDE = "v_strategy_mon_wide"
 # 开盘监测环境视图（env 快照）
-VIEW_STRATEGY_OPEN_MONITOR_ENV = "v_strategy_open_monitor_env"
-# 开盘监测默认查询视图（精简字段；完整字段请查 v_strategy_open_monitor_wide）
-VIEW_STRATEGY_OPEN_MONITOR = "v_strategy_open_monitor"
+VIEW_STRATEGY_OPEN_MONITOR_ENV = "v_strategy_mon_env"
+# 开盘监测默认查询视图（精简字段；完整字段请查 v_mon_wide）
+VIEW_STRATEGY_OPEN_MONITOR = "v_strategy_mon_eval"
 
 READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "sig_date": "DATE NOT NULL",
@@ -1615,7 +1615,7 @@ class SchemaManager:
             {liquidity_join}
             {industry_join}
             {board_join}
-            WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM', 'NEAR_SIGNAL')
+            WHERE COALESCE(e.`final_action`, e.`signal`) IN ('BUY','BUY_CONFIRM', 'NEAR_SIGNAL', 'SELL', 'RISK', 'STOP')
             """
         return select_sql, list(READY_SIGNALS_COLUMNS.keys())
 
@@ -2708,12 +2708,11 @@ class SchemaManager:
             self.logger.info("已创建/更新开盘监测精简视图 %s。", view)
 
     def _ensure_board_rotation_table(self) -> None:
-        table = "strategy_board_rotation"
-        self._rename_table_if_needed("board_rotation_daily", table)
+        table = "strategy_ind_board_rotation"
         columns = {
             "date": "DATE NOT NULL",
-            "board_code": "VARCHAR(20) NULL",
-            "board_name": "VARCHAR(255) NOT NULL",
+            "board_name": "VARCHAR(64) NOT NULL",
+            "board_code": "VARCHAR(64) NULL",
             "ret_20d": "DOUBLE NULL",
             "ret_5d": "DOUBLE NULL",
             "rank_trend": "DOUBLE NULL",
@@ -2725,17 +2724,14 @@ class SchemaManager:
             self._create_table(table, columns, primary_key=("date", "board_name"))
         else:
             self._add_missing_columns(table, columns)
+            self._ensure_varchar_length(table, "board_name", 64)
+            self._ensure_varchar_length(table, "board_code", 64)
+            self._ensure_varchar_length(table, "rotation_phase", 32)
+            self._ensure_datetime_column(table, "created_at")
 
-        self._ensure_varchar_length(table, "board_name", 255)
-        self._ensure_varchar_length(table, "rotation_phase", 32)
-        self._ensure_datetime_column(table, "created_at")
-        self._ensure_varchar_length(table, "board_code", 20)
-
-        # Index on date for cleanup
-        idx = "idx_strategy_board_rotation_date"
-        if not self._index_exists(table, idx):
-            with self.engine.begin() as conn:
-                conn.execute(text(f"CREATE INDEX `{idx}` ON `{table}` (`date`)"))
+        # 尝试重命名旧表迁移数据
+        if self._table_exists("strategy_board_rotation") and not self._table_exists(table):
+            self._rename_table_if_needed("strategy_board_rotation", table)
 
     def _ensure_board_industry_hist_table(self) -> None:
         table = "board_industry_hist_daily"

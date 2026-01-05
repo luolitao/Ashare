@@ -515,6 +515,18 @@ class OpenMonitorSqlStore:
             self.logger.error("无法推导 latest_trade_date（daily_table/view 均不可用），已跳过开盘监测。")
             return None, [], pd.DataFrame()
 
+        # 支持查询多个策略信号
+        target_strategies = self.params.strategy_code
+        if isinstance(target_strategies, str):
+            target_strategies = [s.strip() for s in target_strategies.split(",") if s.strip()]
+        if not target_strategies:
+            target_strategies = [str(self.params.strategy_code)]
+        
+        # 补充硬编码的关联策略（趋势、低吸、威科夫）
+        # 这样即使 config 只配了 ma5_ma20_trend，也能查到其他策略的信号
+        known_strategies = {"ma5_ma20_trend", "wyckoff_distribution", "low_suck_reversal"}
+        target_strategies = list(set(target_strategies) | known_strategies)
+
         base_table = view
         signal_dates: List[str] = []
         try:
@@ -524,16 +536,17 @@ class OpenMonitorSqlStore:
                         f"""
                         SELECT DISTINCT `sig_date`
                         FROM `{base_table}`
-                        WHERE `sig_date` <= :latest_trade_date AND `strategy_code` = :strategy_code
+                        WHERE `sig_date` <= :latest_trade_date 
+                          AND `strategy_code` IN :strategies
                           AND `expires_on` >= :monitor_date
                         ORDER BY `sig_date` DESC
                         LIMIT :lookback
                         """
-                    ),
+                    ).bindparams(bindparam("strategies", expanding=True)),
                     conn,
                     params={
                         "latest_trade_date": latest_trade_date,
-                        "strategy_code": self.params.strategy_code,
+                        "strategies": target_strategies,
                         "monitor_date": monitor_date,
                         "lookback": lookback,
                     },
@@ -558,11 +571,11 @@ class OpenMonitorSqlStore:
             SELECT *
             FROM `{view}`
             WHERE `sig_date` IN :dates
-              AND `strategy_code` = :strategy_code
+              AND `strategy_code` IN :strategies
               AND `expires_on` >= :monitor_date
             ORDER BY `sig_date` DESC, `code`
             """
-        ).bindparams(bindparam("dates", expanding=True))
+        ).bindparams(bindparam("dates", expanding=True), bindparam("strategies", expanding=True))
 
         try:
             with self.engine.begin() as conn:
@@ -571,7 +584,7 @@ class OpenMonitorSqlStore:
                     conn,
                     params={
                         "dates": signal_dates,
-                        "strategy_code": self.params.strategy_code,
+                        "strategies": target_strategies,
                         "monitor_date": monitor_date,
                     },
                 )
@@ -1374,6 +1387,68 @@ class OpenMonitorSqlStore:
 
         return df
 
+    def load_max_minute_times(
+        self, monitor_date: str, codes: List[str]
+    ) -> dict[str, dt.datetime]:
+        table = getattr(self.params, "minute_table", None)
+        if not (table and monitor_date and codes and self._table_exists(table)):
+            return {}
+
+        stmt = text(
+            "SELECT `code`, MAX(`minute_time`) AS `max_minute_time` "
+            "FROM `{table}` WHERE `monitor_date` = :d AND `code` IN :codes "
+            "GROUP BY `code`".format(table=table)
+        ).bindparams(bindparam("codes", expanding=True))
+
+        try:
+            with self.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": monitor_date, "codes": codes})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取分时最大时间失败：%s", exc)
+            return {}
+
+        if df is None or df.empty:
+            return {}
+
+        df["max_minute_time"] = pd.to_datetime(df["max_minute_time"], errors="coerce")
+        out: dict[str, dt.datetime] = {}
+        for _, row in df.iterrows():
+            code = str(row.get("code") or "").strip()
+            max_time = row.get("max_minute_time")
+            if not code or pd.isna(max_time):
+                continue
+            out[code] = max_time.to_pydatetime()
+        return out
+
+    def load_minute_snapshot(
+        self, monitor_date: str, code: str
+    ) -> pd.DataFrame:
+        table = getattr(self.params, "minute_table", None)
+        if not (table and monitor_date and code and self._table_exists(table)):
+            return pd.DataFrame()
+
+        stmt = text(
+            f"""
+            SELECT `minute_time`, `price`, `volume`, `avg_price`
+            FROM `{table}`
+            WHERE `monitor_date` = :d AND `code` = :c
+            ORDER BY `minute_time`
+            """
+        )
+
+        try:
+            with self.engine.begin() as conn:
+                df = pd.read_sql_query(stmt, conn, params={"d": monitor_date, "c": code})
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug("读取分时快照失败：%s", exc)
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = df.rename(columns={"minute_time": "time"})
+        return df
+
     def load_open_monitor_env_view_row(
         self, monitor_date: str, run_pk: int | None
     ) -> dict[str, Any] | None:
@@ -1403,7 +1478,7 @@ class OpenMonitorSqlStore:
         return df.iloc[0].to_dict()
 
     def load_board_rotation_info(self, latest_trade_date: str) -> dict[str, dict[str, Any]]:
-        table = "strategy_board_rotation"
+        table = "strategy_ind_board_rotation"
         if not (table and latest_trade_date and self._table_exists(table)):
             return {}
 

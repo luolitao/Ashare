@@ -7,7 +7,11 @@ import concurrent.futures
 
 import pandas as pd
 
-from ashare.monitor.open_monitor_quotes import fetch_quotes_akshare, fetch_quotes_eastmoney
+from ashare.monitor.open_monitor_quotes import (
+    fetch_minute_eastmoney,
+    fetch_quotes_akshare,
+    fetch_quotes_eastmoney,
+)
 from ashare.data.akshare_fetcher import AkshareDataFetcher
 
 
@@ -99,6 +103,9 @@ class OpenMonitorMarketData:
         return fetch_quotes_eastmoney(codes, strict_quotes=strict_quotes, logger=self.logger)
 
     def _fetch_minute_data_raw(self, code: str, trade_date: str | None) -> pd.DataFrame:
+        source = (self.params.quote_source or "eastmoney").strip().lower()
+        if source == "eastmoney":
+            return fetch_minute_eastmoney(code, trade_date=trade_date, logger=self.logger)
         return self.ak_fetcher.fetch_minute_data(code, trade_date=trade_date)
 
     def fetch_minute_data(

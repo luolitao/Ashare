@@ -160,6 +160,51 @@ class OpenMonitorPersister:
         if self._table_exists(table):
             minute_df["monitor_date_str"] = minute_df["monitor_date"].astype(str)
             minute_df["code_str"] = minute_df["code"].astype(str)
+            max_rows: list[dict[str, Any]] = []
+            for monitor_date_str, group in minute_df.groupby("monitor_date_str"):
+                codes = group["code_str"].dropna().unique().tolist()
+                if not codes:
+                    continue
+                stmt = text(
+                    "SELECT `code`, MAX(`minute_time`) AS `max_minute_time` "
+                    "FROM `{table}` WHERE `monitor_date` = :d AND `code` IN :codes "
+                    "GROUP BY `code`".format(table=table)
+                ).bindparams(bindparam("codes", expanding=True))
+                try:
+                    with self.engine.begin() as conn:
+                        rows = conn.execute(stmt, {"d": monitor_date_str, "codes": codes}).fetchall()
+                    for row in rows:
+                        max_rows.append(
+                            {
+                                "monitor_date_str": monitor_date_str,
+                                "code_str": str(row[0]),
+                                "max_minute_time": row[1],
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.warning(
+                        "Failed to load max minute_time for %s: %s", monitor_date_str, exc
+                    )
+
+            if max_rows:
+                max_df = pd.DataFrame(max_rows)
+                max_df["max_minute_time"] = pd.to_datetime(
+                    max_df["max_minute_time"], errors="coerce"
+                )
+                minute_df = minute_df.merge(
+                    max_df,
+                    on=["monitor_date_str", "code_str"],
+                    how="left",
+                )
+                before_rows = len(minute_df)
+                minute_df = minute_df[
+                    minute_df["max_minute_time"].isna()
+                    | (minute_df["minute_time"] > minute_df["max_minute_time"])
+                ].copy()
+                if before_rows and minute_df.empty:
+                    self.logger.info("open_monitor minute snapshots: no new rows to write.")
+                    return
+                minute_df = minute_df.drop(columns=["max_minute_time"])
             delete_calls = 0
             deleted_rows = 0
             for (monitor_date_str, run_pk), group in minute_df.groupby(

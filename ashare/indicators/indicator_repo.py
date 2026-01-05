@@ -47,9 +47,9 @@ class IndicatorRepository:
             return
         # 先清理旧数据
         with self.db_writer.engine.begin() as conn:
-            conn.execute(text("DELETE FROM strategy_board_rotation WHERE date = :d"), {"d": trade_date})
+            conn.execute(text("DELETE FROM strategy_ind_board_rotation WHERE date = :d"), {"d": trade_date})
         
-        self.db_writer.write_dataframe(df, "strategy_board_rotation", if_exists="append")
+        self.db_writer.write_dataframe(df, "strategy_ind_board_rotation", if_exists="append")
 
     def fetch_index_trade_dates(self, code: str | list[str], start: dt.date, end: dt.date) -> pd.DataFrame:
         """获取指数交易日历。"""
