@@ -152,7 +152,9 @@ class MAWyckoffStrategy:
         # A. 趋势状态
         df['trend_bullish'] = df['ma_short'] > df['ma_long']
         df['golden_cross'] = (df['ma_short'] > df['ma_long']) & (df['ma_short'].shift(1) <= df['ma_long'].shift(1))
-        df['death_cross'] = (df['ma_short'] < df['ma_long']) & (df['ma_short'].shift(1) >= df['ma_long'].shift(1))
+        # 死叉判定：增加ATR缓冲区确认，避免单日波动触发
+        atr14 = df.get('atr14', pd.Series(0.0, index=df.index)).fillna(0.0)
+        df['death_cross'] = (df['ma_short'] < df['ma_long']) & (df['ma_short'].shift(1) >= df['ma_long'].shift(1)) & (df['ma_short'] < df['ma_long'] - 0.2 * atr14)
 
         # B. 动能衰竭信号 (用于 REDUCE)
         # 1. 顶背离

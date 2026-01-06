@@ -106,8 +106,8 @@ class TrendStrategy(BaseStrategy):
         # 3. 回踩买入重构 (引入 VSA)：必须是缩量回踩或平量回踩，不能是放量大跌
         pullback_atr_mult = float(p.get("pullback_atr_mult", 0.6))
         dist_to_ma20 = (c - ma20).abs()
-        # VSA 条件：当前量 < 5日均量的 1.1 倍 (防止放量砸盘)
-        vol_vsa_ok = df["volume"] < df["vol_ma5"] * 1.1
+        # VSA 条件：当前量 < 5日均量的 1.05 倍 (防止放量砸盘)
+        vol_vsa_ok = df["volume"] < df["vol_ma5"] * 1.05
         
         buy_pullback = trend_ok & (dist_to_ma20 <= pullback_atr_mult * df["atr14"]) & (ma5 > prev_ma5) & vol_vsa_ok
         
@@ -117,7 +117,9 @@ class TrendStrategy(BaseStrategy):
         # 原逻辑：c < ma20
         # 新逻辑：c < ma20 - 0.3 * ATR
         stop_buffer_atr = float(p.get("stop_buffer_atr", 0.3))
-        hard_stop = c < (ma20 - stop_buffer_atr * df["atr14"])
+        min_stop_pct = 0.005
+        min_stop_price = ma20 * min_stop_pct
+        hard_stop = c < (ma20 - (stop_buffer_atr * df["atr14"] + min_stop_price))
         
         dead_cross = (ma5 < ma20) & (prev_ma5 >= prev_ma20)
         
