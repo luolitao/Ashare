@@ -818,6 +818,8 @@ class OpenMonitorEvaluator:
                 limit_up_trigger=limit_up_trigger,
                 runup_breach=breach,
                 runup_breach_reason=breach_reason,
+                # 注入 ATR 偏离度 (用于 Stale Filter)
+                dev_ma20_atr=dev_ma20_atr,
                 # 注入新字段
                 live_intraday_vol_ratio=live_intraday,
                 minutes_since_open=minutes_open,

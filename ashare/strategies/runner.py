@@ -70,6 +70,9 @@ class StrategyRunner:
 
     def run(self, force: bool = False) -> None:
         """执行策略流程。"""
+        import time
+        t0 = time.perf_counter()
+        
         enabled = bool(self.params.get("enabled", False))
         if not enabled and not force:
             self.logger.info("策略 '%s' 未启用 (enabled=False)，跳过。", self.strategy_code)
@@ -169,7 +172,9 @@ class StrategyRunner:
             
             self.logger.info("正在写入 %d 条信号记录...", len(df_to_write))
             self.store.write_signal_events(latest_date, df_to_write, candidate_codes)
-            self.logger.info("策略 '%s' 执行完成。", self.strategy_code)
+            
+            elapsed = time.perf_counter() - t0
+            self.logger.info("策略 '%s' 执行完成 (耗时: %.2fs)。", self.strategy_code, elapsed)
 
         except Exception as e:
             self.logger.exception("策略 '%s' 执行过程中发生未捕获异常: %s", self.strategy_code, e)

@@ -409,21 +409,25 @@ def build_default_monitor_rules(
                 action_override="SKIP",
             ),
         ),
+        # === Phase 1: 核心纪律 ===
         Rule(
-            id="ENV_STOP",
+            id="SIGNAL_STALE_FILTER",
             category="ACTION",
-            severity=config.sev_env_stop,
+            severity=92,
             predicate=lambda ctx: bool(
-                config.enable_env_gate
-                and getattr(ctx, "env", None)
-                and getattr(getattr(ctx, "env"), "gate_action", None) == "STOP"
+                # 信号发出已超过3天 (即进入扩展观察期)
+                (getattr(ctx, "signal_age") or 0) > 3
+                and (
+                    # 1. 如果离均线太远(dev_ma20_atr > 1.0)，说明已经飞了，不再具备低吸价值
+                    (getattr(ctx, "dev_ma20_atr") or 0) > 1.0
+                    # 2. 或者已经跌破 MA20 (由 BELOW_MA20_REQ 处理，这里只关注上方)
+                )
             ),
             effect=lambda ctx: RuleResult(
-                reason=config.env_stop_reason,
-                action_override=config.env_stop_action,
+                reason=f"过期信号过滤: 离MA20过远(ATR={getattr(ctx, 'dev_ma20_atr'):.2f})",
+                action_override="SKIP",
             ),
         ),
-        # === Phase 1: 核心纪律 ===
         Rule(
             id="TIME_GUARD_EARLY",
             category="ACTION",

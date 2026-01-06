@@ -189,6 +189,9 @@ class DecisionContext:
     limit_up_trigger: float | None = None
     runup_breach: bool = False
     runup_breach_reason: str | None = None
+    
+    # 新增: MA20 ATR 偏离度 (用于 Stale Filter)
+    dev_ma20_atr: float | None = None
 
     signal_age: int | None = None
     sig_signal: str | None = None

@@ -137,7 +137,7 @@ strategy_ma5_ma20_trend:
   signals_write_scope: window
   signals_write_batch_days: 5
   signals_write_window_days: 10
-  valid_days: 3
+  valid_days: 5
 
 # 威科夫派发风控策略
 strategy_wyckoff_distribution:
@@ -165,6 +165,7 @@ strategy_wyckoff_distribution:
   indicator_table: strategy_ind_daily
   signal_events_table: strategy_sig_events
   signals_write_scope: window
+  signals_write_window_days: 10
   valid_days: 3
 
 # 低吸反转策略
@@ -184,6 +185,7 @@ strategy_low_suck_reversal:
   indicator_table: strategy_ind_daily
   signal_events_table: strategy_sig_events
   signals_write_scope: window
+  signals_write_window_days: 10
   valid_days: 2
 
 # 开盘监测
