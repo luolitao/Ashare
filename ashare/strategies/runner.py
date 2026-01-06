@@ -120,7 +120,20 @@ class StrategyRunner:
 
             # --- 新增：注入指数收益率 ---
             index_code = self.params.get("benchmark_index", "sh.000001")
-            df_index = self.data_repo.load_index_kline(index_code, latest_date, lookback=lookback)
+            open_monitor_cfg = get_section("open_monitor") or {}
+            daily_env_table = open_monitor_cfg.get(
+                "daily_indicator_table", "strategy_ind_daily_env"
+            )
+            df_index = self.data_repo.load_index_env_returns(
+                index_code,
+                latest_date,
+                lookback=lookback,
+                table=daily_env_table,
+            )
+            if df_index.empty:
+                df_index = self.data_repo.load_index_kline(
+                    index_code, latest_date, lookback=lookback
+                )
             if not df_index.empty:
                 df_ind = df_ind.merge(df_index[["date", "index_ret"]], on="date", how="left")
             # --------------------------
@@ -146,6 +159,9 @@ class StrategyRunner:
             if df_to_write.empty:
                 self.logger.info("策略未产生需要写入的信号数据。")
                 return
+
+            if "signal" in df_to_write.columns:
+                df_to_write["orig_signal"] = df_to_write["signal"]
 
             # 5. 持久化
             # 自动将辅助列打包进 extra_json
@@ -188,7 +204,6 @@ class StrategyRunner:
         std_cols = {
             "code", "date", "signal", "reason", "risk_tag",
             "final_cap", "strategy_code",
-            "chip_score", "chip_reason",
         }
         
         # 不需要打包进 JSON 的冗余指标（因为 indicator 表里有）

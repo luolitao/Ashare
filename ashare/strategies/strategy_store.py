@@ -243,8 +243,6 @@ class StrategyStore:
             "final_cap",
             "reason",
             "risk_tag",
-            "chip_score",
-            "chip_reason",
             "valid_days",
             "expires_on",
             "extra_json",
@@ -253,6 +251,8 @@ class StrategyStore:
         # 已移除: close, ma*, vol_ratio, macd_hist, kdj*, atr14
         # 容错处理：只保留实际存在的列
         events_df = base[[c for c in keep_cols if c in base.columns]].copy()
+        if "signal" in events_df.columns:
+            events_df["signal"] = events_df["signal"].apply(self._normalize_signal)
         events_df = events_df.rename(columns={"date": "sig_date"})
         events_df["sig_date"] = pd.to_datetime(events_df["sig_date"]).dt.date
         events_df["code"] = events_df["code"].astype(str)
@@ -327,15 +327,11 @@ class StrategyStore:
         events_df = events_df.drop_duplicates(
             subset=["strategy_code", "sig_date", "code"], keep="last"
         ).copy()
-        for col in ["risk_tag", "reason", "chip_reason"]:
+        for col in ["risk_tag", "reason"]:
             if col in events_df.columns:
                 events_df[col] = (
                     events_df[col].fillna("").astype(str).str.slice(0, 250)
                 )
-        if "chip_score" in events_df.columns:
-            events_df["chip_score"] = pd.to_numeric(
-                events_df["chip_score"], errors="coerce"
-            )
 
         table_cols = set(self._get_table_columns(table))
         if table_cols:
@@ -465,6 +461,23 @@ class StrategyStore:
 
         self.db_writer.write_dataframe(events_df, table, if_exists="append")
         self.logger.info("write_signal_events: done in %.2fs", time.perf_counter() - t0)
+
+    @staticmethod
+    def _normalize_signal(value: Any) -> str | None:
+        if value is None:
+            return None
+        sig = str(value).strip().upper()
+        if not sig:
+            return None
+        if sig in {"BUY_CONFIRM", "NEAR_SIGNAL"}:
+            return "BUY"
+        if sig in {"SELL", "STOP", "BUY", "HOLD"}:
+            return sig
+        if sig in {"REDUCE", "WAIT"}:
+            return "HOLD"
+        if sig in {"RISK", "VETO"}:
+            return "STOP"
+        return "HOLD"
 
     def refresh_ready_signals_table(self, sig_dates: List[dt.date]) -> None:
         if not sig_dates:

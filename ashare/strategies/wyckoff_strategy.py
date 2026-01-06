@@ -55,7 +55,7 @@ class WyckoffStrategy(BaseStrategy):
         is_sell = out["action"].isin([ACTION_SELL, ACTION_REDUCE])
         is_buy = out["action"] == ACTION_BUY_STRONG
         
-        out.loc[is_sell, "signal"] = "SELL"
+        out.loc[is_sell, "signal"] = "HOLD"
         out.loc[is_buy, "signal"] = "BUY"
         
         # 3. 补充原因
@@ -81,8 +81,12 @@ class WyckoffStrategy(BaseStrategy):
         out.loc[is_sell, "reason"] = "派发预警: " + reasons
         out.loc[is_buy, "reason"] = "吸筹确认: 底部量价验证"
         
-        # 4. 风险标签
+        # 4. 风险标签（用于开盘监测 veto 分级）
         out["risk_tag"] = None
-        out.loc[mask_div | mask_sow | mask_upthrust, "risk_tag"] = "WYCKOFF_SOW"
+        out.loc[mask_sow, "risk_tag"] = "WYCKOFF_SOW"
+        out.loc[mask_upthrust, "risk_tag"] = "WYCKOFF_UTAD"
+        out.loc[mask_div, "risk_tag"] = "WYCKOFF_DIV"
+        
+        out.loc[mask_sow | mask_upthrust, "signal"] = "SELL"
         
         return out

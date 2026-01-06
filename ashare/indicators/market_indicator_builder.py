@@ -283,6 +283,8 @@ class MarketIndicatorBuilder:
             grp = group.sort_values("date").copy()
             close = grp["close"]
             volume = grp["volume"]
+            grp["prev_close"] = close.shift(1)
+            grp["index_ret"] = close.pct_change()
             grp["ma20"] = close.rolling(20, min_periods=20).mean()
             grp["ma60"] = close.rolling(60, min_periods=60).mean()
             grp["ma250"] = close.rolling(250, min_periods=250).mean()
@@ -429,6 +431,9 @@ class MarketIndicatorBuilder:
         benchmark_daily = benchmark_daily[
             [
                 "trade_date",
+                "close",
+                "prev_close",
+                "index_ret",
                 "ma20",
                 "ma60",
                 "ma250",
@@ -499,6 +504,9 @@ class MarketIndicatorBuilder:
                     "regime": row.get("regime"),
                     "score": row.get("score"),
                     "position_hint": row.get("position_hint"),
+                    "close": row.get("close"),
+                    "prev_close": row.get("prev_close"),
+                    "index_ret": row.get("index_ret"),
                     "ma20": row.get("ma20"),
                     "ma60": row.get("ma60"),
                     "ma250": row.get("ma250"),

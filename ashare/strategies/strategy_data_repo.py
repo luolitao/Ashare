@@ -155,6 +155,7 @@ class StrategyDataRepository:
             "code",
             "close",
             "volume",
+            "amount",
             "ma5",
             "ma20",
             "ma60",
@@ -225,7 +226,7 @@ class StrategyDataRepository:
             # 统一字段名，确保兼容旧代码中的 'date' 引用
             df = df.rename(columns={"trade_date": "date"})
             df["date"] = pd.to_datetime(df["date"])
-            missing_cols = [c for c in ["open", "high", "low", "volume"] if c not in df.columns]
+            missing_cols = [c for c in ["open", "high", "low", "volume", "amount"] if c not in df.columns]
             if missing_cols:
                 daily_df = self.load_daily_kline(
                     "history_daily_kline",
@@ -287,4 +288,41 @@ class StrategyDataRepository:
             return df
         except Exception as exc:
             self.logger.warning("加载指数数据 %s 失败: %s", index_code, exc)
+            return pd.DataFrame()
+
+    def load_index_env_returns(
+        self,
+        benchmark_code: str,
+        latest_date: dt.date,
+        *,
+        lookback: int = 100,
+        table: str = "strategy_ind_daily_env",
+    ) -> pd.DataFrame:
+        """从日线环境表获取指数收益率。"""
+        start_date = latest_date - dt.timedelta(days=lookback * 2)
+        stmt = text(
+            f"""
+            SELECT `asof_trade_date` AS `date`, `index_ret`
+            FROM `{table}`
+            WHERE `benchmark_code` = :code
+              AND `asof_trade_date` BETWEEN :start_date AND :latest_date
+            ORDER BY `asof_trade_date`
+            """
+        )
+        try:
+            with self.db_writer.engine.begin() as conn:
+                df = pd.read_sql(
+                    stmt,
+                    conn,
+                    params={
+                        "code": benchmark_code,
+                        "start_date": start_date.isoformat(),
+                        "latest_date": latest_date.isoformat(),
+                    },
+                )
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            return df
+        except Exception as exc:
+            self.logger.warning("加载日线环境指数收益 %s 失败: %s", benchmark_code, exc)
             return pd.DataFrame()

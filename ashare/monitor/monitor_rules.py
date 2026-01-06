@@ -395,8 +395,8 @@ def build_default_monitor_rules(
             severity=100,
             predicate=lambda ctx: bool(getattr(ctx, "sig_signal") == "SELL"),
             effect=lambda ctx: RuleResult(
-                reason="卖出信号(忽略买入监测)",
-                action_override="SKIP",
+                reason="卖出信号(观察)",
+                action_override="WAIT",
             ),
         ),
         Rule(

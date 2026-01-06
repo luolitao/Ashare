@@ -45,6 +45,7 @@ VIEW_STRATEGY_OPEN_MONITOR_WIDE = None
 VIEW_STRATEGY_OPEN_MONITOR_ENV = None
 VIEW_STRATEGY_OPEN_MONITOR = None
 
+# ready_signals 中的 chip_score/chip_reason 仅来自 strategy_sig_chips。
 READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "sig_date": "DATE NOT NULL",
     "code": "VARCHAR(20) NOT NULL",
@@ -1256,8 +1257,6 @@ class SchemaManager:
             "final_cap": "DOUBLE NULL",
             "reason": "VARCHAR(255) NULL",
             "risk_tag": "VARCHAR(255) NULL",
-            "chip_score": "DOUBLE NULL",
-            "chip_reason": "VARCHAR(255) NULL",
             "valid_days": "INT NULL",
             "expires_on": "DATE NULL",
         }
@@ -1272,13 +1271,13 @@ class SchemaManager:
         self._ensure_varchar_length(table, "risk_tag", 255)
         self._ensure_varchar_length(table, "reason", 255)
         self._ensure_numeric_column(table, "final_cap", "DOUBLE NULL")
-        self._ensure_numeric_column(table, "chip_score", "DOUBLE NULL")
         self._ensure_numeric_column(table, "valid_days", "INT NULL")
         self._ensure_date_column(table, "expires_on", not_null=False)
-        self._ensure_varchar_length(table, "chip_reason", 255)
         self._drop_columns(
             table,
             (
+                "chip_score",
+                "chip_reason",
                 "final_action",
                 "final_reason",
                 "signal_score",
@@ -1443,19 +1442,12 @@ class SchemaManager:
             "avg_volume_20": _ind_expr("avg_volume_20"),
         }
 
-        chip_score_sources = []
-        chip_reason_sources = []
-        if "chip_score" in meta:
-            chip_score_sources.append("e.`chip_score`")
-        if "chip_reason" in meta:
-            chip_reason_sources.append("e.`chip_reason`")
-
         if chip_enabled:
-            chip_score_sources.append("cf.`chip_score`")
-            chip_reason_sources.append("cf.`chip_reason`")
-
-        field_exprs["chip_score"] = _coalesce_expr(chip_score_sources)
-        field_exprs["chip_reason"] = _coalesce_expr(chip_reason_sources)
+            field_exprs["chip_score"] = "cf.`chip_score`"
+            field_exprs["chip_reason"] = "cf.`chip_reason`"
+        else:
+            field_exprs["chip_score"] = "NULL"
+            field_exprs["chip_reason"] = "NULL"
         field_exprs["age_days"] = "cf.`age_days`" if chip_enabled else "NULL"
         field_exprs["stale_hit"] = "cf.`stale_hit`" if chip_enabled else "NULL"
 
@@ -2280,6 +2272,9 @@ class SchemaManager:
             "regime": "VARCHAR(32) NULL",
             "score": "DOUBLE NULL",
             "position_hint": "DOUBLE NULL",
+            "close": "DOUBLE NULL",
+            "prev_close": "DOUBLE NULL",
+            "index_ret": "DOUBLE NULL",
             "ma20": "DOUBLE NULL",
             "ma60": "DOUBLE NULL",
             "ma250": "DOUBLE NULL",

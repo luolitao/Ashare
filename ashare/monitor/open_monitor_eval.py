@@ -354,6 +354,7 @@ class OpenMonitorEvaluator:
             # 2. 收集各方意见
             sig_map: dict[str, str] = {}
             sig_age_map: dict[str, float | None] = {}
+            risk_map: dict[str, str] = {}
             
             # 遍历 group 收集信息
             reasons = []
@@ -377,20 +378,25 @@ class OpenMonitorEvaluator:
                 if s_code:
                     sig_map[s_code] = sig
                     sig_age_map[s_code] = _to_float(r.get("signal_age"))
+                    risk_map[s_code] = risk
             
             # 3. 仲裁逻辑 (Arbitration Logic)
             final_signal = row.get("sig_signal")
 
             veto_hit = None
+            high_risk_tags = {"WYCKOFF_SOW", "WYCKOFF_UTAD"}
             for s_code, veto_signals in veto_map.items():
                 if sig_map.get(s_code) in veto_signals:
-                    if (
-                        s_code == "wyckoff_distribution"
-                        and max_veto_age is not None
-                        and sig_age_map.get(s_code) is not None
-                        and sig_age_map.get(s_code) > max_veto_age
-                    ):
-                        continue
+                    if s_code == "wyckoff_distribution":
+                        tag = (risk_map.get(s_code) or "").upper()
+                        if tag not in high_risk_tags:
+                            continue
+                        if (
+                            max_veto_age is not None
+                            and sig_age_map.get(s_code) is not None
+                            and sig_age_map.get(s_code) > max_veto_age
+                        ):
+                            continue
                     veto_hit = s_code
                     break
 

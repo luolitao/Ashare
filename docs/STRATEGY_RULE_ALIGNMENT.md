@@ -15,6 +15,8 @@
 | 背离检测 (MACD/价格) | 威科夫指标 | `ashare/indicators/wyckoff.py` |
 | 盘中 VWAP 跌破 1.5% 强制 STOP | 开盘规则 | `ashare/monitor/monitor_rules.py` |
 | 策略 veto 仲裁 | 开盘评估 | `ashare/monitor/open_monitor_eval.py` |
+| Wyckoff veto 触发条件 | 仅 WYCKOFF_SOW/WYCKOFF_UTAD | `ashare/strategies/wyckoff_strategy.py` |
+| 筹码字段来源 | ready_signals | `strategy_sig_chips` (不再来自 `strategy_sig_events`) |
 
 ## 对齐检查建议
 1. 当规则有变更时，同步更新 `docs/AI_CONTEXT.md` 与本表。
