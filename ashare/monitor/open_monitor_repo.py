@@ -1870,6 +1870,13 @@ class OpenMonitorSqlStore:
             None,
         )
         payload["env_final_reason_json"] = env_context.get("env_final_reason_json")
+        
+        # 补充字段：环境详情 (不再依赖视图计算)
+        payload["weekly_risk_level"] = env_context.get("weekly_risk_level")
+        payload["daily_regime"] = env_context.get("regime")
+        # index_gate_action 对应周线/日线综合后的建议
+        payload["index_gate_action"] = env_context.get("weekly_gate_action") or env_context.get("weekly_gate_policy")
+        payload["index_score"] = _to_float(env_context.get("index_score"))
 
         if not self._table_exists(table):
             self.logger.error("环境快照表 %s 不存在，已跳过写入。", table)

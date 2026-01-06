@@ -5,6 +5,8 @@ import time
 import pandas as pd
 from sqlalchemy import text
 
+import datetime
+
 # 1. 路径修复：确保能引用到 ashare 包
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -51,6 +53,8 @@ def execute_sql(sql_raw: str, limit: int = 50):
                     for row in rows:
                         for k, v in row.items():
                             if isinstance(v, (pd.Timestamp, pd.DatetimeIndex)):
+                                row[k] = v.isoformat()
+                            elif isinstance(v, (datetime.date, datetime.datetime)):
                                 row[k] = v.isoformat()
                     
                     final_results.append({

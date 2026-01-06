@@ -495,6 +495,7 @@ class OpenMonitorEvaluator:
         live_gap_list: List[float | None] = []
         live_pct_change_list: List[float | None] = []
         live_intraday_vol_list: List[float | None] = []
+        live_vwap_list: List[float | None] = []
         dev_ma5_list: List[float | None] = []
         dev_ma20_list: List[float | None] = []
         dev_ma5_atr_list: List[float | None] = []
@@ -539,6 +540,36 @@ class OpenMonitorEvaluator:
         ma20_dyn_min_pct = self.rule_config.ma20_dyn_min_pct
         ma20_prewarn_buffer_pct = self.rule_config.ma20_prewarn_buffer_pct
         below_ma20_tol_pct = self.rule_config.below_ma20_tol_pct
+
+        # --- 计算开盘时长 (Phase 1: 精准计算，扣除午休) ---
+        minutes_open = 0
+        if checked_at_ts:
+            now_time = checked_at_ts.time()
+            t_930 = dt.time(9, 30)
+            t_1130 = dt.time(11, 30)
+            t_1300 = dt.time(13, 0)
+            t_1500 = dt.time(15, 0)
+
+            if now_time < t_930:
+                minutes_open = 0
+            elif now_time <= t_1130:
+                # 上午: 当前 - 9:30
+                delta = (checked_at_ts - checked_at_ts.replace(hour=9, minute=30, second=0, microsecond=0)).total_seconds()
+                minutes_open = int(delta / 60)
+            elif now_time < t_1300:
+                # 午休: 固定 120 分钟
+                minutes_open = 120
+            elif now_time <= t_1500:
+                # 下午: 120 + (当前 - 13:00)
+                delta = (checked_at_ts - checked_at_ts.replace(hour=13, minute=0, second=0, microsecond=0)).total_seconds()
+                minutes_open = 120 + int(delta / 60)
+            else:
+                # 盘后: 240 分钟
+                minutes_open = 240
+        
+        # 保护：至少 1 分钟，避免除零
+        minutes_open = max(1, min(minutes_open, 240))
+
         for _, row in merged.iterrows():
             sig_reason_text = str(row.get("sig_reason") or row.get("reason") or "")
             is_pullback = self._is_pullback_signal(sig_reason_text)
@@ -547,7 +578,9 @@ class OpenMonitorEvaluator:
 
             price_open = _to_float(row.get("live_open"))
             price_latest = _to_float(row.get("live_latest"))
-            price_now = price_open if price_open is not None else price_latest
+            # 修复：优先使用最新价 (latest)，只有在盘前或无最新价时才用开盘价
+            price_now = price_latest if price_latest is not None else price_open
+            
             ref_close = _resolve_ref_close(row)
             if price_now is None:
                 if run_stage == "PREOPEN" and ref_close is not None:
@@ -571,8 +604,20 @@ class OpenMonitorEvaluator:
             avg_vol_20 = _to_float(row.get("avg_volume_20"))
             live_vol = _to_float(row.get("live_volume"))
             live_intraday = None
+            
             if avg_vol_20 is not None and avg_vol_20 > 0 and live_vol is not None:
-                live_intraday = live_vol / avg_vol_20
+                # 预估全天量 (Projected Volume)
+                # 使用幂函数 progress^0.6 来拟合 A 股成交量"前高后低"的特性
+                # 避免早盘线性推导导致的虚高
+                progress = minutes_open / 240.0
+                weighted_progress = progress ** 0.6
+                
+                if weighted_progress > 0.001:
+                    projected_vol = live_vol / weighted_progress
+                    live_intraday = projected_vol / avg_vol_20
+                else:
+                    live_intraday = 0.0
+            
             live_intraday_vol_list.append(live_intraday)
 
             sig_ma5 = _to_float(row.get("sig_ma5"))
@@ -709,22 +754,28 @@ class OpenMonitorEvaluator:
                     ls_strength = ls_data.get("strength")
                     ls_reason = ls_data.get("reason")
 
-            # 计算开盘时长 (Phase 1)
-            minutes_open = 0
-            if checked_at_ts:
-                # 简单处理：假设 9:30 开盘
-                market_open = checked_at_ts.replace(hour=9, minute=30, second=0, microsecond=0)
-                delta = (checked_at_ts - market_open).total_seconds() / 60
-                minutes_open = int(delta) if delta > 0 else 0
-
             # 计算 VWAP (日内均价)
             live_amount = _to_float(row.get("live_amount"))
+            live_high_val = _to_float(row.get("live_high"))
+            live_low_val = _to_float(row.get("live_low"))
+            
             vwap = None
             dist_to_vwap = None
             if live_vol is not None and live_vol > 0 and live_amount is not None:
                 vwap = live_amount / live_vol
-                if price_now is not None:
+                
+                # Sanity Check: VWAP 必须介于 High 和 Low 之间
+                # 数据源可能出现 Amount/Volume 更新不同步导致 VWAP 越界
+                if live_high_val is not None and vwap > live_high_val:
+                    vwap = live_high_val
+                elif live_low_val is not None and vwap < live_low_val:
+                    vwap = live_low_val
+
+                if price_now is not None and vwap > 0:
                     dist_to_vwap = (price_now - vwap) / vwap
+            
+            # 记录 live_vwap 到 merged (方便后续入库)
+            row["live_vwap"] = vwap
 
             ctx = DecisionContext(
                 entry_exposure_cap=env.position_cap_pct,
@@ -849,6 +900,7 @@ class OpenMonitorEvaluator:
             actions.append(action)
             action_reasons.append(action_reason)
             signal_kinds.append("PULLBACK" if is_pullback else "CROSS")
+            live_vwap_list.append(vwap)
             rule_hits_json_list.append(rule_hits_json)
             summary_lines.append(summary_line)
             signal_strength_list.append(strength)
@@ -862,6 +914,7 @@ class OpenMonitorEvaluator:
         merged["live_gap_pct"] = live_gap_list
         merged["live_pct_change"] = live_pct_change_list
         merged["live_intraday_vol_ratio"] = live_intraday_vol_list
+        merged["live_vwap"] = live_vwap_list
         merged["action"] = actions
         merged["action_reason"] = action_reasons
         merged["state"] = states
@@ -912,6 +965,7 @@ class OpenMonitorEvaluator:
             "live_gap_pct",
             "live_pct_change",
             "live_intraday_vol_ratio",
+            "live_vwap",
             "sig_close",
             "sig_ma5",
             "sig_ma20",
@@ -985,6 +1039,7 @@ class OpenMonitorEvaluator:
             "live_pct_change",
             "live_gap_pct",
             "live_intraday_vol_ratio",
+            "live_vwap",
             "sig_close",
             "sig_ma5",
             "sig_ma20",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List
 import concurrent.futures
+import time
 
 import pandas as pd
 
@@ -35,15 +36,66 @@ class OpenMonitorMarketData:
         A 修复点：
         - live_trade_date 优先使用行情源字段（trade_date/date/live_trade_date）。
         - 若行情源未提供交易日字段，使用本次运行的 monitor_date（或 checked_at.date）兜底，便于对账。
+        - 增加脏数据检测与重试逻辑（针对 VWAP 超出 High/Low 范围的情况）。
         """
         if not codes:
             return pd.DataFrame(columns=["code"])
 
         source = (self.params.quote_source or "eastmoney").strip().lower()
-        if source == "akshare":
-            df = self._fetch_quotes_akshare(codes)
-        else:
-            df = self._fetch_quotes_eastmoney(codes)
+        
+        def _fetch_batch(batch_codes: List[str]) -> pd.DataFrame:
+            if source == "akshare":
+                return self._fetch_quotes_akshare(batch_codes)
+            else:
+                return self._fetch_quotes_eastmoney(batch_codes)
+
+        # 1. 首次全量拉取
+        df = _fetch_batch(codes)
+
+        # 2. 脏数据检测与重试 (VWAP Sanity Check)
+        # 场景：Amount 和 Volume 更新不同步，导致 VWAP > High 或 VWAP < Low
+        if not df.empty and {"live_amount", "live_volume", "live_high", "live_low"}.issubset(df.columns):
+            from ashare.utils.convert import to_float as _to_float
+            
+            dirty_codes = []
+            for _, row in df.iterrows():
+                amt = _to_float(row.get("live_amount"))
+                vol = _to_float(row.get("live_volume"))
+                high = _to_float(row.get("live_high"))
+                low = _to_float(row.get("live_low"))
+                
+                if amt and vol and vol > 0:
+                    vwap = amt / vol
+                    # 容差 0.1% 处理浮点微小误差
+                    tolerance = 0.001
+                    is_dirty = False
+                    
+                    if high and vwap > high * (1 + tolerance):
+                        is_dirty = True
+                    elif low and vwap < low * (1 - tolerance):
+                        is_dirty = True
+                    
+                    if is_dirty:
+                        code = str(row.get("code"))
+                        dirty_codes.append(code)
+                        self.logger.warning(
+                            "检测到脏行情数据: code=%s, vwap=%.3f, high=%.3f, low=%.3f. 触发重试。",
+                            code, vwap, high or 0, low or 0
+                        )
+
+            if dirty_codes:
+                # 短暂休眠让数据源同步
+                time.sleep(0.2)
+                self.logger.info("开始重试获取 %d 只脏数据标的...", len(dirty_codes))
+                
+                retry_df = _fetch_batch(dirty_codes)
+                
+                if not retry_df.empty:
+                    # 从原 df 中剔除脏数据行
+                    df = df[~df["code"].isin(dirty_codes)].copy()
+                    # 合并重试后的数据
+                    df = pd.concat([df, retry_df], ignore_index=True)
+                    self.logger.info("重试完成，已合并 %d 条新数据。", len(retry_df))
 
         # ---- A: 补齐 live_trade_date（优先使用行情源字段；缺失时兜底 monitor_date）----
         if "live_trade_date" not in df.columns:

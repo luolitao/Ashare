@@ -127,28 +127,95 @@ class MarketIndicatorBuilder:
         if len(pivot_df) < 21:
             return
 
-        ret_20d = pivot_df.pct_change(20).iloc[-1]
-        ret_5d = pivot_df.pct_change(5).iloc[-1]
-        
+        daily_ret = pivot_df.pct_change(1)
+        ret_20d_all = pivot_df.pct_change(20)
+        ret_5d_all = pivot_df.pct_change(5)
+        vol_20d_all = daily_ret.rolling(20).std()
+        vol_5d_all = daily_ret.rolling(5).std()
+
+        current_date = pivot_df.index[-1]
+        prev_date = pivot_df.index[-2] if len(pivot_df) >= 22 else None
+
+        ret_20d = ret_20d_all.loc[current_date]
+        ret_5d = ret_5d_all.loc[current_date]
+        vol_20d = vol_20d_all.loc[current_date].replace(0, pd.NA)
+        vol_5d = vol_5d_all.loc[current_date].replace(0, pd.NA)
+
         metrics = pd.DataFrame({"ret_20d": ret_20d, "ret_5d": ret_5d}).dropna()
         if metrics.empty:
             return
-            
-        metrics["rank_trend"] = metrics["ret_20d"].rank(pct=True)
-        metrics["rank_mom"] = metrics["ret_5d"].rank(pct=True)
+
+        adj_trend = (ret_20d / vol_20d).replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+        adj_mom = (ret_5d / vol_5d).replace([pd.NA, float("inf"), float("-inf")], pd.NA)
+        metrics["rank_trend"] = adj_trend.rank(pct=True)
+        metrics["rank_mom"] = adj_mom.rank(pct=True)
 
         def _classify(row: pd.Series) -> str:
-            strong_trend = row["rank_trend"] >= 0.5
-            strong_mom = row["rank_mom"] >= 0.5
+            strong_trend = row["rank_trend"] >= 0.6
+            weak_trend = row["rank_trend"] <= 0.4
+            strong_mom = row["rank_mom"] >= 0.6
+            weak_mom = row["rank_mom"] <= 0.4
             if strong_trend and strong_mom:
                 return "leading"
-            if not strong_trend and strong_mom:
+            if weak_trend and strong_mom:
                 return "improving"
-            if strong_trend and not strong_mom:
+            if strong_trend and weak_mom:
                 return "weakening"
-            return "lagging"
+            if weak_trend and weak_mom:
+                return "lagging"
+            return "neutral"
 
-        metrics["rotation_phase"] = metrics.apply(_classify, axis=1)
+        metrics["candidate_phase"] = metrics.apply(_classify, axis=1)
+
+        prev_candidate = {}
+        prev_phase_map = {}
+        if prev_date is not None:
+            prev_ret_20d = ret_20d_all.loc[prev_date]
+            prev_ret_5d = ret_5d_all.loc[prev_date]
+            prev_vol_20d = vol_20d_all.loc[prev_date].replace(0, pd.NA)
+            prev_vol_5d = vol_5d_all.loc[prev_date].replace(0, pd.NA)
+            prev_metrics = pd.DataFrame(
+                {"ret_20d": prev_ret_20d, "ret_5d": prev_ret_5d}
+            ).dropna()
+            if not prev_metrics.empty:
+                prev_adj_trend = (prev_ret_20d / prev_vol_20d).replace(
+                    [pd.NA, float("inf"), float("-inf")], pd.NA
+                )
+                prev_adj_mom = (prev_ret_5d / prev_vol_5d).replace(
+                    [pd.NA, float("inf"), float("-inf")], pd.NA
+                )
+                prev_metrics["rank_trend"] = prev_adj_trend.rank(pct=True)
+                prev_metrics["rank_mom"] = prev_adj_mom.rank(pct=True)
+                prev_candidate = prev_metrics.apply(_classify, axis=1).to_dict()
+
+            try:
+                with self.repo.db_writer.engine.connect() as conn:
+                    prev_df = pd.read_sql(
+                        "SELECT board_name, rotation_phase FROM strategy_ind_board_rotation WHERE date = %s",
+                        conn,
+                        params=[prev_date],
+                    )
+                if not prev_df.empty:
+                    prev_phase_map = prev_df.set_index("board_name")["rotation_phase"].to_dict()
+            except Exception:
+                prev_phase_map = {}
+
+        def _resolve_phase(board: str, candidate: str) -> str:
+            if candidate == "neutral":
+                return (
+                    prev_phase_map.get(board)
+                    or prev_candidate.get(board)
+                    or "neutral"
+                )
+            prev_cand = prev_candidate.get(board)
+            if prev_cand is not None and prev_cand != candidate:
+                return prev_phase_map.get(board) or prev_cand
+            return candidate
+
+        metrics["rotation_phase"] = [
+            _resolve_phase(board, cand)
+            for board, cand in metrics["candidate_phase"].items()
+        ]
 
         # 3. 准备入库数据
         df_to_save = metrics.copy()
@@ -156,6 +223,7 @@ class MarketIndicatorBuilder:
         df_to_save["date"] = trade_date
         df_to_save["created_at"] = dt.datetime.now()
         df_to_save["board_code"] = None  # 暂不关联 code，如果需要可以从 spot 表补
+        df_to_save = df_to_save.drop(columns=["candidate_phase"], errors="ignore")
 
         # 尝试补全 board_code
         spot_df = self.repo.fetch_board_spot()

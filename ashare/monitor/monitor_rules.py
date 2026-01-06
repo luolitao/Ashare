@@ -617,7 +617,7 @@ def build_default_monitor_rules(
                 and (getattr(ctx, "dist_to_vwap") < -0.015) # 跌破均价线超过 1.5%
             ),
             effect=lambda ctx: RuleResult(
-                reason=f"日内走势转弱: 跌破均价线({getattr(ctx, 'dist_to_vwap'):.2%})",
+                reason=f"日内走势转弱: 跌破均价线(P={getattr(ctx, 'price_now', 0):.2f} < V={getattr(ctx, 'vwap', 0):.2f}, {getattr(ctx, 'dist_to_vwap'):.2%})",
                 action_override="STOP",
             ),
         ),

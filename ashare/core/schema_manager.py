@@ -35,11 +35,15 @@ TABLE_STRATEGY_DAILY_MARKET_ENV = "strategy_ind_daily_env"
 TABLE_STRATEGY_OPEN_MONITOR_QUOTE = "strategy_mon_quotes"
 TABLE_STRATEGY_OPEN_MONITOR_RUN = "strategy_mon_log"
 TABLE_STRATEGY_OPEN_MONITOR_MINUTE = "strategy_mon_minute"
-VIEW_STRATEGY_OPEN_MONITOR_WIDE = "v_strategy_mon_wide"
-# 开盘监测环境视图（env 快照）
-VIEW_STRATEGY_OPEN_MONITOR_ENV = "v_strategy_mon_env"
-# 开盘监测默认查询视图（精简字段；完整字段请查 v_mon_wide）
-VIEW_STRATEGY_OPEN_MONITOR = "v_strategy_mon_eval"
+
+# 极简看盘视图
+VIEW_MONITOR_SIMPLE = "v_monitor_simple"
+VIEW_MONITOR_ENV_SIMPLE = "v_monitor_env_simple"
+
+# (Legacy constants kept for compatibility if needed, but pointed to None or new views)
+VIEW_STRATEGY_OPEN_MONITOR_WIDE = None 
+VIEW_STRATEGY_OPEN_MONITOR_ENV = None
+VIEW_STRATEGY_OPEN_MONITOR = None
 
 READY_SIGNALS_COLUMNS: Dict[str, str] = {
     "sig_date": "DATE NOT NULL",
@@ -83,12 +87,11 @@ class TableNames:
     open_monitor_env_table: str
     open_monitor_run_table: str
     open_monitor_minute_table: str
-    open_monitor_env_view: str
-    open_monitor_view: str
-    open_monitor_wide_view: str
     open_monitor_quote_table: str
     weekly_indicator_table: str
     daily_indicator_table: str
+    view_monitor_simple: str
+    view_monitor_env_simple: str
 
 
 def _to_bool(value: object, default: bool = False) -> bool:
@@ -143,25 +146,16 @@ class SchemaManager:
         self._ensure_weekly_indicator_table(tables.weekly_indicator_table)
         self._ensure_daily_market_env_table(tables.daily_indicator_table)
         self._ensure_open_monitor_env_table(tables.open_monitor_env_table)
-        self._ensure_open_monitor_env_view(
-            tables.open_monitor_env_view,
-            tables.open_monitor_env_table,
-            tables.weekly_indicator_table,
-            tables.daily_indicator_table,
-            tables.open_monitor_run_table,
-            tables.open_monitor_quote_table,
-        )
 
         self._ensure_board_industry_hist_table()
         self._ensure_board_rotation_table()
 
-        self._ensure_open_monitor_view(
-            tables.open_monitor_view,
-            tables.open_monitor_wide_view,
+        self._ensure_simple_monitor_views(
+            tables.view_monitor_simple,
+            tables.view_monitor_env_simple,
             tables.open_monitor_eval_table,
-            tables.open_monitor_env_view,
+            tables.open_monitor_env_table,
             tables.open_monitor_quote_table,
-            tables.open_monitor_run_table,
         )
         
         self.logger.info("数据库结构初始化/校验完成。")
@@ -217,33 +211,10 @@ class SchemaManager:
             ).strip()
             or TABLE_STRATEGY_OPEN_MONITOR_ENV
         )
-        open_monitor_env_view = (
-                str(
-                    open_monitor_cfg.get(
-                        "open_monitor_env_view",
-                        VIEW_STRATEGY_OPEN_MONITOR_ENV,
-                    )
-                ).strip()
-                or VIEW_STRATEGY_OPEN_MONITOR_ENV
-        )
-        open_monitor_view = (
-                str(
-                    open_monitor_cfg.get(
-                        "open_monitor_view",
-                        VIEW_STRATEGY_OPEN_MONITOR,
-                    )
-                ).strip()
-                or VIEW_STRATEGY_OPEN_MONITOR
-        )
-        open_monitor_wide_view = (
-                str(
-                    open_monitor_cfg.get(
-                        "open_monitor_wide_view",
-                        VIEW_STRATEGY_OPEN_MONITOR_WIDE,
-                    )
-                ).strip()
-                or VIEW_STRATEGY_OPEN_MONITOR_WIDE
-        )
+        
+        view_monitor_simple = VIEW_MONITOR_SIMPLE
+        view_monitor_env_simple = VIEW_MONITOR_ENV_SIMPLE
+
         open_monitor_quote_table = (
                 str(
                     open_monitor_cfg.get(
@@ -282,12 +253,11 @@ class SchemaManager:
             open_monitor_env_table=open_monitor_env_table,
             open_monitor_run_table=open_monitor_run_table,
             open_monitor_minute_table=open_monitor_minute_table,
-            open_monitor_env_view=open_monitor_env_view,
-            open_monitor_view=open_monitor_view,
-            open_monitor_wide_view=open_monitor_wide_view,
             open_monitor_quote_table=open_monitor_quote_table,
             weekly_indicator_table=weekly_indicator_table,
             daily_indicator_table=daily_indicator_table,
+            view_monitor_simple=view_monitor_simple,
+            view_monitor_env_simple=view_monitor_env_simple,
         )
 
     def _rename_table_if_needed(self, old_name: str, new_name: str) -> None:
@@ -1364,7 +1334,7 @@ class SchemaManager:
             self._drop_relation_any(table)
 
         # 2. 构建视图：展示最近有买入意向信号的股票
-        action_expr = "signal"
+        action_expr = "`signal`"
         view_sql = f"""
             CREATE OR REPLACE VIEW `{table}` AS
             SELECT 
@@ -1828,6 +1798,7 @@ class SchemaManager:
             "live_gap_pct": "DOUBLE NULL",
             "live_pct_change": "DOUBLE NULL",
             "live_intraday_vol_ratio": "DOUBLE NULL",
+            "live_vwap": "DOUBLE NULL",
             "dev_ma5": "DOUBLE NULL",
             "dev_ma20": "DOUBLE NULL",
             "dev_ma5_atr": "DOUBLE NULL",
@@ -1973,6 +1944,10 @@ class SchemaManager:
             "monitor_date": "DATE NOT NULL",
             "env_weekly_asof_trade_date": "DATE NULL",
             "env_daily_asof_trade_date": "DATE NULL",
+            "weekly_risk_level": "VARCHAR(16) NULL",
+            "daily_regime": "VARCHAR(16) NULL",
+            "index_gate_action": "VARCHAR(16) NULL",
+            "index_score": "DOUBLE NULL",
             "env_final_gate_action": "VARCHAR(16) NULL",
             "env_final_cap_pct": "DOUBLE NULL",
             "env_final_reason_json": "TEXT NULL",
@@ -2512,48 +2487,69 @@ class SchemaManager:
         self.logger.info("已创建/更新开盘监测宽视图 %s。", target_wide_view)
 
         if view and view != target_wide_view:
-            compact_columns = [
-                "monitor_date",
-                "sig_date",
-                "run_id",
-                "run_pk",
-                "strategy_code",
-                "code",
-                "name",
-                "industry",
-                "board_name",
-                "board_code",
-                "signal_kind",
-                "sig_signal",
-                "sig_reason",
-                "live_trade_date",
-                "live_open",
-                "live_latest",
-                "live_pct_change",
-                "live_gap_pct",
-                "live_intraday_vol_ratio",
-                "state",
-                "status_reason",
-                "action",
-                "action_reason",
-                "entry_exposure_cap",
-                "env_final_gate_action",
-                "env_index_position_cap",
-                "env_position_hint",
-                "env_index_live_pct_change",
-                "env_index_gate_action",
-                "env_index_gate_reason",
-                "rule_hits_json",
-                "summary_line",
-                "checked_at",
-                "status",
-            ]
-            compact_select = ", ".join(f"`{col}`" for col in compact_columns)
             compact_stmt = text(
                 f"""
                 CREATE OR REPLACE VIEW `{view}` AS
-                SELECT {compact_select}
-                FROM `{target_wide_view}`
+                SELECT
+                  v.`monitor_date`,
+                  v.`sig_date`,
+                  v.`run_id`,
+                  v.`run_pk`,
+                  v.`strategy_code`,
+                  v.`code`,
+                  v.`name`,
+                  v.`industry`,
+                  v.`board_name`,
+                  v.`board_code`,
+                  CASE
+                    WHEN (v.`asof_trade_date` IS NULL OR v.`asof_close` IS NULL) THEN 'INVALID'
+                    WHEN (v.`live_latest` IS NULL AND v.`live_open` IS NULL) THEN 'INVALID'
+                    ELSE 'OK'
+                  END AS `data_state`,
+                  CASE
+                    WHEN (v.`asof_trade_date` IS NULL OR v.`asof_close` IS NULL) THEN 'MISSING_LATEST_SNAPSHOT'
+                    WHEN (v.`live_latest` IS NULL AND v.`live_open` IS NULL) THEN 'MISSING_LIVE_QUOTE'
+                    ELSE NULL
+                  END AS `data_reason`,
+                  CASE
+                    WHEN v.`sig_signal` = 'BUY' THEN 'OK'
+                    ELSE 'REJECTED'
+                  END AS `signal_state`,
+                  v.`sig_signal` AS `signal_type`,
+                  v.`sig_reason` AS `signal_reason`,
+                  CASE
+                    WHEN (v.`asof_trade_date` IS NULL OR v.`asof_close` IS NULL) THEN 'SKIP'
+                    WHEN (v.`live_latest` IS NULL AND v.`live_open` IS NULL) THEN 'SKIP'
+                    WHEN v.`sig_signal` = 'BUY' THEN v.`action`
+                    ELSE 'SKIP'
+                  END AS `final_action`,
+                  CASE
+                    WHEN (v.`asof_trade_date` IS NULL OR v.`asof_close` IS NULL) THEN 'MISSING_LATEST_SNAPSHOT'
+                    WHEN (v.`live_latest` IS NULL AND v.`live_open` IS NULL) THEN 'MISSING_LIVE_QUOTE'
+                    WHEN v.`sig_signal` <> 'BUY' THEN 'NON_BUY_SIGNAL'
+                    WHEN v.`env_final_gate_action` IN ('STOP', 'WAIT') THEN CONCAT(
+                      'ENV_SOFT_', v.`env_final_gate_action`, ' | ', COALESCE(v.`action_reason`, 'OK')
+                    )
+                    ELSE v.`action_reason`
+                  END AS `final_reason`,
+                  v.`entry_exposure_cap` AS `trade_cap`,
+                  v.`env_final_gate_action` AS `env_gate`,
+                  COALESCE(v.`env_index_position_cap`, v.`env_position_hint`) AS `env_cap`,
+                  v.`env_position_hint`,
+                  v.`env_index_live_pct_change`,
+                  v.`env_index_gate_action`,
+                  v.`env_index_gate_reason`,
+                  v.`live_trade_date`,
+                  v.`live_open`,
+                  v.`live_latest`,
+                  v.`live_pct_change`,
+                  v.`live_gap_pct`,
+                  v.`live_intraday_vol_ratio`,
+                  v.`rule_hits_json`,
+                  v.`summary_line`,
+                  v.`checked_at`,
+                  v.`status`
+                FROM `{target_wide_view}` v
                 """
             )
             with self.engine.begin() as conn:
@@ -2585,6 +2581,72 @@ class SchemaManager:
         # 尝试重命名旧表迁移数据
         if self._table_exists("strategy_board_rotation") and not self._table_exists(table):
             self._rename_table_if_needed("strategy_board_rotation", table)
+
+    def _ensure_simple_monitor_views(
+        self,
+        view_simple: str,
+        view_env: str,
+        table_eval: str,
+        table_env: str,
+        table_quotes: str,
+    ) -> None:
+        """创建极简的看盘视图（替代原先臃肿的 v_strategy_mon_wide/eval/env）。"""
+        
+        # 1. 个股监控视图
+        if view_simple and table_eval and table_quotes:
+            # 关联 dim_stock_basic 获取名称
+            basic_view = VIEW_DIM_STOCK_BASIC
+            
+            select_sql = f"""
+                SELECT
+                    e.run_pk,
+                    e.monitor_date,
+                    e.strategy_code,
+                    e.code,
+                    b.code_name AS name,
+                    e.action,
+                    e.action_reason,
+                    e.sig_signal,
+                    e.sig_date,
+                    e.live_vwap,
+                    q.live_latest AS price,
+                    e.live_pct_change AS pct,
+                    e.live_intraday_vol_ratio AS vol_ratio
+                FROM `{table_eval}` e
+                LEFT JOIN `{basic_view}` b ON e.code = b.code
+                LEFT JOIN `{table_quotes}` q ON e.run_pk = q.run_pk AND e.code = q.code
+                ORDER BY e.run_pk DESC, e.action_reason, e.code
+            """
+            
+            # 安全检查：如果表存在才创建视图
+            if self._table_exists(table_eval) and self._table_exists(table_quotes):
+                create_ddl = f"CREATE OR REPLACE VIEW `{view_simple}` AS {select_sql}"
+                with self.engine.begin() as conn:
+                    conn.execute(text(create_ddl))
+                self.logger.info("已更新极简个股视图 %s。", view_simple)
+
+        # 2. 环境监控视图
+        if view_env and table_env:
+            select_sql = f"""
+                SELECT
+                    run_pk,
+                    monitor_date,
+                    weekly_risk_level,
+                    daily_regime,
+                    index_gate_action,
+                    index_score,
+                    env_final_gate_action AS final_gate,
+                    env_final_cap_pct AS cap,
+                    env_final_reason_json AS reason
+                FROM `{table_env}`
+                ORDER BY run_pk DESC
+            """
+            
+            if self._table_exists(table_env):
+                create_ddl = f"CREATE OR REPLACE VIEW `{view_env}` AS {select_sql}"
+                with self.engine.begin() as conn:
+                    conn.execute(text(create_ddl))
+                self.logger.info("已更新极简环境视图 %s。", view_env)
 
     def _ensure_board_industry_hist_table(self) -> None:
         table = "board_industry_hist_daily"
