@@ -40,7 +40,10 @@ class TrendStrategy(BaseStrategy):
         # 2. 计算威科夫底层状态 (全局状态机)
         from ashare.strategies.ma_wyckoff_model import MAWyckoffStrategy
         wyck_model = MAWyckoffStrategy()
-        df = wyck_model.run(df) # 注入 wyckoff_phase, wyckoff_event 等
+        frames = []
+        for _, group in df.groupby("code", sort=False):
+            frames.append(wyck_model.run(group))
+        df = pd.concat(frames, ignore_index=True) if frames else df.copy()
         
         # 3. 计算各层级信号
         hard_gate = self._calc_hard_gate(df)
@@ -60,7 +63,19 @@ class TrendStrategy(BaseStrategy):
     def _prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values(["code", "date"]).copy()
         # 确保列存在
-        cols = ["close", "ma5", "ma20", "ma60", "ma20_bias", "vol_ratio", "atr14", "volume", "rsi14"]
+        cols = [
+            "close",
+            "ma5",
+            "ma20",
+            "ma60",
+            "ma250",
+            "ma20_bias",
+            "vol_ratio",
+            "atr14",
+            "volume",
+            "amount",
+            "rsi14",
+        ]
         for c in cols:
             if c not in df.columns:
                 df[c] = np.nan
@@ -85,8 +100,20 @@ class TrendStrategy(BaseStrategy):
         env_gate = pd.Series(False, index=df.index)
         if "env_gate_action" in df.columns:
             env_gate = df["env_gate_action"].fillna("").astype(str).str.upper().isin(["STOP", "ALLOW_NONE"])
+
+        min_daily_amount = float(self.params.get("min_daily_amount", 0.0) or 0.0)
+        if min_daily_amount > 0:
+            amount = pd.to_numeric(df.get("amount"), errors="coerce")
+            low_liquidity = amount.isna() | (amount < min_daily_amount)
+        else:
+            low_liquidity = pd.Series(False, index=df.index)
+
+        # --- 新增：股价上限过滤 ---
+        max_price = float(self.params.get("max_stock_price", 999999.0) or 999999.0)
+        # 移除硬性拦截，改为仅打标签，以便观察高价龙头
+        # too_expensive = df["close"] > max_price
             
-        return missing | one_word | env_gate
+        return missing | one_word | env_gate | low_liquidity
 
     def _calc_base_signals(self, df: pd.DataFrame) -> dict:
         """计算基础买卖信号。"""
@@ -94,7 +121,7 @@ class TrendStrategy(BaseStrategy):
         c, ma5, ma20, ma60 = df["close"], df["ma5"], df["ma20"], df["ma60"]
         prev_ma5, prev_ma20 = df["prev_ma5"], df["prev_ma20"]
 
-        trend_ok = (c > ma60) & (ma20 > ma60)
+        trend_ok = (c > df["ma250"]) & (ma20 > df["ma250"])
         
         # 1. 准备量能参考：5日均量
         df["vol_ma5"] = df.groupby("code")["volume"].transform(lambda x: x.rolling(5).mean())
@@ -105,11 +132,18 @@ class TrendStrategy(BaseStrategy):
         
         # 3. 回踩买入重构 (引入 VSA)：必须是缩量回踩或平量回踩，不能是放量大跌
         pullback_atr_mult = float(p.get("pullback_atr_mult", 0.6))
+        atr_ok = df["atr14"].notna() & (df["atr14"] > 0)
         dist_to_ma20 = (c - ma20).abs()
         # VSA 条件：当前量 < 5日均量的 1.05 倍 (防止放量砸盘)
         vol_vsa_ok = df["volume"] < df["vol_ma5"] * 1.05
         
-        buy_pullback = trend_ok & (dist_to_ma20 <= pullback_atr_mult * df["atr14"]) & (ma5 > prev_ma5) & vol_vsa_ok
+        buy_pullback = (
+            trend_ok
+            & atr_ok
+            & (dist_to_ma20 <= pullback_atr_mult * df["atr14"])
+            & (ma5 > prev_ma5)
+            & vol_vsa_ok
+        )
         
         base_buy = buy_cross | buy_pullback
         
@@ -119,8 +153,15 @@ class TrendStrategy(BaseStrategy):
         stop_buffer_atr = float(p.get("stop_buffer_atr", 0.3))
         min_stop_pct = 0.005
         min_stop_price = ma20 * min_stop_pct
-        hard_stop = c < (ma20 - (stop_buffer_atr * df["atr14"] + min_stop_price))
-        
+        hard_stop = atr_ok & (c < (ma20 - (stop_buffer_atr * df["atr14"] + min_stop_price)))
+
+        # --- 新增：Trailing Stop (移动止盈) ---
+        # 逻辑：价格从近 20 日最高点回撤超过 3.0 * ATR，强制止盈
+        # 用于保护主升浪利润，防止过山车
+        rolling_high_20 = df.groupby("code")["close"].transform(lambda x: x.rolling(20).max())
+        trailing_atr_mult = 3.0
+        trailing_stop = atr_ok & (c < (rolling_high_20 - trailing_atr_mult * df["atr14"]))
+
         dead_cross = (ma5 < ma20) & (prev_ma5 >= prev_ma20)
         
         # 滞涨判定
@@ -134,7 +175,7 @@ class TrendStrategy(BaseStrategy):
             (dist_to_ma20 > stag_bias_atr_mult * df["atr14"])
         )
         
-        base_sell = dead_cross | stagnation | hard_stop
+        base_sell = dead_cross | stagnation | hard_stop | trailing_stop
         base_reduce = (ma5 < ma20) & (c < ma20) & (~dead_cross) & (~hard_stop)
         
         return {
@@ -188,6 +229,7 @@ class TrendStrategy(BaseStrategy):
     def _combine_signals(self, df: pd.DataFrame, hard_gate, base, soft) -> pd.DataFrame:
         """综合打分与决策。"""
         out = df.copy()
+        out["risk_tag"] = ""
         
         # 1. 初始信号
         signal = np.select(
@@ -210,8 +252,8 @@ class TrendStrategy(BaseStrategy):
             # 计算 5 日滚动 RS 以识别持续走强品种
             out["rs_5d"] = out.groupby("code")["rs_daily"].transform(lambda x: x.rolling(5).sum())
         else:
-            out["rs_daily"] = 0.0
-            out["rs_5d"] = 0.0
+            out["rs_daily"] = np.nan
+            out["rs_5d"] = np.nan
 
         # 归一化各因子
         wyckoff_phase = out.get("wyckoff_phase", pd.Series("NONE", index=out.index))
@@ -259,9 +301,14 @@ class TrendStrategy(BaseStrategy):
         
         # RS 核心逻辑加分：
         # A. 5日 RS 持续走强
-        rs_factor = np.where(out["rs_5d"] > 0.05, 1.5, np.where(out["rs_5d"] > 0, 0.5, -0.5))
+        rs_5d = out["rs_5d"]
+        rs_factor = np.where(
+            rs_5d.notna(),
+            np.where(rs_5d > 0.05, 1.5, np.where(rs_5d > 0, 0.5, -0.5)),
+            0.0,
+        )
         # B. 逆市表现加分 (大盘跌 > 0.5%, 个股红盘)
-        out["is_resilient"] = (out.get("index_ret", 0) < -0.005) & (out["pct_chg"] > 0)
+        out["is_resilient"] = (out.get("index_ret", np.nan) < -0.005) & (out["pct_chg"] > 0)
         resilient_bonus = np.where(out["is_resilient"], 1.0, 0.0)
         
         # --- 新增：RSI 动能因子 ---
@@ -272,8 +319,90 @@ class TrendStrategy(BaseStrategy):
             [-2.0, 0.5], default=0.0
         )
 
-        quality = (board_factor * 1.5) + chip_factor + (wyckoff_s * w_wyckoff) + (engulf_s * w_engulf) + rs_factor + resilient_bonus + dist_factor + acc_factor + trend_up_factor + rsi_factor
+        # --- 新增：RPS 相对强度因子 (优化版：兼顾龙头与黑马) ---
+        # 1. 获取数据
+        rps_50 = out.get("rps_50", pd.Series(0, index=out.index)).fillna(0)
+        rps_120 = out.get("rps_120", pd.Series(0, index=out.index)).fillna(0)
+        ma250 = out.get("ma250", pd.Series(1e-6, index=out.index)) # 避免除零
+        
+        # 2. 判定是否为“低位” (安全边际区)
+        # 股价距离年线不到 15%，且在年线上方 (Trend OK 已保证上方)
+        bias_ma250 = (out["close"] - ma250) / ma250
+        is_low_base = (bias_ma250 < 0.15) & (bias_ma250 > 0)
+        
+        # 3. 判定是否“进步飞快” (黑马特征)
+        # 短期排名显著高于中期排名
+        is_improving = rps_50 > (rps_120 + 10)
+        
+        # 4. 综合打分
+        # 逻辑 A: 顶级龙头 (RPS > 90) -> 必买 (+2.0)
+        # 逻辑 B: 低位黑马 (低位 + 进步快) -> 鼓励 (+1.5)
+        # 逻辑 C: 低位潜伏 (低位 + RPS一般) -> 宽容 (0.0，不扣分)
+        # 逻辑 D: 高位滞涨 (高位 + RPS低) -> 严惩 (-2.0，甚至直接拦截)
+        
+        rps_factor = np.select(
+            [
+                rps_50 >= 90, 
+                is_low_base & is_improving,
+                is_low_base,
+                (rps_50 < 70) & (~is_low_base)
+            ],
+            [2.0, 1.5, 0.5, -2.0], 
+            default=0.0
+        )
+
+        # --- 新增：动能加速因子 (Momentum Acceleration) ---
+        # 逻辑：短期速率 > 中期速率 > 长期速率，且必须是正收益
+        # 奖励那些“越涨越快”的主升浪标的
+        ret_20 = out.get("ret_20", pd.Series(0, index=out.index)).fillna(0)
+        ret_50 = out.get("ret_50", pd.Series(0, index=out.index)).fillna(0)
+        ret_120 = out.get("ret_120", pd.Series(0, index=out.index)).fillna(0)
+        
+        # 归一化为日均涨幅近似值 (简单除法即可，因为只比大小)
+        v_short = ret_20 / 20.0
+        v_mid = ret_50 / 50.0
+        v_long = ret_120 / 120.0
+        
+        is_accelerating = (v_short > v_mid) & (v_mid > v_long) & (v_long > 0)
+        # 只有在 RPS 也是强者(>80)的情况下，加速才有意义 (避免垃圾股的超跌反弹加速)
+        acceleration_bonus = np.where(is_accelerating & (rps_50 > 80), 1.0, 0.0)
+
+        # --- 新增：防追涨惩罚 (Anti-Chase Penalty) ---
+        # 逻辑：即使是好票，如果离 MA20 太远 (偏离度 > 10%)，也视为追涨
+        ma20_bias = out.get("ma20_bias", pd.Series(0, index=out.index)).fillna(0)
+        chase_penalty = np.where(ma20_bias > 0.10, -3.0, 0.0)
+
+        quality = (board_factor * 2.0) + chip_factor + (wyckoff_s * w_wyckoff) + (engulf_s * w_engulf) + rs_factor + resilient_bonus + dist_factor + acc_factor + trend_up_factor + rsi_factor + rps_factor + acceleration_bonus + chase_penalty
         out["quality_score"] = quality
+
+        def _add_tag(mask: pd.Series, tag: str) -> None:
+            if not mask.any():
+                return
+            existing = out.loc[mask, "risk_tag"].fillna("").astype(str)
+            out.loc[mask, "risk_tag"] = np.where(
+                existing == "",
+                tag,
+                existing + "," + tag,
+            )
+
+        atr_missing = out.get("atr14").isna() if "atr14" in out.columns else pd.Series(True, index=out.index)
+        _add_tag(atr_missing, "DATA_MISSING_ATR")
+
+        if "index_ret" in out.columns:
+            index_missing = out["index_ret"].isna()
+        else:
+            index_missing = pd.Series(True, index=out.index)
+        _add_tag(index_missing, "DATA_MISSING_INDEX")
+
+        min_daily_amount = float(self.params.get("min_daily_amount", 0.0) or 0.0)
+        if min_daily_amount > 0:
+            amount = pd.to_numeric(out.get("amount"), errors="coerce")
+            _add_tag(amount.isna(), "DATA_MISSING_AMOUNT")
+            _add_tag((amount < min_daily_amount) & amount.notna(), "LOW_LIQUIDITY")
+
+        # --- 新增：高价股标签 ---
+        max_price = float(self.params.get("max_stock_price", 999999.0) or 999999.0)
+        _add_tag(out["close"] > max_price, "PRICE_TOO_HIGH")
         
         # 3. 动态调整 (根据质量分拦截或升级)
         # --- 新增：Wyckoff 强制硬拦截 ---
@@ -284,12 +413,29 @@ class TrendStrategy(BaseStrategy):
         out.loc[is_sow, "reason"] = "Wyckoff派发确认: SOW破位"
 
         is_buy = out["signal"] == "BUY"
-        stop_thresh = float(self.params.get("quality_stop_threshold", -3.0))
+        
+        # --- 环境感知动态门槛 (Scenario C 优化) ---
+        # 默认阈值
+        default_thresh = float(self.params.get("quality_stop_threshold", -3.0))
+        
+        # 计算指数 5 日累计收益 (环境动量)
+        if "index_ret" in out.columns:
+            # 填充 NaN 为 0 以免计算出错
+            idx_ret_filled = out["index_ret"].fillna(0.0)
+            # 注意：这里的 rolling 是针对 index_ret 列，但该列对同一天所有股票是相同的
+            # 所以直接取即可，不需要 groupby code (虽然 groupby 也没错且更安全)
+            index_ret_5d = out.groupby("code")["index_ret"].transform(lambda x: x.rolling(5).sum())
+        else:
+            index_ret_5d = pd.Series(0.0, index=out.index)
+            
+        # 如果大盘 5 日累计跌幅超过 2% (弱势/阴跌)，提高门槛到 0.0
+        # 要求个股必须有足够的加分项 (RS强、板块热、筹码好) 才能开仓
+        dynamic_thresh = np.where(index_ret_5d < -0.02, 0.0, default_thresh)
         
         # 质量太差 -> 拦截
-        mask_stop = is_buy & (quality <= stop_thresh)
+        mask_stop = is_buy & (quality <= dynamic_thresh)
         out.loc[mask_stop, "signal"] = "WAIT"
-        out.loc[mask_stop, "reason"] += "|质量分过低"
+        out.loc[mask_stop, "reason"] += "|质量分过低(环境自适应)"
         
         # 4. 计算仓位
         base_cap = 0.5

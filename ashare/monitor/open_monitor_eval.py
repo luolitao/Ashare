@@ -323,6 +323,11 @@ class OpenMonitorEvaluator:
         resonance_pairs = _normalize_pairs(getattr(self.params, "strategy_resonance_pairs", None))
         if not resonance_pairs:
             resonance_pairs = [("ma5_ma20_trend", "low_suck_reversal")]
+        max_veto_age = getattr(self.params, "wyckoff_veto_max_age_days", None)
+        try:
+            max_veto_age = int(max_veto_age) if max_veto_age is not None else None
+        except Exception:
+            max_veto_age = None
 
         # 按 (sig_date, code) 分组
         # 注意：这里假设 sig_date 已经是 datetime 或统一格式
@@ -348,6 +353,7 @@ class OpenMonitorEvaluator:
             
             # 2. 收集各方意见
             sig_map: dict[str, str] = {}
+            sig_age_map: dict[str, float | None] = {}
             
             # 遍历 group 收集信息
             reasons = []
@@ -370,6 +376,7 @@ class OpenMonitorEvaluator:
                 
                 if s_code:
                     sig_map[s_code] = sig
+                    sig_age_map[s_code] = _to_float(r.get("signal_age"))
             
             # 3. 仲裁逻辑 (Arbitration Logic)
             final_signal = row.get("sig_signal")
@@ -377,6 +384,13 @@ class OpenMonitorEvaluator:
             veto_hit = None
             for s_code, veto_signals in veto_map.items():
                 if sig_map.get(s_code) in veto_signals:
+                    if (
+                        s_code == "wyckoff_distribution"
+                        and max_veto_age is not None
+                        and sig_age_map.get(s_code) is not None
+                        and sig_age_map.get(s_code) > max_veto_age
+                    ):
+                        continue
                     veto_hit = s_code
                     break
 

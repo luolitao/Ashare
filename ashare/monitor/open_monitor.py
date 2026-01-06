@@ -82,6 +82,7 @@ class OpenMonitorParams:
     strategy_veto_signals: dict[str, list[str]] = field(default_factory=dict)
     strategy_promote_buy: list[str] = field(default_factory=list)
     strategy_resonance_pairs: list[list[str]] = field(default_factory=list)
+    wyckoff_veto_max_age_days: int | None = 3
 
     # 输出表：开盘检查结果
     output_table: str = TABLE_STRATEGY_OPEN_MONITOR_EVAL

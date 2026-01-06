@@ -152,6 +152,11 @@ class TechnicalIndicatorService:
         df["ret_10"] = g_close.pct_change(10)
         df["ret_20"] = g_close.pct_change(20)
         
+        # --- 新增：长期涨幅 (RPS 基础) ---
+        df["ret_50"] = g_close.pct_change(50)
+        df["ret_120"] = g_close.pct_change(120)
+        df["ret_250"] = g_close.pct_change(250)
+        
         # 简单的涨停统计 (假设 9.9% 以上算涨停)
         df["is_limit_up"] = df["ret_1"] >= 0.099
         df["limit_up_cnt_20"] = df.groupby("code")["is_limit_up"].rolling(20, min_periods=1).sum().reset_index(level=0, drop=True)

@@ -16,7 +16,7 @@ app:
   # 近期自然日视图窗口
   history_view_days: 45
   # 流动性排序时保留的股票数量
-  top_liquidity_count: 100
+  top_liquidity_count: 300
   # 最少上市天数过滤阈值
   min_listing_days: 60
   # 是否刷新 Baostock 季频财务数据
@@ -98,6 +98,8 @@ strategy_ma5_ma20_trend:
   volume_ma_window: 5
   min_signals: 3
   min_signals_cap_scale: 0.5
+  min_daily_amount: 50000000
+  max_stock_price: 80.0
 
   pullback_band: 0.02
   near_ma20_band: 0.02
@@ -214,6 +216,7 @@ open_monitor:
   strategy_veto_signals:
     wyckoff_distribution:
       - SELL
+  wyckoff_veto_max_age_days: 3
       - RISK
   strategy_promote_buy:
     - low_suck_reversal

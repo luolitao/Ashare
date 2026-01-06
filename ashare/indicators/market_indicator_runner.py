@@ -73,6 +73,10 @@ class MarketIndicatorRunner:
         # 3. 执行计算
         df_indicators = self.tech_service.compute_all(df_k)
         
+        # --- 新增：计算欧奈尔 RPS (全市场排名) ---
+        # 必须在 compute_all 之后，因为需要 ret_50/120/250
+        df_indicators = self._compute_rps(df_indicators)
+        
         # 4. 批量写入 strategy_indicator_daily 表
         # 这里我们利用 strategy_store 现成的 write_indicator_daily 方法
         # 它的 scope="window" 会覆盖写入
@@ -83,6 +87,37 @@ class MarketIndicatorRunner:
             scope_override="window"
         )
         self.logger.info("全市场技术指标预计算完成，已入库 %s 条记录。", len(df_indicators))
+
+    def _compute_rps(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        计算欧奈尔 RPS (Relative Price Strength)。
+        原理：对同一天的 ret_N 进行百分位排名 (0-100)。
+        """
+        if df.empty:
+            return df
+            
+        windows = [50, 120, 250]
+        # 只需要计算存在的列
+        valid_windows = [w for w in windows if f"ret_{w}" in df.columns]
+        
+        if not valid_windows:
+            self.logger.warning("RPS 计算跳过：缺少 ret_N 列 (需在 compute_all 中开启)。")
+            return df
+            
+        # 按日期分组计算排名
+        # rank(pct=True) 返回 0.0-1.0，乘以 100 得到 0-100 分
+        for w in valid_windows:
+            col_name = f"ret_{w}"
+            rps_col = f"rps_{w}"
+            try:
+                # transform 保持索引对齐
+                df[rps_col] = df.groupby("date")[col_name].rank(pct=True, ascending=True) * 100
+                # 填充 NaN 为 0 (上市不足 N 天的票 RPS 为 0)
+                df[rps_col] = df[rps_col].fillna(0)
+            except Exception as e:
+                self.logger.warning(f"RPS_{w} 计算失败: {e}")
+        
+        return df
 
     def run_weekly_indicator(
         self,
