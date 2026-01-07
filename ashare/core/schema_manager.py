@@ -1504,7 +1504,7 @@ class SchemaManager:
                 "board_code": f"bd.`{board_code_col}`" if board_code_col else "NULL",
             }
 
-        field_exprs["is_liquidity"] = "CASE WHEN liq.`code` IS NOT NULL THEN 1 ELSE 0 END"
+        field_exprs["is_liquidity"] = "0"
 
         field_exprs.update(industry_fields)
         field_exprs.update(board_fields)
